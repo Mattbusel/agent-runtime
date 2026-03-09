@@ -239,11 +239,12 @@ impl GraphStore {
     fn neighbours<'a>(
         relationships: &'a [Relationship],
         id: &EntityId,
-    ) -> impl Iterator<Item = &'a EntityId> {
+    ) -> Vec<EntityId> {
         relationships
             .iter()
-            .filter(move |r| &r.from == id)
-            .map(|r| &r.to)
+            .filter(|r| &r.from == id)
+            .map(|r| r.to.clone())
+            .collect()
     }
 
     /// Breadth-first search starting from `start`.
@@ -270,9 +271,7 @@ impl GraphStore {
         queue.push_back(start.clone());
 
         while let Some(current) = queue.pop_front() {
-            let neighbours: Vec<EntityId> = Self::neighbours(&inner.relationships, &current)
-                .cloned()
-                .collect();
+            let neighbours: Vec<EntityId> = Self::neighbours(&inner.relationships, &current);
             for neighbour in neighbours {
                 if visited.insert(neighbour.clone()) {
                     result.push(neighbour.clone());
@@ -308,9 +307,7 @@ impl GraphStore {
         stack.push(start.clone());
 
         while let Some(current) = stack.pop() {
-            let neighbours: Vec<EntityId> = Self::neighbours(&inner.relationships, &current)
-                .cloned()
-                .collect();
+            let neighbours: Vec<EntityId> = Self::neighbours(&inner.relationships, &current);
             for neighbour in neighbours {
                 if visited.insert(neighbour.clone()) {
                     result.push(neighbour.clone());
@@ -366,9 +363,7 @@ impl GraphStore {
                 None => continue,
             };
 
-            let neighbours: Vec<EntityId> = Self::neighbours(&inner.relationships, &current)
-                .cloned()
-                .collect();
+            let neighbours: Vec<EntityId> = Self::neighbours(&inner.relationships, &current);
 
             for neighbour in neighbours {
                 if &neighbour == to {

@@ -63,7 +63,7 @@ impl RetryPolicy {
     /// Delay = `base_delay * 2^(attempt-1)`, capped at `MAX_RETRY_DELAY`.
     pub fn delay_for(&self, attempt: u32) -> Duration {
         let exp = attempt.saturating_sub(1);
-        let multiplier = 1u64.saturating_shl(exp.min(63) as u32);
+        let multiplier = 1u64.checked_shl(exp.min(63) as u32).unwrap_or(u64::MAX);
         let millis = self
             .base_delay
             .as_millis()
@@ -487,7 +487,7 @@ mod tests {
     #[test]
     fn test_circuit_breaker_success_keeps_closed() {
         let cb = CircuitBreaker::new("svc", 3, Duration::from_secs(60)).unwrap();
-        let result: Result<i32, AgentRuntimeError> = cb.call(|| Ok(42));
+        let result: Result<i32, AgentRuntimeError> = cb.call(|| Ok::<i32, AgentRuntimeError>(42));
         assert!(result.is_ok());
         assert_eq!(cb.state().unwrap(), CircuitState::Closed);
     }
@@ -506,7 +506,7 @@ mod tests {
     fn test_circuit_breaker_open_fast_fails() {
         let cb = CircuitBreaker::new("svc", 1, Duration::from_secs(3600)).unwrap();
         let _: Result<(), AgentRuntimeError> = cb.call(|| Err::<(), _>("fail".to_string()));
-        let result: Result<(), AgentRuntimeError> = cb.call(|| Ok(()));
+        let result: Result<(), AgentRuntimeError> = cb.call(|| Ok::<(), AgentRuntimeError>(()));
         assert!(matches!(result, Err(AgentRuntimeError::CircuitOpen { .. })));
     }
 
@@ -515,7 +515,7 @@ mod tests {
         let cb = CircuitBreaker::new("svc", 5, Duration::from_secs(60)).unwrap();
         let _: Result<(), AgentRuntimeError> = cb.call(|| Err::<(), _>("fail".to_string()));
         let _: Result<(), AgentRuntimeError> = cb.call(|| Err::<(), _>("fail".to_string()));
-        let _: Result<i32, AgentRuntimeError> = cb.call(|| Ok(1));
+        let _: Result<i32, AgentRuntimeError> = cb.call(|| Ok::<i32, AgentRuntimeError>(1));
         assert_eq!(cb.failure_count().unwrap(), 0);
     }
 
@@ -525,7 +525,7 @@ mod tests {
         let cb = CircuitBreaker::new("svc", 1, Duration::ZERO).unwrap();
         let _: Result<(), AgentRuntimeError> = cb.call(|| Err::<(), _>("fail".to_string()));
         // After recovery window, next call should probe (half-open → closed on success)
-        let result: Result<i32, AgentRuntimeError> = cb.call(|| Ok(99));
+        let result: Result<i32, AgentRuntimeError> = cb.call(|| Ok::<i32, AgentRuntimeError>(99));
         assert_eq!(result.unwrap_or(0), 99);
         assert_eq!(cb.state().unwrap(), CircuitState::Closed);
     }

@@ -213,6 +213,25 @@ impl EpisodicStore {
         Ok(id)
     }
 
+    /// Add an episode with an explicit timestamp.
+    pub fn add_episode_at(
+        &self,
+        agent_id: AgentId,
+        content: impl Into<String>,
+        importance: f32,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<MemoryId, AgentRuntimeError> {
+        let mut item = MemoryItem::new(agent_id, content, importance, Vec::new());
+        item.timestamp = timestamp;
+        let id = item.id.clone();
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| AgentRuntimeError::Memory(format!("lock poisoned: {e}")))?;
+        inner.items.push(item);
+        Ok(id)
+    }
+
     /// Recall up to `limit` memories for the given agent.
     ///
     /// Applies decay if configured, then returns items sorted by descending importance.

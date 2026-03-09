@@ -233,12 +233,12 @@ fn integration_decay_policy_applied_to_episodic_store() {
     let agent = AgentId::new("decay-agent");
 
     // Insert an item backdated 2 hours → should have ~25% of original importance
-    {
-        let mut inner = store.inner.lock().unwrap();
-        let mut item = MemoryItem::new(agent.clone(), "old fact", 1.0, vec![]);
-        item.timestamp = chrono::Utc::now() - chrono::Duration::hours(2);
-        inner.items.push(item);
-    }
+    store.add_episode_at(
+        agent.clone(),
+        "old fact",
+        1.0,
+        chrono::Utc::now() - chrono::Duration::hours(2),
+    ).unwrap();
 
     let items = store.recall(&agent, 10).unwrap();
     assert_eq!(items.len(), 1);
@@ -263,7 +263,7 @@ fn integration_graph_error_wraps_in_runtime_error() {
 fn integration_orchestration_circuit_open_error_variant() {
     let cb = CircuitBreaker::new("svc", 1, std::time::Duration::from_secs(3600)).unwrap();
     let _: Result<(), _> = cb.call(|| Err::<(), _>("fail".to_string()));
-    let result: Result<(), _> = cb.call(|| Ok(()));
+    let result: Result<(), AgentRuntimeError> = cb.call(|| Ok::<(), String>(()));
     assert!(matches!(result, Err(AgentRuntimeError::CircuitOpen { .. })));
 }
 

@@ -1,0 +1,14 @@
+C:\Users\Matthew\agent-runtime\target/agent-1773088108\debug\deps\serde-5da2ac79e803fa98.d: C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\Matthew\agent-runtime\target/agent-1773088108\debug\build\serde-eb917dd564a7a0e2\out/private.rs
+
+C:\Users\Matthew\agent-runtime\target/agent-1773088108\debug\deps\libserde-5da2ac79e803fa98.rlib: C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\Matthew\agent-runtime\target/agent-1773088108\debug\build\serde-eb917dd564a7a0e2\out/private.rs
+
+C:\Users\Matthew\agent-runtime\target/agent-1773088108\debug\deps\libserde-5da2ac79e803fa98.rmeta: C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\Matthew\agent-runtime\target/agent-1773088108\debug\build\serde-eb917dd564a7a0e2\out/private.rs
+
+C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs:
+C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs:
+C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs:
+C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs:
+C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs:
+C:\Users\Matthew\agent-runtime\target/agent-1773088108\debug\build\serde-eb917dd564a7a0e2\out/private.rs:
+
+# env-dep:OUT_DIR=C:\\Users\\Matthew\\agent-runtime\\target/agent-1773088108\\debug\\build\\serde-eb917dd564a7a0e2\\out

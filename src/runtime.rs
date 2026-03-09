@@ -159,7 +159,7 @@ impl AgentRuntime {
         &self,
         agent_id: AgentId,
         prompt: &str,
-        infer: impl Fn(&str) -> String,
+        mut infer: impl FnMut(&str) -> String,
     ) -> Result<AgentSession, AgentRuntimeError> {
         let start = Instant::now();
 

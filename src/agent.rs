@@ -232,7 +232,7 @@ impl ReActLoop {
     pub fn run(
         &self,
         prompt: &str,
-        infer: impl Fn(&str) -> String,
+        mut infer: impl FnMut(&str) -> String,
     ) -> Result<Vec<ReActStep>, AgentRuntimeError> {
         let mut steps: Vec<ReActStep> = Vec::new();
         let mut context = format!(
