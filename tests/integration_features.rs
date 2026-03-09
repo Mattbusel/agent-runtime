@@ -11,10 +11,14 @@ fn integration_memory_and_graph_coexist_in_runtime() {
 
     graph.add_entity(Entity::new("rust", "Language")).unwrap();
     graph.add_entity(Entity::new("tokio", "Runtime")).unwrap();
-    graph.add_relationship(Relationship::new("tokio", "rust", "IMPLEMENTED_IN", 1.0)).unwrap();
+    graph
+        .add_relationship(Relationship::new("tokio", "rust", "IMPLEMENTED_IN", 1.0))
+        .unwrap();
 
     let agent = AgentId::new("cross-agent");
-    store.add_episode(agent.clone(), "Rust is fast", 0.9).unwrap();
+    store
+        .add_episode(agent.clone(), "Rust is fast", 0.9)
+        .unwrap();
 
     let runtime = AgentRuntime::builder()
         .with_agent_config(AgentConfig::new(5, "model"))
@@ -23,9 +27,11 @@ fn integration_memory_and_graph_coexist_in_runtime() {
         .build()
         .unwrap();
 
-    let session = runtime.run_agent(agent, "what do you know?", |_| {
-        "Thought: done\nAction: FINAL_ANSWER ok".into()
-    }).unwrap();
+    let session = runtime
+        .run_agent(agent, "what do you know?", |_| {
+            "Thought: done\nAction: FINAL_ANSWER ok".into()
+        })
+        .unwrap();
 
     assert_eq!(session.memory_hits, 1);
     assert_eq!(session.graph_lookups, 2);
@@ -71,7 +77,9 @@ fn integration_deduplicator_caches_across_complete() {
     let r1 = dedup.check_and_register("prompt-hash-abc").unwrap();
     assert_eq!(r1, DeduplicationResult::New);
 
-    dedup.complete("prompt-hash-abc", "cached-response").unwrap();
+    dedup
+        .complete("prompt-hash-abc", "cached-response")
+        .unwrap();
 
     let r2 = dedup.check_and_register("prompt-hash-abc").unwrap();
     assert_eq!(r2, DeduplicationResult::Cached("cached-response".into()));
@@ -104,14 +112,16 @@ fn integration_react_loop_tool_chain() {
     }));
 
     let mut count = 0;
-    let steps = loop_.run("execute pipeline", move |_| {
-        count += 1;
-        match count {
-            1 => "Thought: run step1\nAction: step1 {}".into(),
-            2 => "Thought: run step2\nAction: step2 {}".into(),
-            _ => "Thought: complete\nAction: FINAL_ANSWER done".into(),
-        }
-    }).unwrap();
+    let steps = loop_
+        .run("execute pipeline", move |_| {
+            count += 1;
+            match count {
+                1 => "Thought: run step1\nAction: step1 {}".into(),
+                2 => "Thought: run step2\nAction: step2 {}".into(),
+                _ => "Thought: complete\nAction: FINAL_ANSWER done".into(),
+            }
+        })
+        .unwrap();
 
     assert_eq!(steps.len(), 3); // 2 tool calls + final answer
 }
@@ -127,15 +137,18 @@ fn integration_react_loop_with_json_tool_args() {
     }));
 
     let mut count = 0;
-    let steps = loop_.run("double 21", move |_| {
-        count += 1;
-        if count == 1 {
-            r#"Thought: call calc
-Action: calc {"n":21}"#.into()
-        } else {
-            "Thought: done\nAction: FINAL_ANSWER 42".into()
-        }
-    }).unwrap();
+    let steps = loop_
+        .run("double 21", move |_| {
+            count += 1;
+            if count == 1 {
+                r#"Thought: call calc
+Action: calc {"n":21}"#
+                    .into()
+            } else {
+                "Thought: done\nAction: FINAL_ANSWER 42".into()
+            }
+        })
+        .unwrap();
 
     assert!(steps[0].observation.contains("42"));
 }
@@ -165,10 +178,18 @@ fn integration_graph_bfs_finds_multi_hop_paths() {
     for id in ["a", "b", "c", "d", "e"] {
         graph.add_entity(Entity::new(id, "Node")).unwrap();
     }
-    graph.add_relationship(Relationship::new("a", "b", "→", 1.0)).unwrap();
-    graph.add_relationship(Relationship::new("b", "c", "→", 1.0)).unwrap();
-    graph.add_relationship(Relationship::new("c", "d", "→", 1.0)).unwrap();
-    graph.add_relationship(Relationship::new("a", "e", "→", 1.0)).unwrap();
+    graph
+        .add_relationship(Relationship::new("a", "b", "→", 1.0))
+        .unwrap();
+    graph
+        .add_relationship(Relationship::new("b", "c", "→", 1.0))
+        .unwrap();
+    graph
+        .add_relationship(Relationship::new("c", "d", "→", 1.0))
+        .unwrap();
+    graph
+        .add_relationship(Relationship::new("a", "e", "→", 1.0))
+        .unwrap();
 
     let visited = graph.bfs(&EntityId::new("a")).unwrap();
     assert_eq!(visited.len(), 4);
@@ -183,13 +204,24 @@ fn integration_graph_shortest_path_prefers_fewer_hops() {
         graph.add_entity(Entity::new(id, "Node")).unwrap();
     }
     // Long path: a -> b -> c -> d
-    graph.add_relationship(Relationship::new("a", "b", "→", 1.0)).unwrap();
-    graph.add_relationship(Relationship::new("b", "c", "→", 1.0)).unwrap();
-    graph.add_relationship(Relationship::new("c", "d", "→", 1.0)).unwrap();
+    graph
+        .add_relationship(Relationship::new("a", "b", "→", 1.0))
+        .unwrap();
+    graph
+        .add_relationship(Relationship::new("b", "c", "→", 1.0))
+        .unwrap();
+    graph
+        .add_relationship(Relationship::new("c", "d", "→", 1.0))
+        .unwrap();
     // Short path: a -> d
-    graph.add_relationship(Relationship::new("a", "d", "→", 1.0)).unwrap();
+    graph
+        .add_relationship(Relationship::new("a", "d", "→", 1.0))
+        .unwrap();
 
-    let path = graph.shortest_path(&EntityId::new("a"), &EntityId::new("d")).unwrap().unwrap();
+    let path = graph
+        .shortest_path(&EntityId::new("a"), &EntityId::new("d"))
+        .unwrap()
+        .unwrap();
     assert_eq!(path.len(), 2); // [a, d]
 }
 
@@ -199,9 +231,15 @@ fn integration_graph_transitive_closure_full_chain() {
     for id in ["a", "b", "c", "d"] {
         graph.add_entity(Entity::new(id, "Node")).unwrap();
     }
-    graph.add_relationship(Relationship::new("a", "b", "→", 1.0)).unwrap();
-    graph.add_relationship(Relationship::new("b", "c", "→", 1.0)).unwrap();
-    graph.add_relationship(Relationship::new("c", "d", "→", 1.0)).unwrap();
+    graph
+        .add_relationship(Relationship::new("a", "b", "→", 1.0))
+        .unwrap();
+    graph
+        .add_relationship(Relationship::new("b", "c", "→", 1.0))
+        .unwrap();
+    graph
+        .add_relationship(Relationship::new("c", "d", "→", 1.0))
+        .unwrap();
 
     let closure = graph.transitive_closure(&EntityId::new("a")).unwrap();
     assert_eq!(closure.len(), 4); // a, b, c, d
@@ -212,9 +250,19 @@ fn integration_graph_transitive_closure_full_chain() {
 #[test]
 fn integration_semantic_store_multi_tag_search() {
     let store = SemanticStore::new();
-    store.store("doc1", "Rust async", vec!["rust".into(), "async".into(), "tokio".into()]).unwrap();
-    store.store("doc2", "Python sync", vec!["python".into(), "sync".into()]).unwrap();
-    store.store("doc3", "Rust sync", vec!["rust".into(), "sync".into()]).unwrap();
+    store
+        .store(
+            "doc1",
+            "Rust async",
+            vec!["rust".into(), "async".into(), "tokio".into()],
+        )
+        .unwrap();
+    store
+        .store("doc2", "Python sync", vec!["python".into(), "sync".into()])
+        .unwrap();
+    store
+        .store("doc3", "Rust sync", vec!["rust".into(), "sync".into()])
+        .unwrap();
 
     let rust_only = store.retrieve(&["rust"]).unwrap();
     assert_eq!(rust_only.len(), 2);
@@ -233,12 +281,14 @@ fn integration_decay_policy_applied_to_episodic_store() {
     let agent = AgentId::new("decay-agent");
 
     // Insert an item backdated 2 hours → should have ~25% of original importance
-    store.add_episode_at(
-        agent.clone(),
-        "old fact",
-        1.0,
-        chrono::Utc::now() - chrono::Duration::hours(2),
-    ).unwrap();
+    store
+        .add_episode_at(
+            agent.clone(),
+            "old fact",
+            1.0,
+            chrono::Utc::now() - chrono::Duration::hours(2),
+        )
+        .unwrap();
 
     let items = store.recall(&agent, 10).unwrap();
     assert_eq!(items.len(), 1);

@@ -259,7 +259,11 @@ impl EpisodicStore {
             .cloned()
             .collect();
 
-        items.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
+        items.sort_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         items.truncate(limit);
         Ok(items)
     }
@@ -417,7 +421,11 @@ impl WorkingMemory {
     }
 
     /// Insert or update a key-value pair, evicting the oldest entry if over capacity.
-    pub fn set(&self, key: impl Into<String>, value: impl Into<String>) -> Result<(), AgentRuntimeError> {
+    pub fn set(
+        &self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<(), AgentRuntimeError> {
         let key = key.into();
         let value = value.into();
         let mut inner = self
@@ -586,7 +594,9 @@ mod tests {
     fn test_episodic_store_recall_returns_stored_item() {
         let store = EpisodicStore::new();
         let agent = AgentId::new("agent-1");
-        store.add_episode(agent.clone(), "hello world", 0.9).unwrap();
+        store
+            .add_episode(agent.clone(), "hello world", 0.9)
+            .unwrap();
         let items = store.recall(&agent, 10).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].content, "hello world");
@@ -622,7 +632,9 @@ mod tests {
         let store = EpisodicStore::new();
         let agent = AgentId::new("agent-1");
         for i in 0..5 {
-            store.add_episode(agent.clone(), format!("item {i}"), 0.5).unwrap();
+            store
+                .add_episode(agent.clone(), format!("item {i}"), 0.5)
+                .unwrap();
         }
         let items = store.recall(&agent, 3).unwrap();
         assert_eq!(items.len(), 3);
@@ -661,7 +673,11 @@ mod tests {
         let items = store.recall(&agent, 10).unwrap();
         // With half_life=0.001h and age=1h, importance should be near 0
         assert_eq!(items.len(), 1);
-        assert!(items[0].importance < 0.01, "expected near-zero importance, got {}", items[0].importance);
+        assert!(
+            items[0].importance < 0.01,
+            "expected near-zero importance, got {}",
+            items[0].importance
+        );
     }
 
     // ── SemanticStore ─────────────────────────────────────────────────────────
@@ -678,7 +694,9 @@ mod tests {
     #[test]
     fn test_semantic_store_retrieve_filters_by_tag() {
         let store = SemanticStore::new();
-        store.store("k1", "v1", vec!["rust".into(), "async".into()]).unwrap();
+        store
+            .store("k1", "v1", vec!["rust".into(), "async".into()])
+            .unwrap();
         store.store("k2", "v2", vec!["rust".into()]).unwrap();
         let results = store.retrieve(&["async"]).unwrap();
         assert_eq!(results.len(), 1);
@@ -688,7 +706,9 @@ mod tests {
     #[test]
     fn test_semantic_store_retrieve_requires_all_tags() {
         let store = SemanticStore::new();
-        store.store("k1", "v1", vec!["a".into(), "b".into()]).unwrap();
+        store
+            .store("k1", "v1", vec!["a".into(), "b".into()])
+            .unwrap();
         store.store("k2", "v2", vec!["a".into()]).unwrap();
         let results = store.retrieve(&["a", "b"]).unwrap();
         assert_eq!(results.len(), 1);

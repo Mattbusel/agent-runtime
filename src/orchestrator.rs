@@ -177,10 +177,9 @@ impl CircuitBreaker {
                 Ok(val)
             }
             Err(e) => {
-                let mut inner = self
-                    .inner
-                    .lock()
-                    .map_err(|e2| AgentRuntimeError::Orchestration(format!("lock poisoned: {e2}")))?;
+                let mut inner = self.inner.lock().map_err(|e2| {
+                    AgentRuntimeError::Orchestration(format!("lock poisoned: {e2}"))
+                })?;
                 inner.consecutive_failures += 1;
                 if inner.consecutive_failures >= inner.threshold {
                     inner.state = CircuitState::Open {
@@ -238,8 +237,8 @@ pub struct Deduplicator {
 
 #[derive(Debug)]
 struct DeduplicatorInner {
-    cache: HashMap<String, (String, Instant)>,       // key → (result, inserted_at)
-    in_flight: HashMap<String, Instant>,              // key → started_at
+    cache: HashMap<String, (String, Instant)>, // key → (result, inserted_at)
+    in_flight: HashMap<String, Instant>,       // key → started_at
 }
 
 impl Deduplicator {
@@ -266,8 +265,12 @@ impl Deduplicator {
         let now = Instant::now();
 
         // Expire stale cache entries
-        inner.cache.retain(|_, (_, ts)| now.duration_since(*ts) < self.ttl);
-        inner.in_flight.retain(|_, ts| now.duration_since(*ts) < self.ttl);
+        inner
+            .cache
+            .retain(|_, (_, ts)| now.duration_since(*ts) < self.ttl);
+        inner
+            .in_flight
+            .retain(|_, ts| now.duration_since(*ts) < self.ttl);
 
         if let Some((result, _)) = inner.cache.get(key) {
             return Ok(DeduplicationResult::Cached(result.clone()));
@@ -288,7 +291,9 @@ impl Deduplicator {
             .lock()
             .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
         inner.in_flight.remove(key);
-        inner.cache.insert(key.to_owned(), (result.into(), Instant::now()));
+        inner
+            .cache
+            .insert(key.to_owned(), (result.into(), Instant::now()));
         Ok(())
     }
 }
@@ -496,8 +501,7 @@ mod tests {
     fn test_circuit_breaker_opens_after_threshold_failures() {
         let cb = CircuitBreaker::new("svc", 3, Duration::from_secs(60)).unwrap();
         for _ in 0..3 {
-            let _: Result<(), AgentRuntimeError> =
-                cb.call(|| Err::<(), _>("oops".to_string()));
+            let _: Result<(), AgentRuntimeError> = cb.call(|| Err::<(), _>("oops".to_string()));
         }
         assert!(matches!(cb.state().unwrap(), CircuitState::Open { .. }));
     }
@@ -594,7 +598,10 @@ mod tests {
         g.try_acquire().unwrap();
         g.try_acquire().unwrap();
         let result = g.try_acquire();
-        assert!(matches!(result, Err(AgentRuntimeError::BackpressureShed { .. })));
+        assert!(matches!(
+            result,
+            Err(AgentRuntimeError::BackpressureShed { .. })
+        ));
     }
 
     #[test]
@@ -633,7 +640,9 @@ mod tests {
     #[test]
     fn test_pipeline_stage_failure_short_circuits() {
         let p = Pipeline::new()
-            .add_stage("fail", |_| Err(AgentRuntimeError::Orchestration("boom".into())))
+            .add_stage("fail", |_| {
+                Err(AgentRuntimeError::Orchestration("boom".into()))
+            })
             .add_stage("never", |s| Ok(s));
         assert!(p.run("input".into()).is_err());
     }

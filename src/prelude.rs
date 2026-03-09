@@ -23,6 +23,6 @@ pub use crate::orchestrator::{
 
 #[cfg(feature = "wasm")]
 pub use crate::agent::{
-    AgentConfig, AgentError, Message, ReActLoop, ReActStep, Role, ToolRegistry, ToolSpec,
-    parse_react_step,
+    parse_react_step, AgentConfig, AgentError, Message, ReActLoop, ReActStep, Role, ToolRegistry,
+    ToolSpec,
 };

@@ -82,19 +82,29 @@ mod tests {
 
     #[test]
     fn test_circuit_open_error_display() {
-        let e = AgentRuntimeError::CircuitOpen { service: "llm-api".into() };
+        let e = AgentRuntimeError::CircuitOpen {
+            service: "llm-api".into(),
+        };
         assert_eq!(e.to_string(), "Circuit breaker open for 'llm-api'");
     }
 
     #[test]
     fn test_backpressure_shed_error_display() {
-        let e = AgentRuntimeError::BackpressureShed { depth: 100, capacity: 100 };
-        assert_eq!(e.to_string(), "Backpressure threshold exceeded: queue depth 100/100");
+        let e = AgentRuntimeError::BackpressureShed {
+            depth: 100,
+            capacity: 100,
+        };
+        assert_eq!(
+            e.to_string(),
+            "Backpressure threshold exceeded: queue depth 100/100"
+        );
     }
 
     #[test]
     fn test_deduplication_conflict_display() {
-        let e = AgentRuntimeError::DeduplicationConflict { key: "abc123".into() };
+        let e = AgentRuntimeError::DeduplicationConflict {
+            key: "abc123".into(),
+        };
         assert_eq!(e.to_string(), "Deduplication key collision: abc123");
     }
 

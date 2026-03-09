@@ -236,10 +236,7 @@ impl GraphStore {
     }
 
     /// Return all direct neighbours of the given entity (BFS layer 1).
-    fn neighbours<'a>(
-        relationships: &'a [Relationship],
-        id: &EntityId,
-    ) -> Vec<EntityId> {
+    fn neighbours<'a>(relationships: &'a [Relationship], id: &EntityId) -> Vec<EntityId> {
         relationships
             .iter()
             .filter(|r| &r.from == id)
@@ -433,7 +430,8 @@ mod tests {
     }
 
     fn link(g: &GraphStore, from: &str, to: &str) {
-        g.add_relationship(Relationship::new(from, to, "CONNECTS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new(from, to, "CONNECTS", 1.0))
+            .unwrap();
     }
 
     // ── EntityId ──────────────────────────────────────────────────────────────
@@ -536,7 +534,9 @@ mod tests {
     #[test]
     fn test_bfs_finds_direct_neighbours() {
         let g = make_graph();
-        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        add(&g, "a");
+        add(&g, "b");
+        add(&g, "c");
         link(&g, "a", "b");
         link(&g, "a", "c");
         let visited = g.bfs(&EntityId::new("a")).unwrap();
@@ -546,8 +546,13 @@ mod tests {
     #[test]
     fn test_bfs_traverses_chain() {
         let g = make_graph();
-        add(&g, "a"); add(&g, "b"); add(&g, "c"); add(&g, "d");
-        link(&g, "a", "b"); link(&g, "b", "c"); link(&g, "c", "d");
+        add(&g, "a");
+        add(&g, "b");
+        add(&g, "c");
+        add(&g, "d");
+        link(&g, "a", "b");
+        link(&g, "b", "c");
+        link(&g, "c", "d");
         let visited = g.bfs(&EntityId::new("a")).unwrap();
         assert_eq!(visited.len(), 3);
         assert_eq!(visited[0], EntityId::new("b"));
@@ -572,8 +577,13 @@ mod tests {
     #[test]
     fn test_dfs_visits_all_reachable_nodes() {
         let g = make_graph();
-        add(&g, "a"); add(&g, "b"); add(&g, "c"); add(&g, "d");
-        link(&g, "a", "b"); link(&g, "a", "c"); link(&g, "b", "d");
+        add(&g, "a");
+        add(&g, "b");
+        add(&g, "c");
+        add(&g, "d");
+        link(&g, "a", "b");
+        link(&g, "a", "c");
+        link(&g, "b", "d");
         let visited = g.dfs(&EntityId::new("a")).unwrap();
         assert_eq!(visited.len(), 3);
     }
@@ -597,26 +607,37 @@ mod tests {
     #[test]
     fn test_shortest_path_direct_connection() {
         let g = make_graph();
-        add(&g, "a"); add(&g, "b");
+        add(&g, "a");
+        add(&g, "b");
         link(&g, "a", "b");
-        let path = g.shortest_path(&EntityId::new("a"), &EntityId::new("b")).unwrap();
+        let path = g
+            .shortest_path(&EntityId::new("a"), &EntityId::new("b"))
+            .unwrap();
         assert_eq!(path, Some(vec![EntityId::new("a"), EntityId::new("b")]));
     }
 
     #[test]
     fn test_shortest_path_multi_hop() {
         let g = make_graph();
-        add(&g, "a"); add(&g, "b"); add(&g, "c");
-        link(&g, "a", "b"); link(&g, "b", "c");
-        let path = g.shortest_path(&EntityId::new("a"), &EntityId::new("c")).unwrap();
+        add(&g, "a");
+        add(&g, "b");
+        add(&g, "c");
+        link(&g, "a", "b");
+        link(&g, "b", "c");
+        let path = g
+            .shortest_path(&EntityId::new("a"), &EntityId::new("c"))
+            .unwrap();
         assert_eq!(path.as_ref().map(|p| p.len()), Some(3));
     }
 
     #[test]
     fn test_shortest_path_returns_none_for_disconnected() {
         let g = make_graph();
-        add(&g, "a"); add(&g, "b");
-        let path = g.shortest_path(&EntityId::new("a"), &EntityId::new("b")).unwrap();
+        add(&g, "a");
+        add(&g, "b");
+        let path = g
+            .shortest_path(&EntityId::new("a"), &EntityId::new("b"))
+            .unwrap();
         assert_eq!(path, None);
     }
 
@@ -624,7 +645,9 @@ mod tests {
     fn test_shortest_path_same_node_returns_single_element() {
         let g = make_graph();
         add(&g, "a");
-        let path = g.shortest_path(&EntityId::new("a"), &EntityId::new("a")).unwrap();
+        let path = g
+            .shortest_path(&EntityId::new("a"), &EntityId::new("a"))
+            .unwrap();
         assert_eq!(path, Some(vec![EntityId::new("a")]));
     }
 
@@ -632,14 +655,18 @@ mod tests {
     fn test_shortest_path_missing_source_returns_error() {
         let g = make_graph();
         add(&g, "b");
-        assert!(g.shortest_path(&EntityId::new("ghost"), &EntityId::new("b")).is_err());
+        assert!(g
+            .shortest_path(&EntityId::new("ghost"), &EntityId::new("b"))
+            .is_err());
     }
 
     #[test]
     fn test_shortest_path_missing_target_returns_error() {
         let g = make_graph();
         add(&g, "a");
-        assert!(g.shortest_path(&EntityId::new("a"), &EntityId::new("ghost")).is_err());
+        assert!(g
+            .shortest_path(&EntityId::new("a"), &EntityId::new("ghost"))
+            .is_err());
     }
 
     // ── Transitive closure ────────────────────────────────────────────────────
@@ -647,7 +674,8 @@ mod tests {
     #[test]
     fn test_transitive_closure_includes_start() {
         let g = make_graph();
-        add(&g, "a"); add(&g, "b");
+        add(&g, "a");
+        add(&g, "b");
         link(&g, "a", "b");
         let closure = g.transitive_closure(&EntityId::new("a")).unwrap();
         assert!(closure.contains(&EntityId::new("a")));

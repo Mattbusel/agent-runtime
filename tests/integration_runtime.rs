@@ -20,7 +20,10 @@ fn integration_builder_minimal_succeeds() {
 fn integration_builder_missing_agent_config_fails() {
     let result = AgentRuntime::builder().build();
     assert!(
-        matches!(result, Err(AgentRuntimeError::NotConfigured("agent_config"))),
+        matches!(
+            result,
+            Err(AgentRuntimeError::NotConfigured("agent_config"))
+        ),
         "should fail with NotConfigured"
     );
 }
@@ -116,14 +119,16 @@ fn integration_run_agent_multi_step_session() {
         .unwrap();
 
     let mut calls = 0;
-    let session = runtime.run_agent(AgentId::new("a"), "do stuff", move |_| {
-        calls += 1;
-        match calls {
-            1 => "Thought: step 1\nAction: echo {}".into(),
-            2 => "Thought: step 2\nAction: echo {}".into(),
-            _ => "Thought: done\nAction: FINAL_ANSWER finished".into(),
-        }
-    }).unwrap();
+    let session = runtime
+        .run_agent(AgentId::new("a"), "do stuff", move |_| {
+            calls += 1;
+            match calls {
+                1 => "Thought: step 1\nAction: echo {}".into(),
+                2 => "Thought: step 2\nAction: echo {}".into(),
+                _ => "Thought: done\nAction: FINAL_ANSWER finished".into(),
+            }
+        })
+        .unwrap();
 
     assert!(session.step_count() >= 2);
 }
@@ -140,7 +145,10 @@ fn integration_backpressure_sheds_when_at_capacity() {
         .unwrap();
 
     let result = runtime.run_agent(AgentId::new("a"), "prompt", final_infer);
-    assert!(matches!(result, Err(AgentRuntimeError::BackpressureShed { .. })));
+    assert!(matches!(
+        result,
+        Err(AgentRuntimeError::BackpressureShed { .. })
+    ));
 }
 
 #[test]
@@ -153,7 +161,9 @@ fn integration_backpressure_released_after_successful_run() {
         .build()
         .unwrap();
 
-    runtime.run_agent(AgentId::new("a"), "prompt", final_infer).unwrap();
+    runtime
+        .run_agent(AgentId::new("a"), "prompt", final_infer)
+        .unwrap();
     assert_eq!(guard.depth().unwrap(), 0);
 }
 
@@ -164,7 +174,9 @@ fn integration_session_duration_is_populated() {
         .build()
         .unwrap();
 
-    let session = runtime.run_agent(AgentId::new("a"), "hi", final_infer).unwrap();
+    let session = runtime
+        .run_agent(AgentId::new("a"), "hi", final_infer)
+        .unwrap();
     // duration_ms is u64, always >= 0. Just verify it was set (not a sentinel).
     let _duration: u64 = session.duration_ms;
 }
@@ -188,7 +200,9 @@ fn integration_max_iterations_error_returned() {
 fn integration_memory_enriches_prompt_context() {
     let store = EpisodicStore::new();
     let agent = AgentId::new("ctx-agent");
-    store.add_episode(agent.clone(), "the answer is 42", 0.9).unwrap();
+    store
+        .add_episode(agent.clone(), "the answer is 42", 0.9)
+        .unwrap();
 
     let runtime = AgentRuntime::builder()
         .with_agent_config(AgentConfig::new(5, "test"))
@@ -197,10 +211,12 @@ fn integration_memory_enriches_prompt_context() {
         .unwrap();
 
     let mut context_received = String::new();
-    runtime.run_agent(agent, "what is the answer?", |ctx| {
-        context_received = ctx.to_owned();
-        "Thought: done\nAction: FINAL_ANSWER answer".into()
-    }).unwrap();
+    runtime
+        .run_agent(agent, "what is the answer?", |ctx| {
+            context_received = ctx.to_owned();
+            "Thought: done\nAction: FINAL_ANSWER answer".into()
+        })
+        .unwrap();
 
     assert!(
         context_received.contains("the answer is 42"),

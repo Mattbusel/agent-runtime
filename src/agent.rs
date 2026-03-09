@@ -39,7 +39,10 @@ pub struct Message {
 
 impl Message {
     pub fn new(role: Role, content: impl Into<String>) -> Self {
-        Self { role, content: content.into() }
+        Self {
+            role,
+            content: content.into(),
+        }
     }
 }
 
@@ -134,7 +137,9 @@ pub struct ToolRegistry {
 impl ToolRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
-        Self { tools: HashMap::new() }
+        Self {
+            tools: HashMap::new(),
+        }
     }
 
     /// Register a tool. Overwrites any existing tool with the same name.
@@ -148,9 +153,10 @@ impl ToolRegistry {
     /// - `Ok(Value)` — tool result
     /// - `Err(AgentRuntimeError::AgentLoop)` — if the tool is not found
     pub fn call(&self, name: &str, args: Value) -> Result<Value, AgentRuntimeError> {
-        let spec = self.tools.get(name).ok_or_else(|| {
-            AgentRuntimeError::AgentLoop(format!("tool '{name}' not found"))
-        })?;
+        let spec = self
+            .tools
+            .get(name)
+            .ok_or_else(|| AgentRuntimeError::AgentLoop(format!("tool '{name}' not found")))?;
         Ok(spec.call(args))
     }
 
@@ -235,10 +241,7 @@ impl ReActLoop {
         mut infer: impl FnMut(&str) -> String,
     ) -> Result<Vec<ReActStep>, AgentRuntimeError> {
         let mut steps: Vec<ReActStep> = Vec::new();
-        let mut context = format!(
-            "{}\n\nUser: {}\n",
-            self.config.system_prompt, prompt
-        );
+        let mut context = format!("{}\n\nUser: {}\n", self.config.system_prompt, prompt);
 
         for _iteration in 0..self.config.max_iterations {
             let response = infer(&context);
@@ -406,14 +409,16 @@ mod tests {
         }));
 
         let mut call_count = 0;
-        let steps = loop_.run("Say hello", |_ctx| {
-            call_count += 1;
-            if call_count == 1 {
-                "Thought: I will greet\nAction: greet {}".into()
-            } else {
-                "Thought: done\nAction: FINAL_ANSWER done".into()
-            }
-        }).unwrap();
+        let steps = loop_
+            .run("Say hello", |_ctx| {
+                call_count += 1;
+                if call_count == 1 {
+                    "Thought: I will greet\nAction: greet {}".into()
+                } else {
+                    "Thought: done\nAction: FINAL_ANSWER done".into()
+                }
+            })
+            .unwrap();
 
         assert!(!steps.is_empty());
         assert_eq!(steps[0].thought, "I will greet");
@@ -425,9 +430,11 @@ mod tests {
         let cfg = AgentConfig::new(10, "model");
         let loop_ = ReActLoop::new(cfg);
 
-        let steps = loop_.run("prompt", |_| {
-            "Thought: done\nAction: FINAL_ANSWER 42".into()
-        }).unwrap();
+        let steps = loop_
+            .run("prompt", |_| {
+                "Thought: done\nAction: FINAL_ANSWER 42".into()
+            })
+            .unwrap();
 
         assert_eq!(steps.len(), 1);
     }
@@ -438,9 +445,7 @@ mod tests {
         let mut loop_ = ReActLoop::new(cfg);
         loop_.register_tool(ToolSpec::new("noop", "does nothing", |_| Value::Null));
 
-        let result = loop_.run("prompt", |_| {
-            "Thought: keep going\nAction: noop {}".into()
-        });
+        let result = loop_.run("prompt", |_| "Thought: keep going\nAction: noop {}".into());
 
         assert!(result.is_err());
         if let Err(AgentRuntimeError::AgentLoop(msg)) = result {
@@ -454,14 +459,16 @@ mod tests {
         let loop_ = ReActLoop::new(cfg);
 
         let mut count = 0;
-        let steps = loop_.run("prompt", |_| {
-            count += 1;
-            if count == 1 {
-                "Thought: try ghost\nAction: ghost {}".into()
-            } else {
-                "Thought: done\nAction: FINAL_ANSWER ok".into()
-            }
-        }).unwrap();
+        let steps = loop_
+            .run("prompt", |_| {
+                count += 1;
+                if count == 1 {
+                    "Thought: try ghost\nAction: ghost {}".into()
+                } else {
+                    "Thought: done\nAction: FINAL_ANSWER ok".into()
+                }
+            })
+            .unwrap();
 
         assert!(steps[0].observation.contains("Error"));
     }

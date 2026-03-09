@@ -273,8 +273,8 @@ impl AgentRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::EpisodicStore;
     use crate::graph::{Entity, GraphStore, Relationship};
+    use crate::memory::EpisodicStore;
 
     fn simple_config() -> AgentConfig {
         AgentConfig::new(5, "test")
@@ -289,7 +289,10 @@ mod tests {
     #[test]
     fn test_builder_fails_without_agent_config() {
         let result = AgentRuntime::builder().build();
-        assert!(matches!(result, Err(AgentRuntimeError::NotConfigured("agent_config"))));
+        assert!(matches!(
+            result,
+            Err(AgentRuntimeError::NotConfigured("agent_config"))
+        ));
     }
 
     #[test]
@@ -375,7 +378,9 @@ mod tests {
     fn test_run_agent_memory_hits_counts_recalled_items() {
         let store = EpisodicStore::new();
         let agent = AgentId::new("mem-agent");
-        store.add_episode(agent.clone(), "remembered fact", 0.8).unwrap();
+        store
+            .add_episode(agent.clone(), "remembered fact", 0.8)
+            .unwrap();
 
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
@@ -419,7 +424,9 @@ mod tests {
             .build()
             .unwrap();
 
-        runtime.run_agent(AgentId::new("a"), "prompt", final_answer_infer).unwrap();
+        runtime
+            .run_agent(AgentId::new("a"), "prompt", final_answer_infer)
+            .unwrap();
 
         assert_eq!(guard.depth().unwrap(), 0);
     }
@@ -436,7 +443,10 @@ mod tests {
             .unwrap();
 
         let result = runtime.run_agent(AgentId::new("a"), "prompt", final_answer_infer);
-        assert!(matches!(result, Err(AgentRuntimeError::BackpressureShed { .. })));
+        assert!(matches!(
+            result,
+            Err(AgentRuntimeError::BackpressureShed { .. })
+        ));
     }
 
     #[test]
@@ -463,8 +473,16 @@ mod tests {
         let session = AgentSession {
             agent_id: AgentId::new("a"),
             steps: vec![
-                ReActStep { thought: "t".into(), action: "a".into(), observation: "o".into() },
-                ReActStep { thought: "t2".into(), action: "FINAL_ANSWER".into(), observation: "done".into() },
+                ReActStep {
+                    thought: "t".into(),
+                    action: "a".into(),
+                    observation: "o".into(),
+                },
+                ReActStep {
+                    thought: "t2".into(),
+                    action: "FINAL_ANSWER".into(),
+                    observation: "done".into(),
+                },
             ],
             memory_hits: 0,
             graph_lookups: 0,
@@ -532,14 +550,16 @@ mod tests {
             .unwrap();
 
         let mut call_count = 0;
-        let session = runtime.run_agent(AgentId::new("a"), "compute", move |_| {
-            call_count += 1;
-            if call_count == 1 {
-                "Thought: use calc\nAction: calc {}".into()
-            } else {
-                "Thought: done\nAction: FINAL_ANSWER result".into()
-            }
-        }).unwrap();
+        let session = runtime
+            .run_agent(AgentId::new("a"), "compute", move |_| {
+                call_count += 1;
+                if call_count == 1 {
+                    "Thought: use calc\nAction: calc {}".into()
+                } else {
+                    "Thought: done\nAction: FINAL_ANSWER result".into()
+                }
+            })
+            .unwrap();
 
         assert!(session.step_count() >= 1);
     }
@@ -549,7 +569,9 @@ mod tests {
         let graph = GraphStore::new();
         graph.add_entity(Entity::new("a", "X")).unwrap();
         graph.add_entity(Entity::new("b", "Y")).unwrap();
-        graph.add_relationship(Relationship::new("a", "b", "LINKS", 1.0)).unwrap();
+        graph
+            .add_relationship(Relationship::new("a", "b", "LINKS", 1.0))
+            .unwrap();
 
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
