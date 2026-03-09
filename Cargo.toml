@@ -7,7 +7,7 @@ keywords = ["tokio", "agent", "llm", "memory", "runtime"]
 categories = ["asynchronous", "concurrency"]
 
 [features]
-default = ["orchestrator", "memory", "graph"]
+default = ["orchestrator", "memory", "graph", "wasm"]
 orchestrator = []   # tokio-prompt-orchestrator integration
 memory = []         # tokio-agent-memory integration
 graph = []          # mem-graph integration

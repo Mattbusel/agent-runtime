@@ -236,7 +236,7 @@ impl GraphStore {
     }
 
     /// Return all direct neighbours of the given entity (BFS layer 1).
-    fn neighbours<'a>(relationships: &'a [Relationship], id: &EntityId) -> Vec<EntityId> {
+    fn neighbours(relationships: &[Relationship], id: &EntityId) -> Vec<EntityId> {
         relationships
             .iter()
             .filter(|r| &r.from == id)

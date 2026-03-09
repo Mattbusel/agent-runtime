@@ -1,0 +1,11 @@
+C:\Users\Matthew\AppData\Local\Temp\fmt-fixes\agent-runtime\target\debug\deps\tokio_test-0fabd94f7c0e9ff6.d: C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\lib.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\io.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\stream_mock.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\macros.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\task.rs
+
+C:\Users\Matthew\AppData\Local\Temp\fmt-fixes\agent-runtime\target\debug\deps\libtokio_test-0fabd94f7c0e9ff6.rlib: C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\lib.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\io.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\stream_mock.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\macros.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\task.rs
+
+C:\Users\Matthew\AppData\Local\Temp\fmt-fixes\agent-runtime\target\debug\deps\libtokio_test-0fabd94f7c0e9ff6.rmeta: C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\lib.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\io.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\stream_mock.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\macros.rs C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\task.rs
+
+C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\lib.rs:
+C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\io.rs:
+C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\stream_mock.rs:
+C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\macros.rs:
+C:\Users\Matthew\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-test-0.4.5\src\task.rs:

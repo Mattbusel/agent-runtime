@@ -63,7 +63,7 @@ impl RetryPolicy {
     /// Delay = `base_delay * 2^(attempt-1)`, capped at `MAX_RETRY_DELAY`.
     pub fn delay_for(&self, attempt: u32) -> Duration {
         let exp = attempt.saturating_sub(1);
-        let multiplier = 1u64.checked_shl(exp.min(63) as u32).unwrap_or(u64::MAX);
+        let multiplier = 1u64.checked_shl(exp.min(63)).unwrap_or(u64::MAX);
         let millis = self
             .base_delay
             .as_millis()
