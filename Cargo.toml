@@ -1,0 +1,49 @@
+[package]
+name = "agent-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Unified Tokio agent runtime — orchestration, memory, knowledge graph, and ReAct loop in one crate"
+keywords = ["tokio", "agent", "llm", "memory", "runtime"]
+categories = ["asynchronous", "concurrency"]
+
+[features]
+default = ["orchestrator", "memory", "graph"]
+orchestrator = []   # tokio-prompt-orchestrator integration
+memory = []         # tokio-agent-memory integration
+graph = []          # mem-graph integration
+wasm = []           # wasm-agent ReAct loop
+full = ["orchestrator", "memory", "graph", "wasm"]
+
+[dependencies]
+# tokio: async runtime — core dependency, never remove
+tokio = { version = "1", features = ["full"] }
+
+# thiserror: zero-cost error derive — replaces manual Display impls
+thiserror = "1"
+
+# serde: serialization framework — needed for MemoryItem, Entity, AgentSession
+serde = { version = "1", features = ["derive"] }
+
+# serde_json: JSON value type used in graph properties and tool handlers
+serde_json = "1"
+
+# uuid: stable unique IDs for memory items, entities, sessions
+uuid = { version = "1", features = ["v4"] }
+
+# chrono: timestamps for memory items and session duration tracking
+chrono = { version = "0.4", features = ["serde"] }
+
+# tracing: structured async-aware logging
+tracing = "0.1"
+
+[dev-dependencies]
+# tokio-test: async test utilities
+tokio-test = "0.4"
+
+[lints.rust]
+# Enforce zero-panic production policy per CLAUDE.md
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
