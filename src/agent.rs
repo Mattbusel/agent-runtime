@@ -66,6 +66,9 @@ pub struct AgentConfig {
     pub model: String,
     /// System prompt injected at the start of the conversation.
     pub system_prompt: String,
+    /// Maximum number of episodic memories to inject into the prompt.
+    /// Keeping this small prevents silent token-budget overruns.  Default: 3.
+    pub max_memory_recalls: usize,
 }
 
 impl AgentConfig {
@@ -75,12 +78,19 @@ impl AgentConfig {
             max_iterations,
             model: model.into(),
             system_prompt: "You are a helpful AI agent.".into(),
+            max_memory_recalls: 3,
         }
     }
 
     /// Override the system prompt.
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = prompt.into();
+        self
+    }
+
+    /// Set the maximum number of episodic memories injected per run.
+    pub fn with_max_memory_recalls(mut self, n: usize) -> Self {
+        self.max_memory_recalls = n;
         self
     }
 }
@@ -248,8 +258,9 @@ impl ReActLoop {
 
             let mut step = parse_react_step(&response)?;
 
-            // Check for terminal action
-            if step.action.starts_with("FINAL_ANSWER") {
+            // Check for terminal action — case-insensitive so "Final Answer",
+            // "final_answer", etc. from LLM output drift all terminate cleanly.
+            if step.action.to_ascii_uppercase().starts_with("FINAL_ANSWER") {
                 step.observation = step.action.clone();
                 steps.push(step);
                 return Ok(steps);
@@ -257,9 +268,12 @@ impl ReActLoop {
 
             // Parse tool name and arguments
             let (tool_name, args) = parse_tool_call(&step.action);
+            // Wrap results so the model can distinguish a tool-level error
+            // (missing tool, panic recovery) from a successful result that
+            // happens to contain error information.
             let observation = match self.registry.call(&tool_name, args) {
-                Ok(result) => result.to_string(),
-                Err(e) => format!("Error: {e}"),
+                Ok(result) => serde_json::json!({ "ok": true, "data": result }).to_string(),
+                Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
             };
 
             step.observation = observation.clone();
@@ -470,7 +484,8 @@ mod tests {
             })
             .unwrap();
 
-        assert!(steps[0].observation.contains("Error"));
+        // Observation is now JSON: {"ok":false,"error":"..."}
+        assert!(steps[0].observation.contains("\"ok\":false") || steps[0].observation.contains("\"ok\": false"));
     }
 
     // ── AgentError conversion ─────────────────────────────────────────────────
@@ -492,5 +507,64 @@ mod tests {
         let e = AgentError::ToolNotFound("x".into());
         let re: AgentRuntimeError = e.into();
         assert!(matches!(re, AgentRuntimeError::AgentLoop(_)));
+    }
+
+    // ── Case-insensitive FINAL_ANSWER ─────────────────────────────────────────
+
+    #[test]
+    fn test_final_answer_case_insensitive_lower() {
+        let cfg = AgentConfig::new(5, "model");
+        let loop_ = ReActLoop::new(cfg);
+        let steps = loop_
+            .run("prompt", |_| "Thought: done\nAction: final_answer 42".into())
+            .unwrap();
+        assert_eq!(steps.len(), 1);
+    }
+
+    #[test]
+    fn test_final_answer_case_insensitive_mixed() {
+        let cfg = AgentConfig::new(5, "model");
+        let loop_ = ReActLoop::new(cfg);
+        let steps = loop_
+            .run("prompt", |_| "Thought: done\nAction: Final_Answer ok".into())
+            .unwrap();
+        assert_eq!(steps.len(), 1);
+    }
+
+    // ── Tool observation wrapping ─────────────────────────────────────────────
+
+    #[test]
+    fn test_successful_tool_observation_is_ok_json() {
+        let cfg = AgentConfig::new(5, "model");
+        let mut loop_ = ReActLoop::new(cfg);
+        loop_.register_tool(ToolSpec::new("ping", "returns pong", |_| {
+            Value::String("pong".into())
+        }));
+        let mut count = 0;
+        let steps = loop_
+            .run("prompt", |_| {
+                count += 1;
+                if count == 1 {
+                    "Thought: ping\nAction: ping {}".into()
+                } else {
+                    "Thought: done\nAction: FINAL_ANSWER ok".into()
+                }
+            })
+            .unwrap();
+        assert!(steps[0].observation.contains("\"ok\":true") || steps[0].observation.contains("\"ok\": true"));
+    }
+
+    // ── AgentConfig max_memory_recalls ────────────────────────────────────────
+
+    #[test]
+    fn test_agent_config_max_memory_recalls_default() {
+        let cfg = AgentConfig::new(5, "model");
+        assert_eq!(cfg.max_memory_recalls, 3);
+    }
+
+    #[test]
+    fn test_agent_config_with_max_memory_recalls() {
+        let cfg = AgentConfig::new(5, "model").with_max_memory_recalls(10);
+        assert_eq!(cfg.max_memory_recalls, 10);
     }
 }

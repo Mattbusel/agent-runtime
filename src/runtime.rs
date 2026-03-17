@@ -176,7 +176,7 @@ impl AgentRuntime {
 
             // Build enriched prompt from episodic memory
             let enriched_prompt = if let Some(ref store) = self.memory {
-                let memories = store.recall(&agent_id, 3)?;
+                let memories = store.recall(&agent_id, self.agent_config.max_memory_recalls)?;
                 memory_hits = memories.len();
                 if memories.is_empty() {
                     prompt.to_owned()
