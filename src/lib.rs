@@ -56,7 +56,6 @@ pub mod graph;
 #[cfg(feature = "orchestrator")]
 pub mod orchestrator;
 
-#[cfg(feature = "wasm")]
 pub mod agent;
 
 // ── Top-level re-exports ────────────────────────────────────────────────────
@@ -76,5 +75,4 @@ pub use graph::{Entity, EntityId, GraphStore, Relationship};
 #[cfg(feature = "orchestrator")]
 pub use orchestrator::{CircuitBreaker, Pipeline, RetryPolicy};
 
-#[cfg(feature = "wasm")]
 pub use agent::{AgentConfig, ReActLoop, ReActStep, ToolSpec};

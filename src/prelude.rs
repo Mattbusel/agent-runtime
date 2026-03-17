@@ -21,7 +21,6 @@ pub use crate::orchestrator::{
     RetryPolicy, MAX_RETRY_DELAY,
 };
 
-#[cfg(feature = "wasm")]
 pub use crate::agent::{
     parse_react_step, AgentConfig, AgentError, Message, ReActLoop, ReActStep, Role, ToolRegistry,
     ToolSpec,

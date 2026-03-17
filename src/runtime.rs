@@ -163,83 +163,65 @@ impl AgentRuntime {
     ) -> Result<AgentSession, AgentRuntimeError> {
         let start = Instant::now();
 
-        // Backpressure check
+        // Backpressure check — acquire before any work, release on all exit paths.
         if let Some(ref guard) = self.backpressure {
             guard.try_acquire()?;
         }
 
-        let mut memory_hits = 0usize;
-        let mut graph_lookups = 0usize;
+        // Run all inner logic inside a closure so we can unconditionally release
+        // the backpressure slot regardless of whether the inner work succeeds.
+        let outcome: Result<(Vec<ReActStep>, usize, usize), AgentRuntimeError> = (|| {
+            let mut memory_hits = 0usize;
+            let mut graph_lookups = 0usize;
 
-        // Build enriched prompt from episodic memory
-        let enriched_prompt = if let Some(ref store) = self.memory {
-            let memories = store.recall(&agent_id, 3)?;
-            memory_hits = memories.len();
-            if memories.is_empty() {
-                prompt.to_owned()
+            // Build enriched prompt from episodic memory
+            let enriched_prompt = if let Some(ref store) = self.memory {
+                let memories = store.recall(&agent_id, 3)?;
+                memory_hits = memories.len();
+                if memories.is_empty() {
+                    prompt.to_owned()
+                } else {
+                    let mem_context: Vec<String> = memories
+                        .iter()
+                        .map(|m| format!("- {}", m.content))
+                        .collect();
+                    format!(
+                        "Relevant memories:\n{}\n\nCurrent prompt: {prompt}",
+                        mem_context.join("\n")
+                    )
+                }
             } else {
-                let mem_context: Vec<String> = memories
-                    .iter()
-                    .map(|m| format!("- {}", m.content))
-                    .collect();
-                format!(
-                    "Relevant memories:\n{}\n\nCurrent prompt: {prompt}",
-                    mem_context.join("\n")
-                )
+                prompt.to_owned()
+            };
+
+            // Count graph entities as "lookups" for session metadata
+            if let Some(ref graph) = self.graph {
+                graph_lookups = graph.entity_count()?;
             }
-        } else {
-            prompt.to_owned()
-        };
 
-        // Count graph entities as "lookups" for session metadata
-        if let Some(ref graph) = self.graph {
-            graph_lookups = graph.entity_count()?;
-        }
+            // Build the ReAct loop and register tools
+            let mut react_loop = ReActLoop::new(self.agent_config.clone());
+            for tool in &self.tools {
+                let tool_name = tool.name.clone();
+                react_loop.register_tool(ToolSpec::new(
+                    tool_name.clone(),
+                    tool.description.clone(),
+                    move |args| {
+                        serde_json::json!({ "tool": tool_name, "args": args, "status": "dispatched" })
+                    },
+                ));
+            }
 
-        // Build the ReAct loop
-        let mut react_loop = ReActLoop::new(self.agent_config.clone());
+            let steps = react_loop.run(&enriched_prompt, infer)?;
+            Ok((steps, memory_hits, graph_lookups))
+        })();
 
-        // Register all configured tools (we can't move out of &self, so we call
-        // handler via a stored description string — tools are re-registered per run
-        // via the builder's tool list which holds the actual closures)
-        // Note: tools are consumed once; for a production system they'd be Arc'd.
-        // Here we register a passthrough for each tool name so the loop can call them.
-        for tool in &self.tools {
-            // We can't clone Box<dyn Fn>, so we register a noop that echoes the name.
-            // Real tools are supplied at build time and the handler is accessible
-            // via the ToolSpec — we call it directly below via a cloned name.
-            let name = tool.name.clone();
-            let desc = tool.description.clone();
-            // We wrap each tool so the loop can dispatch by name.
-            // The actual handler is called in the infer closure below.
-            let _ = (name, desc); // used in the tool registration below
-        }
-
-        // For tools registered in the builder, register them by creating
-        // a name-matched spec. We pass a dummy handler here because `run_agent`
-        // exposes an `infer` fn that the caller controls; tools are dispatched
-        // when the caller's `infer` fn produces a FINAL_ANSWER or the loop
-        // calls registry.call(). We wire real tool dispatch through a shadow infer.
-        for tool in &self.tools {
-            let tool_name = tool.name.clone();
-            // Capture the tool call result as an observation in context so infer can use it
-            react_loop.register_tool(ToolSpec::new(
-                tool_name.clone(),
-                tool.description.clone(),
-                // We can't clone the handler, so produce a placeholder.
-                // Real usage: use the `infer` closure to handle tool dispatch.
-                move |args| {
-                    serde_json::json!({ "tool": tool_name, "args": args, "status": "dispatched" })
-                },
-            ));
-        }
-
-        let steps = react_loop.run(&enriched_prompt, infer)?;
-
-        // Release backpressure
+        // Always release backpressure — success or error.
         if let Some(ref guard) = self.backpressure {
             guard.release()?;
         }
+
+        let (steps, memory_hits, graph_lookups) = outcome?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
