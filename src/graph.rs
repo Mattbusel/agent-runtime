@@ -214,6 +214,23 @@ impl GraphStore {
             )));
         }
 
+        // Reject duplicate (from, to, kind) triples — the DuplicateRelationship
+        // error variant existed but was never raised, silently allowing duplicate
+        // edges that corrupt relationship_count() and BFS/DFS result counts.
+        let duplicate = inner.relationships.iter().any(|r| {
+            r.from == rel.from && r.to == rel.to && r.kind == rel.kind
+        });
+        if duplicate {
+            return Err(AgentRuntimeError::Graph(
+                MemGraphError::DuplicateRelationship {
+                    from: rel.from.0.clone(),
+                    to: rel.to.0.clone(),
+                    kind: rel.kind.clone(),
+                }
+                .to_string(),
+            ));
+        }
+
         inner.relationships.push(rel);
         Ok(())
     }

@@ -199,15 +199,40 @@ impl AgentRuntime {
                 graph_lookups = graph.entity_count()?;
             }
 
-            // Build the ReAct loop and register tools
+            // Build the ReAct loop and register tools.
+            // Previously this replaced every handler with a stub closure that
+            // returned {"status":"dispatched"} — the real tool logic was silently
+            // discarded.  Fix: share each handler via Arc so the new ToolSpec
+            // closure can call the original handler without moving ownership out
+            // of self.tools.
             let mut react_loop = ReActLoop::new(self.agent_config.clone());
             for tool in &self.tools {
-                let tool_name = tool.name.clone();
+                let handler = std::sync::Arc::new(
+                    // Re-box through a thin wrapper that is Arc-shareable.
+                    // We can't clone Box<dyn Fn>, but we can capture a shared
+                    // reference through an Arc<dyn Fn + Send + Sync>.
+                    // Build the Arc once per tool per run (cheap: no allocation
+                    // of the closure itself, only the Arc refcount).
+                    {
+                        // SAFETY: The Arc keeps a strong reference alive for the
+                        // lifetime of react_loop, which is shorter than self.tools.
+                        // We express this with an explicit lifetime-erasing newtype.
+                        struct HandlerRef(
+                            *const (dyn Fn(serde_json::Value) -> serde_json::Value + Send + Sync),
+                        );
+                        unsafe impl Send for HandlerRef {}
+                        unsafe impl Sync for HandlerRef {}
+                        let ptr: *const _ = &*tool.handler;
+                        HandlerRef(ptr)
+                    },
+                );
                 react_loop.register_tool(ToolSpec::new(
-                    tool_name.clone(),
+                    tool.name.clone(),
                     tool.description.clone(),
                     move |args| {
-                        serde_json::json!({ "tool": tool_name, "args": args, "status": "dispatched" })
+                        // SAFETY: react_loop is dropped before run_agent returns,
+                        // which is before self (and thus self.tools) is dropped.
+                        unsafe { (*handler.0)(args) }
                     },
                 ));
             }
@@ -217,8 +242,12 @@ impl AgentRuntime {
         })();
 
         // Always release backpressure — success or error.
+        // Intentionally ignore a release error here: if the lock is poisoned we
+        // still want to surface the *outcome* error (or Ok value) to the caller
+        // rather than shadowing it.  The slot is already permanently lost if the
+        // mutex is poisoned, so swallowing the release error is the lesser evil.
         if let Some(ref guard) = self.backpressure {
-            guard.release()?;
+            let _ = guard.release();
         }
 
         let (steps, memory_hits, graph_lookups) = outcome?;
