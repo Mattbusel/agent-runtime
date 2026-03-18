@@ -5,6 +5,8 @@
 //! ```
 
 pub use crate::error::AgentRuntimeError;
+
+#[cfg(all(feature = "memory", feature = "graph", feature = "orchestrator"))]
 pub use crate::runtime::{AgentRuntime, AgentRuntimeBuilder, AgentSession};
 
 #[cfg(feature = "memory")]

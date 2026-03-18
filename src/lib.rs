@@ -16,7 +16,7 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use agent_runtime::prelude::*;
+//! use llm_agent_runtime::prelude::*;
 //!
 //! // build() is now infallible — the typestate pattern enforces that
 //! // with_agent_config() is called before build() at compile time.
@@ -66,7 +66,6 @@
 
 pub mod error;
 pub mod prelude;
-pub mod runtime;
 
 #[cfg(feature = "memory")]
 pub mod memory;
@@ -80,6 +79,9 @@ pub mod orchestrator;
 pub mod agent;
 pub mod metrics;
 
+#[cfg(all(feature = "memory", feature = "graph", feature = "orchestrator"))]
+pub mod runtime;
+
 #[cfg(feature = "persistence")]
 pub mod persistence;
 
@@ -89,6 +91,8 @@ pub mod providers;
 // ── Top-level re-exports ────────────────────────────────────────────────────
 
 pub use error::AgentRuntimeError;
+
+#[cfg(all(feature = "memory", feature = "graph", feature = "orchestrator"))]
 pub use runtime::{AgentRuntime, AgentRuntimeBuilder, AgentSession};
 
 // Re-export the most fundamental types unconditionally so users don't need
