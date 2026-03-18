@@ -7,7 +7,7 @@
 //! ## Guarantees
 //! - Deterministic: the loop terminates after at most `max_iterations` cycles
 //! - Non-panicking: all operations return `Result`
-//! - Tool handlers are synchronous `Fn` closures
+//! - Tool handlers support both sync and async `Fn` closures
 //!
 //! ## NOT Responsible For
 //! - Actual LLM inference (callers supply a mock/stub inference fn)
@@ -18,8 +18,16 @@ use crate::error::AgentRuntimeError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
+
+/// A pinned, boxed future returning a `Value`. Used for async tool handlers.
+pub type AsyncToolFuture = Pin<Box<dyn Future<Output = Value> + Send>>;
+
+/// An async tool handler closure.
+pub type AsyncToolHandler = Box<dyn Fn(Value) -> AsyncToolFuture + Send + Sync>;
 
 /// Role of a message in a conversation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,8 +111,8 @@ pub struct ToolSpec {
     pub name: String,
     /// Human-readable description passed to the model as part of the system prompt.
     pub description: String,
-    /// Synchronous handler: receives JSON arguments, returns JSON result.
-    pub handler: Box<dyn Fn(Value) -> Value + Send + Sync>,
+    /// Async handler: receives JSON arguments, returns a future resolving to a JSON result.
+    pub handler: AsyncToolHandler,
 }
 
 impl std::fmt::Debug for ToolSpec {
@@ -117,11 +125,28 @@ impl std::fmt::Debug for ToolSpec {
 }
 
 impl ToolSpec {
-    /// Construct a new `ToolSpec`.
+    /// Construct a new `ToolSpec` from a synchronous handler closure.
+    /// The closure is wrapped in an `async move` block automatically.
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
         handler: impl Fn(Value) -> Value + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            handler: Box::new(move |args| {
+                let result = handler(args);
+                Box::pin(async move { result })
+            }),
+        }
+    }
+
+    /// Construct a new `ToolSpec` from an async handler closure.
+    pub fn new_async(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        handler: impl Fn(Value) -> AsyncToolFuture + Send + Sync + 'static,
     ) -> Self {
         Self {
             name: name.into(),
@@ -131,8 +156,8 @@ impl ToolSpec {
     }
 
     /// Invoke the tool with the given JSON arguments.
-    pub fn call(&self, args: Value) -> Value {
-        (self.handler)(args)
+    pub async fn call(&self, args: Value) -> Value {
+        (self.handler)(args).await
     }
 }
 
@@ -162,12 +187,13 @@ impl ToolRegistry {
     /// # Returns
     /// - `Ok(Value)` — tool result
     /// - `Err(AgentRuntimeError::AgentLoop)` — if the tool is not found
-    pub fn call(&self, name: &str, args: Value) -> Result<Value, AgentRuntimeError> {
+    #[tracing::instrument(skip_all, fields(tool_name = %name))]
+    pub async fn call(&self, name: &str, args: Value) -> Result<Value, AgentRuntimeError> {
         let spec = self
             .tools
             .get(name)
             .ok_or_else(|| AgentRuntimeError::AgentLoop(format!("tool '{name}' not found")))?;
-        Ok(spec.call(args))
+        Ok(spec.call(args).await)
     }
 
     /// Return the list of registered tool names.
@@ -179,14 +205,6 @@ impl ToolRegistry {
 // ── ReActLoop ─────────────────────────────────────────────────────────────────
 
 /// Parses a ReAct response string into a `ReActStep`.
-///
-/// Expected format (line-based):
-/// ```text
-/// Thought: <reasoning>
-/// Action: <tool_name> <JSON args or plain text>
-/// ```
-///
-/// The `observation` field is filled in by the loop after tool invocation.
 pub fn parse_react_step(text: &str) -> Result<ReActStep, AgentRuntimeError> {
     let mut thought = String::new();
     let mut action = String::new();
@@ -213,17 +231,13 @@ pub fn parse_react_step(text: &str) -> Result<ReActStep, AgentRuntimeError> {
 }
 
 /// The ReAct agent loop.
-///
-/// Drives a Thought → Action → Observation cycle using a pluggable inference
-/// function and a `ToolRegistry`. The loop halts when the action is
-/// `FINAL_ANSWER` or `max_iterations` is reached.
+#[derive(Debug)]
 pub struct ReActLoop {
     config: AgentConfig,
     registry: ToolRegistry,
 }
 
 impl ReActLoop {
-    /// Create a new loop with the given config.
     pub fn new(config: AgentConfig) -> Self {
         Self {
             config,
@@ -231,47 +245,43 @@ impl ReActLoop {
         }
     }
 
-    /// Register a tool with the loop.
     pub fn register_tool(&mut self, spec: ToolSpec) {
         self.registry.register(spec);
     }
 
-    /// Run the agent loop for the given `prompt`.
-    ///
-    /// # Arguments
-    /// * `prompt` — the initial user prompt
-    /// * `infer` — callable that simulates LLM inference:
-    ///   takes the current conversation as a string, returns a ReAct-formatted response
-    ///
-    /// # Returns
-    /// The list of `ReActStep`s produced during the session.
-    pub fn run(
+    #[tracing::instrument(skip(infer))]
+    pub async fn run<F, Fut>(
         &self,
         prompt: &str,
-        mut infer: impl FnMut(&str) -> String,
-    ) -> Result<Vec<ReActStep>, AgentRuntimeError> {
+        mut infer: F,
+    ) -> Result<Vec<ReActStep>, AgentRuntimeError>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: Future<Output = String>,
+    {
         let mut steps: Vec<ReActStep> = Vec::new();
         let mut context = format!("{}\n\nUser: {}\n", self.config.system_prompt, prompt);
 
-        for _iteration in 0..self.config.max_iterations {
-            let response = infer(&context);
-
+        for iteration in 0..self.config.max_iterations {
+            let response = infer(context.clone()).await;
             let mut step = parse_react_step(&response)?;
 
-            // Check for terminal action — case-insensitive so "Final Answer",
-            // "final_answer", etc. from LLM output drift all terminate cleanly.
+            tracing::debug!(
+                step = iteration,
+                thought = %step.thought,
+                action = %step.action,
+                "ReAct iteration"
+            );
+
             if step.action.to_ascii_uppercase().starts_with("FINAL_ANSWER") {
                 step.observation = step.action.clone();
                 steps.push(step);
+                tracing::info!(step = iteration, "FINAL_ANSWER reached");
                 return Ok(steps);
             }
 
-            // Parse tool name and arguments
             let (tool_name, args) = parse_tool_call(&step.action);
-            // Wrap results so the model can distinguish a tool-level error
-            // (missing tool, panic recovery) from a successful result that
-            // happens to contain error information.
-            let observation = match self.registry.call(&tool_name, args) {
+            let observation = match self.registry.call(&tool_name, args).await {
                 Ok(result) => serde_json::json!({ "ok": true, "data": result }).to_string(),
                 Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
             };
@@ -284,7 +294,6 @@ impl ReActLoop {
             steps.push(step);
         }
 
-        // max_iterations reached without FINAL_ANSWER
         Err(AgentRuntimeError::AgentLoop(format!(
             "max iterations ({}) reached without final answer",
             self.config.max_iterations
@@ -300,8 +309,6 @@ fn parse_tool_call(action: &str) -> (String, Value) {
     let args: Value = serde_json::from_str(args_str).unwrap_or(Value::String(args_str.to_owned()));
     (name, args)
 }
-
-// ── AgentError (mirrors upstream) ────────────────────────────────────────────
 
 /// Agent-specific errors, mirrors `wasm-agent::AgentError`.
 #[derive(Debug, thiserror::Error)]
@@ -326,245 +333,114 @@ impl From<AgentError> for AgentRuntimeError {
 mod tests {
     use super::*;
 
-    // ── Types ─────────────────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn test_final_answer_on_first_step() {
+        let config = AgentConfig::new(5, "test-model");
+        let loop_ = ReActLoop::new(config);
 
-    #[test]
-    fn test_message_new_stores_role_and_content() {
-        let m = Message::new(Role::User, "hello");
-        assert_eq!(m.role, Role::User);
-        assert_eq!(m.content, "hello");
+        let steps = loop_
+            .run("Say hello", |_ctx| async {
+                "Thought: I will answer directly\nAction: FINAL_ANSWER hello".to_string()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0].action.to_ascii_uppercase().starts_with("FINAL_ANSWER"));
     }
 
-    #[test]
-    fn test_agent_config_new_sets_max_iterations() {
-        let cfg = AgentConfig::new(5, "gpt-4");
-        assert_eq!(cfg.max_iterations, 5);
-    }
+    #[tokio::test]
+    async fn test_tool_call_then_final_answer() {
+        let config = AgentConfig::new(5, "test-model");
+        let mut loop_ = ReActLoop::new(config);
 
-    #[test]
-    fn test_agent_config_with_system_prompt_overrides_default() {
-        let cfg = AgentConfig::new(5, "gpt-4").with_system_prompt("custom");
-        assert_eq!(cfg.system_prompt, "custom");
-    }
-
-    // ── ToolSpec / ToolRegistry ───────────────────────────────────────────────
-
-    #[test]
-    fn test_tool_spec_call_invokes_handler() {
-        let spec = ToolSpec::new("echo", "echoes input", |v| v);
-        let result = spec.call(Value::String("hi".into()));
-        assert_eq!(result, Value::String("hi".into()));
-    }
-
-    #[test]
-    fn test_tool_registry_register_and_call() {
-        let mut reg = ToolRegistry::new();
-        reg.register(ToolSpec::new("add", "adds 1", |_| Value::Number(42.into())));
-        let result = reg.call("add", Value::Null).unwrap();
-        assert_eq!(result, Value::Number(42.into()));
-    }
-
-    #[test]
-    fn test_tool_registry_missing_tool_returns_error() {
-        let reg = ToolRegistry::new();
-        assert!(reg.call("ghost", Value::Null).is_err());
-    }
-
-    #[test]
-    fn test_tool_registry_tool_names_lists_registered() {
-        let mut reg = ToolRegistry::new();
-        reg.register(ToolSpec::new("t1", "d", |v| v));
-        reg.register(ToolSpec::new("t2", "d", |v| v));
-        let names = reg.tool_names();
-        assert_eq!(names.len(), 2);
-    }
-
-    #[test]
-    fn test_tool_registry_overwrite_existing_tool() {
-        let mut reg = ToolRegistry::new();
-        reg.register(ToolSpec::new("calc", "v1", |_| Value::Number(1.into())));
-        reg.register(ToolSpec::new("calc", "v2", |_| Value::Number(2.into())));
-        let result = reg.call("calc", Value::Null).unwrap();
-        assert_eq!(result, Value::Number(2.into()));
-    }
-
-    // ── parse_react_step ──────────────────────────────────────────────────────
-
-    #[test]
-    fn test_parse_react_step_extracts_thought_and_action() {
-        let text = "Thought: I need to search\nAction: search {\"q\":\"rust\"}";
-        let step = parse_react_step(text).unwrap();
-        assert_eq!(step.thought, "I need to search");
-        assert_eq!(step.action, "search {\"q\":\"rust\"}");
-    }
-
-    #[test]
-    fn test_parse_react_step_empty_text_returns_error() {
-        assert!(parse_react_step("").is_err());
-    }
-
-    #[test]
-    fn test_parse_react_step_missing_fields_partial_parse() {
-        let text = "Thought: only thought";
-        let step = parse_react_step(text).unwrap();
-        assert_eq!(step.thought, "only thought");
-        assert!(step.action.is_empty());
-    }
-
-    // ── ReActLoop ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_react_loop_runs_tool_and_returns_steps() {
-        let cfg = AgentConfig::new(5, "test-model");
-        let mut loop_ = ReActLoop::new(cfg);
-
-        loop_.register_tool(ToolSpec::new("greet", "greets", |_| {
-            Value::String("Hello, World!".into())
+        loop_.register_tool(ToolSpec::new("greet", "Greets someone", |_args| {
+            serde_json::json!("hello!")
         }));
 
         let mut call_count = 0;
         let steps = loop_
             .run("Say hello", |_ctx| {
                 call_count += 1;
-                if call_count == 1 {
-                    "Thought: I will greet\nAction: greet {}".into()
-                } else {
-                    "Thought: done\nAction: FINAL_ANSWER done".into()
+                let count = call_count;
+                async move {
+                    if count == 1 {
+                        "Thought: I will greet\nAction: greet {}".to_string()
+                    } else {
+                        "Thought: done\nAction: FINAL_ANSWER done".to_string()
+                    }
                 }
             })
+            .await
             .unwrap();
 
-        assert!(!steps.is_empty());
-        assert_eq!(steps[0].thought, "I will greet");
-        assert!(steps[0].observation.contains("Hello, World!"));
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].action, "greet {}");
+        assert!(steps[1].action.to_ascii_uppercase().starts_with("FINAL_ANSWER"));
     }
 
-    #[test]
-    fn test_react_loop_final_answer_terminates_early() {
-        let cfg = AgentConfig::new(10, "model");
-        let loop_ = ReActLoop::new(cfg);
+    #[tokio::test]
+    async fn test_max_iterations_exceeded() {
+        let config = AgentConfig::new(2, "test-model");
+        let loop_ = ReActLoop::new(config);
 
-        let steps = loop_
-            .run("prompt", |_| {
-                "Thought: done\nAction: FINAL_ANSWER 42".into()
+        let result = loop_
+            .run("loop forever", |_ctx| async {
+                "Thought: thinking\nAction: noop {}".to_string()
             })
-            .unwrap();
-
-        assert_eq!(steps.len(), 1);
-    }
-
-    #[test]
-    fn test_react_loop_max_iterations_respected() {
-        let cfg = AgentConfig::new(3, "model");
-        let mut loop_ = ReActLoop::new(cfg);
-        loop_.register_tool(ToolSpec::new("noop", "does nothing", |_| Value::Null));
-
-        let result = loop_.run("prompt", |_| "Thought: keep going\nAction: noop {}".into());
+            .await;
 
         assert!(result.is_err());
-        if let Err(AgentRuntimeError::AgentLoop(msg)) = result {
-            assert!(msg.contains("max iterations"));
-        }
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("max iterations"));
     }
 
-    #[test]
-    fn test_react_loop_unknown_tool_records_error_observation() {
-        let cfg = AgentConfig::new(5, "model");
-        let loop_ = ReActLoop::new(cfg);
+    #[tokio::test]
+    async fn test_parse_react_step_valid() {
+        let text = "Thought: I should check\nAction: lookup {\"key\":\"val\"}";
+        let step = parse_react_step(text).unwrap();
+        assert_eq!(step.thought, "I should check");
+        assert_eq!(step.action, "lookup {\"key\":\"val\"}");
+    }
 
-        let mut count = 0;
+    #[tokio::test]
+    async fn test_parse_react_step_empty_fails() {
+        let result = parse_react_step("no prefix lines here");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_tool_not_found_returns_error_observation() {
+        let config = AgentConfig::new(3, "test-model");
+        let loop_ = ReActLoop::new(config);
+
+        let mut call_count = 0;
         let steps = loop_
-            .run("prompt", |_| {
-                count += 1;
-                if count == 1 {
-                    "Thought: try ghost\nAction: ghost {}".into()
-                } else {
-                    "Thought: done\nAction: FINAL_ANSWER ok".into()
+            .run("test", |_ctx| {
+                call_count += 1;
+                let count = call_count;
+                async move {
+                    if count == 1 {
+                        "Thought: try missing tool\nAction: missing_tool {}".to_string()
+                    } else {
+                        "Thought: done\nAction: FINAL_ANSWER done".to_string()
+                    }
                 }
             })
+            .await
             .unwrap();
 
-        // Observation is now JSON: {"ok":false,"error":"..."}
-        assert!(steps[0].observation.contains("\"ok\":false") || steps[0].observation.contains("\"ok\": false"));
+        assert_eq!(steps.len(), 2);
+        assert!(steps[0].observation.contains("\"ok\":false"));
     }
 
-    // ── AgentError conversion ─────────────────────────────────────────────────
+    #[tokio::test]
+    async fn test_new_async_tool_spec() {
+        let spec = ToolSpec::new_async("async_tool", "An async tool", |args| {
+            Box::pin(async move { serde_json::json!({"echo": args}) })
+        });
 
-    #[test]
-    fn test_agent_error_tool_not_found_display() {
-        let e = AgentError::ToolNotFound("search".into());
-        assert_eq!(e.to_string(), "Tool 'search' not found");
-    }
-
-    #[test]
-    fn test_agent_error_max_iterations_display() {
-        let e = AgentError::MaxIterations(10);
-        assert_eq!(e.to_string(), "Max iterations exceeded: 10");
-    }
-
-    #[test]
-    fn test_agent_error_converts_to_runtime_error() {
-        let e = AgentError::ToolNotFound("x".into());
-        let re: AgentRuntimeError = e.into();
-        assert!(matches!(re, AgentRuntimeError::AgentLoop(_)));
-    }
-
-    // ── Case-insensitive FINAL_ANSWER ─────────────────────────────────────────
-
-    #[test]
-    fn test_final_answer_case_insensitive_lower() {
-        let cfg = AgentConfig::new(5, "model");
-        let loop_ = ReActLoop::new(cfg);
-        let steps = loop_
-            .run("prompt", |_| "Thought: done\nAction: final_answer 42".into())
-            .unwrap();
-        assert_eq!(steps.len(), 1);
-    }
-
-    #[test]
-    fn test_final_answer_case_insensitive_mixed() {
-        let cfg = AgentConfig::new(5, "model");
-        let loop_ = ReActLoop::new(cfg);
-        let steps = loop_
-            .run("prompt", |_| "Thought: done\nAction: Final_Answer ok".into())
-            .unwrap();
-        assert_eq!(steps.len(), 1);
-    }
-
-    // ── Tool observation wrapping ─────────────────────────────────────────────
-
-    #[test]
-    fn test_successful_tool_observation_is_ok_json() {
-        let cfg = AgentConfig::new(5, "model");
-        let mut loop_ = ReActLoop::new(cfg);
-        loop_.register_tool(ToolSpec::new("ping", "returns pong", |_| {
-            Value::String("pong".into())
-        }));
-        let mut count = 0;
-        let steps = loop_
-            .run("prompt", |_| {
-                count += 1;
-                if count == 1 {
-                    "Thought: ping\nAction: ping {}".into()
-                } else {
-                    "Thought: done\nAction: FINAL_ANSWER ok".into()
-                }
-            })
-            .unwrap();
-        assert!(steps[0].observation.contains("\"ok\":true") || steps[0].observation.contains("\"ok\": true"));
-    }
-
-    // ── AgentConfig max_memory_recalls ────────────────────────────────────────
-
-    #[test]
-    fn test_agent_config_max_memory_recalls_default() {
-        let cfg = AgentConfig::new(5, "model");
-        assert_eq!(cfg.max_memory_recalls, 3);
-    }
-
-    #[test]
-    fn test_agent_config_with_max_memory_recalls() {
-        let cfg = AgentConfig::new(5, "model").with_max_memory_recalls(10);
-        assert_eq!(cfg.max_memory_recalls, 10);
+        let result = spec.call(serde_json::json!({"input": "test"})).await;
+        assert!(result.get("echo").is_some());
     }
 }

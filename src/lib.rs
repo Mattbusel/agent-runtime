@@ -15,21 +15,25 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust
+//! ```rust,no_run
 //! use agent_runtime::prelude::*;
 //!
+//! // build() is now infallible — the typestate pattern enforces that
+//! // with_agent_config() is called before build() at compile time.
 //! let runtime = AgentRuntime::builder()
 //!     .with_agent_config(AgentConfig::new(5, "my-model"))
-//!     .build()
-//!     .unwrap();
+//!     .build();
 //!
-//! let session = runtime
-//!     .run_agent(AgentId::new("agent-1"), "Hello", |_ctx| {
-//!         "Thought: done\nAction: FINAL_ANSWER hi".into()
-//!     })
-//!     .unwrap();
-//!
-//! println!("Steps: {}", session.step_count());
+//! // run_agent is async; drive it with your async runtime.
+//! // tokio::runtime::Runtime::new().unwrap().block_on(async {
+//! //     let session = runtime
+//! //         .run_agent(AgentId::new("agent-1"), "Hello", |_ctx: String| async {
+//! //             "Thought: done\nAction: FINAL_ANSWER hi".to_string()
+//! //         })
+//! //         .await
+//! //         .unwrap();
+//! //     println!("Steps: {}", session.step_count());
+//! // });
 //! ```
 //!
 //! ## Upstream Crates
@@ -58,6 +62,12 @@ pub mod orchestrator;
 
 pub mod agent;
 
+#[cfg(feature = "persistence")]
+pub mod persistence;
+
+#[cfg(feature = "providers")]
+pub mod providers;
+
 // ── Top-level re-exports ────────────────────────────────────────────────────
 
 pub use error::AgentRuntimeError;
@@ -76,3 +86,9 @@ pub use graph::{Entity, EntityId, GraphStore, Relationship};
 pub use orchestrator::{CircuitBreaker, Pipeline, RetryPolicy};
 
 pub use agent::{AgentConfig, ReActLoop, ReActStep, ToolSpec};
+
+#[cfg(feature = "persistence")]
+pub use persistence::{FilePersistenceBackend, PersistenceBackend};
+
+#[cfg(feature = "providers")]
+pub use providers::LlmProvider;

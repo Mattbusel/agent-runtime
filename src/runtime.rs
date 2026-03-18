@@ -6,13 +6,15 @@
 //! optionally enriching context from memory and graph lookups.
 //!
 //! ## Guarantees
-//! - Builder fails fast with `NotConfigured` if a required subsystem is missing
-//! - `run_agent` returns a typed `AgentSession` with step count, durations, and hits
+//! - Builder uses a typestate parameter to enforce `agent_config` at compile time:
+//!   `build()` is only callable once `with_agent_config` has been called.
+//! - `run_agent` is async and returns a typed `AgentSession` with step count,
+//!   durations, and hits.
 //! - Non-panicking: all paths return `Result`
 //!
 //! ## NOT Responsible For
 //! - Actual LLM inference (callers supply a mock/stub inference fn)
-//! - Persistence across process restarts
+//! - Persistence across process restarts (unless `persistence` feature is enabled)
 
 use crate::agent::{AgentConfig, ReActLoop, ReActStep, ToolSpec};
 use crate::error::AgentRuntimeError;
@@ -20,13 +22,24 @@ use crate::graph::GraphStore;
 use crate::memory::{AgentId, EpisodicStore, WorkingMemory};
 use crate::orchestrator::BackpressureGuard;
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
+use std::sync::Arc;
 use std::time::Instant;
+
+// ── Typestate markers ─────────────────────────────────────────────────────────
+
+/// Builder state: agent config has not been provided yet.
+pub struct NeedsConfig;
+/// Builder state: agent config has been provided; `build()` is available.
+pub struct HasConfig;
 
 // ── AgentSession ──────────────────────────────────────────────────────────────
 
 /// The result of a single agent run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSession {
+    /// Stable unique identifier for this session (UUID v4 string).
+    pub session_id: String,
     /// The agent ID used for this session.
     pub agent_id: AgentId,
     /// All ReAct steps executed during the session.
@@ -44,29 +57,109 @@ impl AgentSession {
     pub fn step_count(&self) -> usize {
         self.steps.len()
     }
+
+    /// Persist this session as a checkpoint under `"session:<session_id>"`.
+    #[cfg(feature = "persistence")]
+    pub async fn save_checkpoint(
+        &self,
+        backend: &dyn crate::persistence::PersistenceBackend,
+    ) -> Result<(), AgentRuntimeError> {
+        let key = format!("session:{}", self.session_id);
+        let bytes = serde_json::to_vec(self)
+            .map_err(|e| AgentRuntimeError::Persistence(format!("serialize: {e}")))?;
+        backend.save(&key, &bytes).await
+    }
+
+    /// Load a previously saved checkpoint by `session_id`.
+    ///
+    /// Returns `None` if no checkpoint exists for the given ID.
+    #[cfg(feature = "persistence")]
+    pub async fn load_checkpoint(
+        backend: &dyn crate::persistence::PersistenceBackend,
+        session_id: &str,
+    ) -> Result<Option<AgentSession>, AgentRuntimeError> {
+        let key = format!("session:{session_id}");
+        match backend.load(&key).await? {
+            None => Ok(None),
+            Some(bytes) => {
+                let session = serde_json::from_slice(&bytes)
+                    .map_err(|e| AgentRuntimeError::Persistence(format!("deserialize: {e}")))?;
+                Ok(Some(session))
+            }
+        }
+    }
 }
 
 // ── AgentRuntimeBuilder ───────────────────────────────────────────────────────
 
 /// Builder for `AgentRuntime`.
 ///
-/// Call `.with_memory()`, `.with_graph()`, `.with_orchestrator()` then `.build()`.
-#[derive(Debug, Default)]
-pub struct AgentRuntimeBuilder {
+/// Uses a typestate parameter `S` to enforce that `with_agent_config` is called
+/// before `build()`.  Calling `build()` on a `AgentRuntimeBuilder<NeedsConfig>`
+/// is a **compile-time error**.
+///
+/// Typical usage:
+/// ```ignore
+/// let runtime = AgentRuntime::builder()      // AgentRuntimeBuilder<NeedsConfig>
+///     .with_memory(store)
+///     .with_agent_config(cfg)                // → AgentRuntimeBuilder<HasConfig>
+///     .build();                              // → AgentRuntime (infallible)
+/// ```
+pub struct AgentRuntimeBuilder<S = NeedsConfig> {
     memory: Option<EpisodicStore>,
     working: Option<WorkingMemory>,
     graph: Option<GraphStore>,
     backpressure: Option<BackpressureGuard>,
     agent_config: Option<AgentConfig>,
-    tools: Vec<ToolSpec>,
+    tools: Vec<Arc<ToolSpec>>,
+    #[cfg(feature = "persistence")]
+    checkpoint_backend: Option<Arc<dyn crate::persistence::PersistenceBackend>>,
+    _state: PhantomData<S>,
 }
 
-impl AgentRuntimeBuilder {
-    /// Create a new builder.
-    pub fn new() -> Self {
-        Self::default()
+impl std::fmt::Debug for AgentRuntimeBuilder<NeedsConfig> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentRuntimeBuilder<NeedsConfig>")
+            .field("memory", &self.memory.is_some())
+            .field("working", &self.working.is_some())
+            .field("graph", &self.graph.is_some())
+            .field("backpressure", &self.backpressure.is_some())
+            .field("tools", &self.tools.len())
+            .finish()
     }
+}
 
+impl std::fmt::Debug for AgentRuntimeBuilder<HasConfig> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentRuntimeBuilder<HasConfig>")
+            .field("memory", &self.memory.is_some())
+            .field("working", &self.working.is_some())
+            .field("graph", &self.graph.is_some())
+            .field("backpressure", &self.backpressure.is_some())
+            .field("agent_config", &self.agent_config.is_some())
+            .field("tools", &self.tools.len())
+            .finish()
+    }
+}
+
+impl Default for AgentRuntimeBuilder<NeedsConfig> {
+    fn default() -> Self {
+        Self {
+            memory: None,
+            working: None,
+            graph: None,
+            backpressure: None,
+            agent_config: None,
+            tools: Vec::new(),
+            #[cfg(feature = "persistence")]
+            checkpoint_backend: None,
+            _state: PhantomData,
+        }
+    }
+}
+
+// Methods available on ALL builder states.
+impl<S> AgentRuntimeBuilder<S> {
     /// Attach an episodic memory store.
     pub fn with_memory(mut self, store: EpisodicStore) -> Self {
         self.memory = Some(store);
@@ -91,36 +184,70 @@ impl AgentRuntimeBuilder {
         self
     }
 
-    /// Set the agent loop configuration.
-    pub fn with_agent_config(mut self, config: AgentConfig) -> Self {
-        self.agent_config = Some(config);
-        self
-    }
-
     /// Register a tool available to the agent loop.
     pub fn register_tool(mut self, spec: ToolSpec) -> Self {
-        self.tools.push(spec);
+        self.tools.push(Arc::new(spec));
         self
     }
 
+    /// Attach a persistence backend for session checkpointing.
+    #[cfg(feature = "persistence")]
+    pub fn with_checkpoint_backend(
+        mut self,
+        backend: Arc<dyn crate::persistence::PersistenceBackend>,
+    ) -> Self {
+        self.checkpoint_backend = Some(backend);
+        self
+    }
+}
+
+// `with_agent_config` transitions NeedsConfig → HasConfig.
+impl AgentRuntimeBuilder<NeedsConfig> {
+    /// Create a new builder (equivalent to `Default::default()`).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the agent loop configuration.
+    ///
+    /// After this call the builder transitions to `AgentRuntimeBuilder<HasConfig>`,
+    /// making `build()` available.
+    pub fn with_agent_config(self, config: AgentConfig) -> AgentRuntimeBuilder<HasConfig> {
+        AgentRuntimeBuilder {
+            memory: self.memory,
+            working: self.working,
+            graph: self.graph,
+            backpressure: self.backpressure,
+            agent_config: Some(config),
+            tools: self.tools,
+            #[cfg(feature = "persistence")]
+            checkpoint_backend: self.checkpoint_backend,
+            _state: PhantomData,
+        }
+    }
+}
+
+// `build()` is only available once we have a config.
+impl AgentRuntimeBuilder<HasConfig> {
     /// Build the `AgentRuntime`.
     ///
-    /// # Returns
-    /// - `Ok(AgentRuntime)` — all required subsystems are present
-    /// - `Err(AgentRuntimeError::NotConfigured)` — if agent config is missing
-    pub fn build(self) -> Result<AgentRuntime, AgentRuntimeError> {
-        let agent_config = self
-            .agent_config
-            .ok_or(AgentRuntimeError::NotConfigured("agent_config"))?;
+    /// This is infallible: the typestate guarantees `agent_config` is present.
+    pub fn build(self) -> AgentRuntime {
+        // SAFETY: `agent_config` is always `Some` in `HasConfig` state because
+        // `with_agent_config` is the only way to reach this state.
+        #[allow(clippy::unwrap_used)]
+        let agent_config = self.agent_config.unwrap();
 
-        Ok(AgentRuntime {
+        AgentRuntime {
             memory: self.memory,
             working: self.working,
             graph: self.graph,
             backpressure: self.backpressure,
             agent_config,
             tools: self.tools,
-        })
+            #[cfg(feature = "persistence")]
+            checkpoint_backend: self.checkpoint_backend,
+        }
     }
 }
 
@@ -134,12 +261,14 @@ pub struct AgentRuntime {
     graph: Option<GraphStore>,
     backpressure: Option<BackpressureGuard>,
     agent_config: AgentConfig,
-    tools: Vec<ToolSpec>,
+    tools: Vec<Arc<ToolSpec>>,
+    #[cfg(feature = "persistence")]
+    checkpoint_backend: Option<Arc<dyn crate::persistence::PersistenceBackend>>,
 }
 
 impl AgentRuntime {
-    /// Return a new builder.
-    pub fn builder() -> AgentRuntimeBuilder {
+    /// Return a new builder in the `NeedsConfig` state.
+    pub fn builder() -> AgentRuntimeBuilder<NeedsConfig> {
         AgentRuntimeBuilder::new()
     }
 
@@ -151,116 +280,115 @@ impl AgentRuntime {
     /// # Arguments
     /// * `agent_id` — identifies the agent for memory retrieval
     /// * `prompt` — the user's input prompt
-    /// * `infer` — inference function: `(context: &str) -> String`
+    /// * `infer` — async inference function: `(context: String) -> impl Future<Output = String>`
     ///
     /// # Returns
-    /// An `AgentSession` with step count, hits, and duration.
-    pub fn run_agent(
+    /// An `AgentSession` with step count, hits, duration, and a stable session ID.
+    #[tracing::instrument(skip(self, infer), fields(agent_id = %agent_id))]
+    pub async fn run_agent<F, Fut>(
         &self,
         agent_id: AgentId,
         prompt: &str,
-        infer: impl FnMut(&str) -> String,
-    ) -> Result<AgentSession, AgentRuntimeError> {
-        let start = Instant::now();
-
-        // Backpressure check — acquire before any work, release on all exit paths.
+        infer: F,
+    ) -> Result<AgentSession, AgentRuntimeError>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: std::future::Future<Output = String>,
+    {
+        // Acquire backpressure slot before any work.
         if let Some(ref guard) = self.backpressure {
             guard.try_acquire()?;
         }
 
-        // Run all inner logic inside a closure so we can unconditionally release
-        // the backpressure slot regardless of whether the inner work succeeds.
-        let outcome: Result<(Vec<ReActStep>, usize, usize), AgentRuntimeError> = (|| {
-            let mut memory_hits = 0usize;
-            let mut graph_lookups = 0usize;
-
-            // Build enriched prompt from episodic memory
-            let enriched_prompt = if let Some(ref store) = self.memory {
-                let memories = store.recall(&agent_id, self.agent_config.max_memory_recalls)?;
-                memory_hits = memories.len();
-                if memories.is_empty() {
-                    prompt.to_owned()
-                } else {
-                    let mem_context: Vec<String> = memories
-                        .iter()
-                        .map(|m| format!("- {}", m.content))
-                        .collect();
-                    format!(
-                        "Relevant memories:\n{}\n\nCurrent prompt: {prompt}",
-                        mem_context.join("\n")
-                    )
-                }
-            } else {
-                prompt.to_owned()
-            };
-
-            // Count graph entities as "lookups" for session metadata
-            if let Some(ref graph) = self.graph {
-                graph_lookups = graph.entity_count()?;
-            }
-
-            // Build the ReAct loop and register tools.
-            // Previously this replaced every handler with a stub closure that
-            // returned {"status":"dispatched"} — the real tool logic was silently
-            // discarded.  Fix: share each handler via Arc so the new ToolSpec
-            // closure can call the original handler without moving ownership out
-            // of self.tools.
-            let mut react_loop = ReActLoop::new(self.agent_config.clone());
-            for tool in &self.tools {
-                let handler = std::sync::Arc::new(
-                    // Re-box through a thin wrapper that is Arc-shareable.
-                    // We can't clone Box<dyn Fn>, but we can capture a shared
-                    // reference through an Arc<dyn Fn + Send + Sync>.
-                    // Build the Arc once per tool per run (cheap: no allocation
-                    // of the closure itself, only the Arc refcount).
-                    {
-                        // SAFETY: The Arc keeps a strong reference alive for the
-                        // lifetime of react_loop, which is shorter than self.tools.
-                        // We express this with an explicit lifetime-erasing newtype.
-                        struct HandlerRef(
-                            *const (dyn Fn(serde_json::Value) -> serde_json::Value + Send + Sync),
-                        );
-                        unsafe impl Send for HandlerRef {}
-                        unsafe impl Sync for HandlerRef {}
-                        let ptr: *const _ = &*tool.handler;
-                        HandlerRef(ptr)
-                    },
-                );
-                react_loop.register_tool(ToolSpec::new(
-                    tool.name.clone(),
-                    tool.description.clone(),
-                    move |args| {
-                        // SAFETY: react_loop is dropped before run_agent returns,
-                        // which is before self (and thus self.tools) is dropped.
-                        unsafe { (*handler.0)(args) }
-                    },
-                ));
-            }
-
-            let steps = react_loop.run(&enriched_prompt, infer)?;
-            Ok((steps, memory_hits, graph_lookups))
-        })();
+        let outcome = self.run_agent_inner(agent_id.clone(), prompt, infer).await;
 
         // Always release backpressure — success or error.
-        // Intentionally ignore a release error here: if the lock is poisoned we
-        // still want to surface the *outcome* error (or Ok value) to the caller
-        // rather than shadowing it.  The slot is already permanently lost if the
-        // mutex is poisoned, so swallowing the release error is the lesser evil.
         if let Some(ref guard) = self.backpressure {
             let _ = guard.release();
         }
 
-        let (steps, memory_hits, graph_lookups) = outcome?;
+        outcome
+    }
 
+    /// Inner implementation of `run_agent`, called after backpressure is acquired.
+    async fn run_agent_inner<F, Fut>(
+        &self,
+        agent_id: AgentId,
+        prompt: &str,
+        infer: F,
+    ) -> Result<AgentSession, AgentRuntimeError>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: std::future::Future<Output = String>,
+    {
+        let start = Instant::now();
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        let mut memory_hits = 0usize;
+        let mut graph_lookups = 0usize;
+
+        // Build enriched prompt from episodic memory.
+        let enriched_prompt = if let Some(ref store) = self.memory {
+            let memories = store.recall(&agent_id, self.agent_config.max_memory_recalls)?;
+            memory_hits = memories.len();
+            tracing::debug!("enriched prompt with {} memory items", memory_hits);
+            if memories.is_empty() {
+                prompt.to_owned()
+            } else {
+                let mem_context: Vec<String> = memories
+                    .iter()
+                    .map(|m| format!("- {}", m.content))
+                    .collect();
+                format!(
+                    "Relevant memories:\n{}\n\nCurrent prompt: {prompt}",
+                    mem_context.join("\n")
+                )
+            }
+        } else {
+            prompt.to_owned()
+        };
+
+        // Count graph entities as "lookups" for session metadata.
+        if let Some(ref graph) = self.graph {
+            graph_lookups = graph.entity_count()?;
+            tracing::debug!("graph has {} entities", graph_lookups);
+        }
+
+        // Build the ReAct loop and register tools.
+        // Each ToolSpec is stored as an Arc so we can clone the Arc into the
+        // handler closure without moving ownership out of self.tools.
+        let mut react_loop = ReActLoop::new(self.agent_config.clone());
+        for tool in &self.tools {
+            let tool_arc = Arc::clone(tool);
+            react_loop.register_tool(ToolSpec::new_async(
+                tool_arc.name.clone(),
+                tool_arc.description.clone(),
+                move |args| {
+                    let t = Arc::clone(&tool_arc);
+                    Box::pin(async move { t.call(args).await })
+                },
+            ));
+        }
+
+        let steps = react_loop.run(&enriched_prompt, infer).await?;
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        Ok(AgentSession {
+        let session = AgentSession {
+            session_id: session_id.clone(),
             agent_id,
             steps,
             memory_hits,
             graph_lookups,
             duration_ms,
-        })
+        };
+
+        // Save final checkpoint if a backend is configured.
+        #[cfg(feature = "persistence")]
+        if let Some(ref backend) = self.checkpoint_backend {
+            session.save_checkpoint(backend.as_ref()).await?;
+        }
+
+        Ok(session)
     }
 
     /// Return a reference to the episodic memory store, if configured.
@@ -291,102 +419,138 @@ mod tests {
         AgentConfig::new(5, "test")
     }
 
-    fn final_answer_infer(_ctx: &str) -> String {
+    async fn final_answer_infer(_ctx: String) -> String {
         "Thought: done\nAction: FINAL_ANSWER 42".into()
     }
 
     // ── Builder ───────────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_builder_fails_without_agent_config() {
-        let result = AgentRuntime::builder().build();
-        assert!(matches!(
-            result,
-            Err(AgentRuntimeError::NotConfigured("agent_config"))
-        ));
-    }
+    // NOTE: test_builder_fails_without_agent_config has been removed.
+    // The typestate pattern makes calling .build() without .with_agent_config()
+    // a *compile-time error* — AgentRuntimeBuilder<NeedsConfig> has no build()
+    // method.  There is nothing to test at runtime.
 
-    #[test]
-    fn test_builder_succeeds_with_minimal_config() {
-        let runtime = AgentRuntime::builder()
+    /// Verifies that the builder compiles and produces a runtime when config is
+    /// provided.  This is the runtime-observable counterpart to the former
+    /// "fails without config" test.
+    #[tokio::test]
+    async fn test_builder_with_config_compiles() {
+        let _runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
             .build();
-        assert!(runtime.is_ok());
+        // If this compiles and runs, the typestate transition worked correctly.
     }
 
-    #[test]
-    fn test_builder_with_all_subsystems() {
-        let runtime = AgentRuntime::builder()
+    #[tokio::test]
+    async fn test_builder_succeeds_with_minimal_config() {
+        let _runtime = AgentRuntime::builder()
+            .with_agent_config(simple_config())
+            .build();
+    }
+
+    #[tokio::test]
+    async fn test_builder_with_all_subsystems() {
+        let _runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
             .with_memory(EpisodicStore::new())
             .with_graph(GraphStore::new())
             .with_working_memory(WorkingMemory::new(10).unwrap())
             .with_backpressure(BackpressureGuard::new(5).unwrap())
             .build();
-        assert!(runtime.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_builder_produces_runtime_with_config() {
+        // Confirm the built runtime accepts a run_agent call — the most direct
+        // evidence that the builder wired everything correctly.
+        let runtime = AgentRuntime::builder()
+            .with_agent_config(simple_config())
+            .build();
+        let session = runtime
+            .run_agent(AgentId::new("agent-x"), "hello", final_answer_infer)
+            .await
+            .unwrap();
+        assert!(session.step_count() >= 1);
+        assert!(!session.session_id.is_empty());
     }
 
     // ── run_agent ─────────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_run_agent_returns_session_with_steps() {
+    #[tokio::test]
+    async fn test_run_agent_returns_session_with_steps() {
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
-            .build()
-            .unwrap();
+            .build();
 
         let session = runtime
             .run_agent(AgentId::new("agent-1"), "hello", final_answer_infer)
+            .await
             .unwrap();
 
         assert_eq!(session.step_count(), 1);
     }
 
-    #[test]
-    fn test_run_agent_session_has_agent_id() {
+    #[tokio::test]
+    async fn test_run_agent_session_has_agent_id() {
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
-            .build()
-            .unwrap();
+            .build();
 
         let session = runtime
             .run_agent(AgentId::new("agent-42"), "hello", final_answer_infer)
+            .await
             .unwrap();
 
         assert_eq!(session.agent_id.0, "agent-42");
     }
 
-    #[test]
-    fn test_run_agent_session_duration_is_set() {
+    #[tokio::test]
+    async fn test_run_agent_session_duration_is_set() {
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
-            .build()
-            .unwrap();
+            .build();
 
         let session = runtime
             .run_agent(AgentId::new("a"), "hello", final_answer_infer)
+            .await
             .unwrap();
 
         // Duration should be non-negative (0 ms is valid for a fast mock)
         let _ = session.duration_ms; // just verify it compiles and is set
     }
 
-    #[test]
-    fn test_run_agent_memory_hits_zero_without_memory() {
+    #[tokio::test]
+    async fn test_run_agent_session_has_session_id() {
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
-            .build()
+            .build();
+
+        let session = runtime
+            .run_agent(AgentId::new("a"), "hello", final_answer_infer)
+            .await
             .unwrap();
+
+        // session_id must be a non-empty UUID string
+        assert!(!session.session_id.is_empty());
+        assert_eq!(session.session_id.len(), 36); // UUID v4 canonical form
+    }
+
+    #[tokio::test]
+    async fn test_run_agent_memory_hits_zero_without_memory() {
+        let runtime = AgentRuntime::builder()
+            .with_agent_config(simple_config())
+            .build();
 
         let session = runtime
             .run_agent(AgentId::new("a"), "prompt", final_answer_infer)
+            .await
             .unwrap();
 
         assert_eq!(session.memory_hits, 0);
     }
 
-    #[test]
-    fn test_run_agent_memory_hits_counts_recalled_items() {
+    #[tokio::test]
+    async fn test_run_agent_memory_hits_counts_recalled_items() {
         let store = EpisodicStore::new();
         let agent = AgentId::new("mem-agent");
         store
@@ -396,18 +560,18 @@ mod tests {
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
             .with_memory(store)
-            .build()
-            .unwrap();
+            .build();
 
         let session = runtime
             .run_agent(agent, "prompt", final_answer_infer)
+            .await
             .unwrap();
 
         assert_eq!(session.memory_hits, 1);
     }
 
-    #[test]
-    fn test_run_agent_graph_lookups_counts_entities() {
+    #[tokio::test]
+    async fn test_run_agent_graph_lookups_counts_entities() {
         let graph = GraphStore::new();
         graph.add_entity(Entity::new("e1", "Node")).unwrap();
         graph.add_entity(Entity::new("e2", "Node")).unwrap();
@@ -415,73 +579,70 @@ mod tests {
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
             .with_graph(graph)
-            .build()
-            .unwrap();
+            .build();
 
         let session = runtime
             .run_agent(AgentId::new("a"), "prompt", final_answer_infer)
+            .await
             .unwrap();
 
         assert_eq!(session.graph_lookups, 2);
     }
 
-    #[test]
-    fn test_run_agent_backpressure_released_after_run() {
+    #[tokio::test]
+    async fn test_run_agent_backpressure_released_after_run() {
         let guard = BackpressureGuard::new(3).unwrap();
 
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
             .with_backpressure(guard.clone())
-            .build()
-            .unwrap();
+            .build();
 
         runtime
             .run_agent(AgentId::new("a"), "prompt", final_answer_infer)
+            .await
             .unwrap();
 
         assert_eq!(guard.depth().unwrap(), 0);
     }
 
-    #[test]
-    fn test_run_agent_backpressure_sheds_when_full() {
+    #[tokio::test]
+    async fn test_run_agent_backpressure_sheds_when_full() {
         let guard = BackpressureGuard::new(1).unwrap();
         guard.try_acquire().unwrap(); // pre-fill
 
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
             .with_backpressure(guard)
-            .build()
-            .unwrap();
+            .build();
 
-        let result = runtime.run_agent(AgentId::new("a"), "prompt", final_answer_infer);
+        let result = runtime
+            .run_agent(AgentId::new("a"), "prompt", final_answer_infer)
+            .await;
         assert!(matches!(
             result,
             Err(AgentRuntimeError::BackpressureShed { .. })
         ));
     }
 
-    #[test]
-    fn test_run_agent_max_iterations_error_propagated() {
+    #[tokio::test]
+    async fn test_run_agent_max_iterations_error_propagated() {
         let cfg = AgentConfig::new(2, "model");
-        let runtime = AgentRuntime::builder()
-            .with_agent_config(cfg)
-            .build()
-            .unwrap();
+        let runtime = AgentRuntime::builder().with_agent_config(cfg).build();
 
-        // Register a tool so the loop can dispatch without parse errors
-        let mut react = crate::agent::ReActLoop::new(AgentConfig::new(2, "model"));
-        react.register_tool(ToolSpec::new("noop", "d", |_| serde_json::Value::Null));
-
-        // Simulate an infer fn that never produces FINAL_ANSWER
-        let result = runtime.run_agent(AgentId::new("a"), "prompt", |_| {
-            "Thought: looping\nAction: FINAL_ANSWER done".into()
-        });
+        // Simulate an infer fn that always produces FINAL_ANSWER immediately
+        let result = runtime
+            .run_agent(AgentId::new("a"), "prompt", |_ctx: String| async {
+                "Thought: looping\nAction: FINAL_ANSWER done".to_string()
+            })
+            .await;
         assert!(result.is_ok()); // final answer on first call, ok
     }
 
-    #[test]
-    fn test_agent_session_step_count_matches_steps() {
+    #[tokio::test]
+    async fn test_agent_session_step_count_matches_steps() {
         let session = AgentSession {
+            session_id: "test-session-id".into(),
             agent_id: AgentId::new("a"),
             steps: vec![
                 ReActStep {
@@ -504,79 +665,77 @@ mod tests {
 
     // ── Accessor methods ──────────────────────────────────────────────────────
 
-    #[test]
-    fn test_runtime_memory_accessor_returns_none_when_not_configured() {
+    #[tokio::test]
+    async fn test_runtime_memory_accessor_returns_none_when_not_configured() {
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
-            .build()
-            .unwrap();
+            .build();
         assert!(runtime.memory().is_none());
     }
 
-    #[test]
-    fn test_runtime_memory_accessor_returns_some_when_configured() {
+    #[tokio::test]
+    async fn test_runtime_memory_accessor_returns_some_when_configured() {
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
             .with_memory(EpisodicStore::new())
-            .build()
-            .unwrap();
+            .build();
         assert!(runtime.memory().is_some());
     }
 
-    #[test]
-    fn test_runtime_graph_accessor_returns_none_when_not_configured() {
+    #[tokio::test]
+    async fn test_runtime_graph_accessor_returns_none_when_not_configured() {
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
-            .build()
-            .unwrap();
+            .build();
         assert!(runtime.graph().is_none());
     }
 
-    #[test]
-    fn test_runtime_graph_accessor_returns_some_when_configured() {
+    #[tokio::test]
+    async fn test_runtime_graph_accessor_returns_some_when_configured() {
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
             .with_graph(GraphStore::new())
-            .build()
-            .unwrap();
+            .build();
         assert!(runtime.graph().is_some());
     }
 
-    #[test]
-    fn test_runtime_working_memory_accessor() {
+    #[tokio::test]
+    async fn test_runtime_working_memory_accessor() {
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
             .with_working_memory(WorkingMemory::new(5).unwrap())
-            .build()
-            .unwrap();
+            .build();
         assert!(runtime.working_memory().is_some());
     }
 
-    #[test]
-    fn test_runtime_with_tool_registered() {
+    #[tokio::test]
+    async fn test_runtime_with_tool_registered() {
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
             .register_tool(ToolSpec::new("calc", "math", |_| serde_json::json!(99)))
-            .build()
-            .unwrap();
+            .build();
 
         let mut call_count = 0;
         let session = runtime
-            .run_agent(AgentId::new("a"), "compute", move |_| {
+            .run_agent(AgentId::new("a"), "compute", move |_ctx: String| {
                 call_count += 1;
-                if call_count == 1 {
-                    "Thought: use calc\nAction: calc {}".into()
-                } else {
-                    "Thought: done\nAction: FINAL_ANSWER result".into()
+                let count = call_count;
+                async move {
+                    if count == 1 {
+                        "Thought: use calc\nAction: calc {}".into()
+                    } else {
+                        "Thought: done\nAction: FINAL_ANSWER result".into()
+                    }
                 }
             })
+            .await
             .unwrap();
 
         assert!(session.step_count() >= 1);
     }
 
-    #[test]
-    fn test_run_agent_with_graph_relationship_lookup() {
+    #[tokio::test]
+    async fn test_run_agent_with_graph_relationship_lookup() {
         let graph = GraphStore::new();
         graph.add_entity(Entity::new("a", "X")).unwrap();
         graph.add_entity(Entity::new("b", "Y")).unwrap();
@@ -587,11 +746,11 @@ mod tests {
         let runtime = AgentRuntime::builder()
             .with_agent_config(simple_config())
             .with_graph(graph)
-            .build()
-            .unwrap();
+            .build();
 
         let session = runtime
             .run_agent(AgentId::new("a"), "prompt", final_answer_infer)
+            .await
             .unwrap();
 
         assert_eq!(session.graph_lookups, 2); // 2 entities

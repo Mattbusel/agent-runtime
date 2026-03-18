@@ -12,18 +12,61 @@
 //! ## NOT Responsible For
 //! - Persistence to disk or external store
 //! - Graph sharding / distributed graphs
-//! - Weighted shortest-path (Dijkstra); only hop-count shortest-path provided
 
 use crate::error::AgentRuntimeError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
+
+// ── Lock recovery helper ───────────────────────────────────────────────────────
+
+/// Recover from a poisoned mutex by logging a warning and returning the inner
+/// value. This is safe because we never leave shared data in a partially-written
+/// state across an await or panic boundary in this module.
+fn recover_lock<'a, T>(
+    result: std::sync::LockResult<std::sync::MutexGuard<'a, T>>,
+    ctx: &str,
+) -> std::sync::MutexGuard<'a, T>
+where
+    T: ?Sized,
+{
+    match result {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("mutex poisoned in {ctx}, recovering inner value");
+            poisoned.into_inner()
+        }
+    }
+}
+
+// ── OrdF32 newtype ─────────────────────────────────────────────────────────────
+
+/// Newtype wrapper for `f32` that implements `Ord`.
+/// NaN is treated as `Greater` for safe use in a `BinaryHeap`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct OrdF32(f32);
+
+impl Eq for OrdF32 {}
+
+impl PartialOrd for OrdF32 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrdF32 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or(std::cmp::Ordering::Greater)
+    }
+}
 
 // ── EntityId ──────────────────────────────────────────────────────────────────
 
 /// Stable identifier for a graph entity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EntityId(pub String);
 
 impl EntityId {
@@ -139,12 +182,13 @@ impl From<MemGraphError> for AgentRuntimeError {
 // ── GraphStore ────────────────────────────────────────────────────────────────
 
 /// In-memory knowledge graph supporting entities, relationships, BFS/DFS,
-/// shortest-path, and transitive closure.
+/// shortest-path, weighted shortest-path, and graph analytics.
 ///
 /// ## Guarantees
 /// - Thread-safe via `Arc<Mutex<_>>`
 /// - BFS/DFS are non-recursive (stack-safe)
 /// - Shortest-path is hop-count based (BFS)
+/// - Weighted shortest-path uses Dijkstra's algorithm
 #[derive(Debug, Clone)]
 pub struct GraphStore {
     inner: Arc<Mutex<GraphInner>>,
@@ -171,20 +215,14 @@ impl GraphStore {
     ///
     /// If an entity with the same ID already exists, it is replaced.
     pub fn add_entity(&self, entity: Entity) -> Result<(), AgentRuntimeError> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Graph(format!("lock poisoned: {e}")))?;
+        let mut inner = recover_lock(self.inner.lock(), "add_entity");
         inner.entities.insert(entity.id.clone(), entity);
         Ok(())
     }
 
     /// Retrieve an entity by ID.
     pub fn get_entity(&self, id: &EntityId) -> Result<Entity, AgentRuntimeError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Graph(format!("lock poisoned: {e}")))?;
+        let inner = recover_lock(self.inner.lock(), "get_entity");
         inner
             .entities
             .get(id)
@@ -196,10 +234,7 @@ impl GraphStore {
     ///
     /// Both source and target entities must already exist in the graph.
     pub fn add_relationship(&self, rel: Relationship) -> Result<(), AgentRuntimeError> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Graph(format!("lock poisoned: {e}")))?;
+        let mut inner = recover_lock(self.inner.lock(), "add_relationship");
 
         if !inner.entities.contains_key(&rel.from) {
             return Err(AgentRuntimeError::Graph(format!(
@@ -217,9 +252,10 @@ impl GraphStore {
         // Reject duplicate (from, to, kind) triples — the DuplicateRelationship
         // error variant existed but was never raised, silently allowing duplicate
         // edges that corrupt relationship_count() and BFS/DFS result counts.
-        let duplicate = inner.relationships.iter().any(|r| {
-            r.from == rel.from && r.to == rel.to && r.kind == rel.kind
-        });
+        let duplicate = inner
+            .relationships
+            .iter()
+            .any(|r| r.from == rel.from && r.to == rel.to && r.kind == rel.kind);
         if duplicate {
             return Err(AgentRuntimeError::Graph(
                 MemGraphError::DuplicateRelationship {
@@ -237,10 +273,7 @@ impl GraphStore {
 
     /// Remove an entity and all relationships involving it.
     pub fn remove_entity(&self, id: &EntityId) -> Result<(), AgentRuntimeError> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Graph(format!("lock poisoned: {e}")))?;
+        let mut inner = recover_lock(self.inner.lock(), "remove_entity");
 
         if inner.entities.remove(id).is_none() {
             return Err(AgentRuntimeError::Graph(format!(
@@ -253,10 +286,7 @@ impl GraphStore {
     }
 
     /// Return all direct neighbours of the given entity (BFS layer 1).
-    fn neighbours(
-        relationships: &[Relationship],
-        id: &EntityId,
-    ) -> Vec<EntityId> {
+    fn neighbours(relationships: &[Relationship], id: &EntityId) -> Vec<EntityId> {
         relationships
             .iter()
             .filter(|r| &r.from == id)
@@ -267,11 +297,9 @@ impl GraphStore {
     /// Breadth-first search starting from `start`.
     ///
     /// Returns entity IDs in BFS discovery order (not including the start node).
+    #[tracing::instrument(skip(self))]
     pub fn bfs(&self, start: &EntityId) -> Result<Vec<EntityId>, AgentRuntimeError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Graph(format!("lock poisoned: {e}")))?;
+        let inner = recover_lock(self.inner.lock(), "bfs");
 
         if !inner.entities.contains_key(start) {
             return Err(AgentRuntimeError::Graph(format!(
@@ -297,17 +325,16 @@ impl GraphStore {
             }
         }
 
+        tracing::debug!("BFS visited {} nodes", result.len());
         Ok(result)
     }
 
     /// Depth-first search starting from `start`.
     ///
     /// Returns entity IDs in DFS discovery order (not including the start node).
+    #[tracing::instrument(skip(self))]
     pub fn dfs(&self, start: &EntityId) -> Result<Vec<EntityId>, AgentRuntimeError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Graph(format!("lock poisoned: {e}")))?;
+        let inner = recover_lock(self.inner.lock(), "dfs");
 
         if !inner.entities.contains_key(start) {
             return Err(AgentRuntimeError::Graph(format!(
@@ -333,6 +360,7 @@ impl GraphStore {
             }
         }
 
+        tracing::debug!("DFS visited {} nodes", result.len());
         Ok(result)
     }
 
@@ -341,15 +369,13 @@ impl GraphStore {
     /// # Returns
     /// - `Some(path)` — ordered list of `EntityId`s from `from` to `to` (inclusive)
     /// - `None` — no path exists
+    #[tracing::instrument(skip(self))]
     pub fn shortest_path(
         &self,
         from: &EntityId,
         to: &EntityId,
     ) -> Result<Option<Vec<EntityId>>, AgentRuntimeError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Graph(format!("lock poisoned: {e}")))?;
+        let inner = recover_lock(self.inner.lock(), "shortest_path");
 
         if !inner.entities.contains_key(from) {
             return Err(AgentRuntimeError::Graph(format!(
@@ -399,6 +425,95 @@ impl GraphStore {
         Ok(None)
     }
 
+    /// Find the shortest weighted path between `from` and `to` using Dijkstra's algorithm.
+    ///
+    /// Uses `Relationship::weight` as edge cost. Negative weights are not supported
+    /// and will cause this method to return an error.
+    ///
+    /// # Returns
+    /// - `Ok(Some((path, total_weight)))` — the shortest path and its total weight
+    /// - `Ok(None)` — no path exists between `from` and `to`
+    /// - `Err(...)` — either entity not found, or a negative edge weight was encountered
+    pub fn shortest_path_weighted(
+        &self,
+        from: &EntityId,
+        to: &EntityId,
+    ) -> Result<Option<(Vec<EntityId>, f32)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "shortest_path_weighted");
+
+        if !inner.entities.contains_key(from) {
+            return Err(AgentRuntimeError::Graph(format!(
+                "source entity '{}' not found",
+                from.0
+            )));
+        }
+        if !inner.entities.contains_key(to) {
+            return Err(AgentRuntimeError::Graph(format!(
+                "target entity '{}' not found",
+                to.0
+            )));
+        }
+
+        // Validate: no negative weights
+        for rel in &inner.relationships {
+            if rel.weight < 0.0 {
+                return Err(AgentRuntimeError::Graph(format!(
+                    "negative weight {:.4} on edge '{}' -> '{}'",
+                    rel.weight, rel.from.0, rel.to.0
+                )));
+            }
+        }
+
+        if from == to {
+            return Ok(Some((vec![from.clone()], 0.0)));
+        }
+
+        // Dijkstra using a max-heap with negated weights to simulate a min-heap.
+        // Heap entries: (negated_cost, node_id)
+        let mut dist: HashMap<EntityId, f32> = HashMap::new();
+        let mut prev: HashMap<EntityId, EntityId> = HashMap::new();
+        // BinaryHeap is a max-heap; negate weights to get min-heap behaviour.
+        let mut heap: BinaryHeap<(OrdF32, EntityId)> = BinaryHeap::new();
+
+        dist.insert(from.clone(), 0.0);
+        heap.push((OrdF32(-0.0), from.clone()));
+
+        while let Some((OrdF32(neg_cost), current)) = heap.pop() {
+            let cost = -neg_cost;
+
+            // Skip stale entries.
+            if let Some(&best) = dist.get(&current) {
+                if cost > best {
+                    continue;
+                }
+            }
+
+            if &current == to {
+                // Reconstruct path in reverse.
+                let mut path = vec![to.clone()];
+                let mut node = to.clone();
+                while let Some(p) = prev.get(&node) {
+                    path.push(p.clone());
+                    node = p.clone();
+                }
+                path.reverse();
+                return Ok(Some((path, cost)));
+            }
+
+            for rel in inner.relationships.iter().filter(|r| &r.from == &current) {
+                let next_cost = cost + rel.weight;
+                let entry = dist.entry(rel.to.clone()).or_insert(f32::INFINITY);
+                if next_cost < *entry {
+                    *entry = next_cost;
+                    prev.insert(rel.to.clone(), current.clone());
+                    heap.push((OrdF32(-next_cost), rel.to.clone()));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Compute the transitive closure: all entities reachable from `start`.
     pub fn transitive_closure(
         &self,
@@ -412,20 +527,227 @@ impl GraphStore {
 
     /// Return the number of entities in the graph.
     pub fn entity_count(&self) -> Result<usize, AgentRuntimeError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Graph(format!("lock poisoned: {e}")))?;
+        let inner = recover_lock(self.inner.lock(), "entity_count");
         Ok(inner.entities.len())
     }
 
     /// Return the number of relationships in the graph.
     pub fn relationship_count(&self) -> Result<usize, AgentRuntimeError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Graph(format!("lock poisoned: {e}")))?;
+        let inner = recover_lock(self.inner.lock(), "relationship_count");
         Ok(inner.relationships.len())
+    }
+
+    /// Compute normalized degree centrality for each entity.
+    /// Degree = (in_degree + out_degree) / (n - 1), or 0.0 if n <= 1.
+    pub fn degree_centrality(&self) -> Result<HashMap<EntityId, f32>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "degree_centrality");
+        let n = inner.entities.len();
+
+        let mut out_degree: HashMap<EntityId, usize> = HashMap::new();
+        let mut in_degree: HashMap<EntityId, usize> = HashMap::new();
+
+        for id in inner.entities.keys() {
+            out_degree.insert(id.clone(), 0);
+            in_degree.insert(id.clone(), 0);
+        }
+
+        for rel in &inner.relationships {
+            *out_degree.entry(rel.from.clone()).or_insert(0) += 1;
+            *in_degree.entry(rel.to.clone()).or_insert(0) += 1;
+        }
+
+        let denom = if n <= 1 { 1.0 } else { (n - 1) as f32 };
+        let mut result = HashMap::new();
+        for id in inner.entities.keys() {
+            let od = *out_degree.get(id).unwrap_or(&0);
+            let id_ = *in_degree.get(id).unwrap_or(&0);
+            let centrality = if n <= 1 {
+                0.0
+            } else {
+                (od + id_) as f32 / denom
+            };
+            result.insert(id.clone(), centrality);
+        }
+
+        Ok(result)
+    }
+
+    /// Compute normalized betweenness centrality for each entity.
+    /// Uses Brandes' algorithm with hop-count BFS.
+    ///
+    /// # Complexity
+    /// O(V * E) time. Not suitable for very large graphs (>1000 nodes).
+    pub fn betweenness_centrality(&self) -> Result<HashMap<EntityId, f32>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "betweenness_centrality");
+        let n = inner.entities.len();
+        let nodes: Vec<EntityId> = inner.entities.keys().cloned().collect();
+
+        let mut centrality: HashMap<EntityId, f32> =
+            nodes.iter().map(|id| (id.clone(), 0.0f32)).collect();
+
+        for source in &nodes {
+            // BFS to find shortest path counts and predecessors.
+            let mut stack: Vec<EntityId> = Vec::new();
+            let mut predecessors: HashMap<EntityId, Vec<EntityId>> =
+                nodes.iter().map(|id| (id.clone(), vec![])).collect();
+            let mut sigma: HashMap<EntityId, f32> =
+                nodes.iter().map(|id| (id.clone(), 0.0f32)).collect();
+            let mut dist: HashMap<EntityId, i64> =
+                nodes.iter().map(|id| (id.clone(), -1i64)).collect();
+
+            *sigma.entry(source.clone()).or_insert(0.0) = 1.0;
+            *dist.entry(source.clone()).or_insert(-1) = 0;
+
+            let mut queue: VecDeque<EntityId> = VecDeque::new();
+            queue.push_back(source.clone());
+
+            while let Some(v) = queue.pop_front() {
+                stack.push(v.clone());
+                let d_v = *dist.get(&v).unwrap_or(&0);
+                let sigma_v = *sigma.get(&v).unwrap_or(&0.0);
+                for rel in inner.relationships.iter().filter(|r| &r.from == &v) {
+                    let w = &rel.to;
+                    let d_w = dist.get(w).copied().unwrap_or(-1);
+                    if d_w < 0 {
+                        queue.push_back(w.clone());
+                        *dist.entry(w.clone()).or_insert(-1) = d_v + 1;
+                    }
+                    if dist.get(w).copied().unwrap_or(-1) == d_v + 1 {
+                        *sigma.entry(w.clone()).or_insert(0.0) += sigma_v;
+                        predecessors.entry(w.clone()).or_default().push(v.clone());
+                    }
+                }
+            }
+
+            let mut delta: HashMap<EntityId, f32> =
+                nodes.iter().map(|id| (id.clone(), 0.0f32)).collect();
+
+            while let Some(w) = stack.pop() {
+                let delta_w = *delta.get(&w).unwrap_or(&0.0);
+                let sigma_w = *sigma.get(&w).unwrap_or(&1.0);
+                for v in predecessors.get(&w).cloned().unwrap_or_default() {
+                    let sigma_v = *sigma.get(&v).unwrap_or(&1.0);
+                    let contribution = (sigma_v / sigma_w) * (1.0 + delta_w);
+                    *delta.entry(v.clone()).or_insert(0.0) += contribution;
+                }
+                if &w != source {
+                    *centrality.entry(w.clone()).or_insert(0.0) += delta_w;
+                }
+            }
+        }
+
+        // Normalize by 2 / ((n-1) * (n-2)) for directed graphs.
+        if n > 2 {
+            let norm = 2.0 / (((n - 1) * (n - 2)) as f32);
+            for v in centrality.values_mut() {
+                *v *= norm;
+            }
+        } else {
+            for v in centrality.values_mut() {
+                *v = 0.0;
+            }
+        }
+
+        Ok(centrality)
+    }
+
+    /// Detect communities using label propagation.
+    /// Each entity starts as its own community. In each iteration, each entity
+    /// adopts the most frequent label among its neighbours.
+    /// Returns a map of entity ID → community ID (usize).
+    pub fn label_propagation_communities(
+        &self,
+        max_iterations: usize,
+    ) -> Result<HashMap<EntityId, usize>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "label_propagation_communities");
+        let nodes: Vec<EntityId> = inner.entities.keys().cloned().collect();
+
+        // Assign each node a unique initial label (index in nodes vec).
+        let mut labels: HashMap<EntityId, usize> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.clone(), i))
+            .collect();
+
+        for _ in 0..max_iterations {
+            let mut changed = false;
+            // Iterate in a stable order.
+            for node in &nodes {
+                // Collect neighbour labels.
+                let neighbour_labels: Vec<usize> = inner
+                    .relationships
+                    .iter()
+                    .filter(|r| &r.from == node || &r.to == node)
+                    .map(|r| {
+                        if &r.from == node {
+                            labels.get(&r.to).copied().unwrap_or(0)
+                        } else {
+                            labels.get(&r.from).copied().unwrap_or(0)
+                        }
+                    })
+                    .collect();
+
+                if neighbour_labels.is_empty() {
+                    continue;
+                }
+
+                // Find the most frequent label.
+                let mut freq: HashMap<usize, usize> = HashMap::new();
+                for &lbl in &neighbour_labels {
+                    *freq.entry(lbl).or_insert(0) += 1;
+                }
+                let best = freq
+                    .into_iter()
+                    .max_by_key(|&(_, count)| count)
+                    .map(|(lbl, _)| lbl);
+
+                if let Some(new_label) = best {
+                    let current = labels.entry(node.clone()).or_insert(0);
+                    if *current != new_label {
+                        *current = new_label;
+                        changed = true;
+                    }
+                }
+            }
+
+            if !changed {
+                break;
+            }
+        }
+
+        Ok(labels)
+    }
+
+    /// Extract a subgraph containing only the specified entities and the
+    /// relationships between them.
+    pub fn subgraph(&self, node_ids: &[EntityId]) -> Result<GraphStore, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "subgraph");
+        let id_set: HashSet<&EntityId> = node_ids.iter().collect();
+
+        let new_store = GraphStore::new();
+
+        for id in node_ids {
+            let entity = inner
+                .entities
+                .get(id)
+                .ok_or_else(|| {
+                    AgentRuntimeError::Graph(format!("entity '{}' not found", id.0))
+                })?
+                .clone();
+            // We hold inner lock; call directly on the new store's inner.
+            let mut new_inner = recover_lock(new_store.inner.lock(), "subgraph:add_entity");
+            new_inner.entities.insert(entity.id.clone(), entity);
+        }
+
+        for rel in inner.relationships.iter() {
+            if id_set.contains(&rel.from) && id_set.contains(&rel.to) {
+                let mut new_inner =
+                    recover_lock(new_store.inner.lock(), "subgraph:add_relationship");
+                new_inner.relationships.push(rel.clone());
+            }
+        }
+
+        Ok(new_store)
     }
 }
 
@@ -451,6 +773,11 @@ mod tests {
 
     fn link(g: &GraphStore, from: &str, to: &str) {
         g.add_relationship(Relationship::new(from, to, "CONNECTS", 1.0))
+            .unwrap();
+    }
+
+    fn link_w(g: &GraphStore, from: &str, to: &str, weight: f32) {
+        g.add_relationship(Relationship::new(from, to, "CONNECTS", weight))
             .unwrap();
     }
 
@@ -717,5 +1044,211 @@ mod tests {
         let e = MemGraphError::EntityNotFound("x".into());
         let re: AgentRuntimeError = e.into();
         assert!(matches!(re, AgentRuntimeError::Graph(_)));
+    }
+
+    // ── Weighted shortest path ────────────────────────────────────────────────
+
+    #[test]
+    fn test_shortest_path_weighted_simple() {
+        // a --(1.0)--> b --(2.0)--> c
+        // a --(10.0)--> c  (direct but heavier)
+        let g = make_graph();
+        add(&g, "a");
+        add(&g, "b");
+        add(&g, "c");
+        link_w(&g, "a", "b", 1.0);
+        link_w(&g, "b", "c", 2.0);
+        g.add_relationship(Relationship::new("a", "c", "DIRECT", 10.0))
+            .unwrap();
+
+        let result = g
+            .shortest_path_weighted(&EntityId::new("a"), &EntityId::new("c"))
+            .unwrap();
+        assert!(result.is_some());
+        let (path, weight) = result.unwrap();
+        // The cheapest path is a -> b -> c with total weight 3.0
+        assert_eq!(
+            path,
+            vec![EntityId::new("a"), EntityId::new("b"), EntityId::new("c")]
+        );
+        assert!((weight - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_shortest_path_weighted_returns_none_for_disconnected() {
+        let g = make_graph();
+        add(&g, "a");
+        add(&g, "b");
+        let result = g
+            .shortest_path_weighted(&EntityId::new("a"), &EntityId::new("b"))
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_shortest_path_weighted_same_node() {
+        let g = make_graph();
+        add(&g, "a");
+        let result = g
+            .shortest_path_weighted(&EntityId::new("a"), &EntityId::new("a"))
+            .unwrap();
+        assert_eq!(result, Some((vec![EntityId::new("a")], 0.0)));
+    }
+
+    #[test]
+    fn test_shortest_path_weighted_negative_weight_errors() {
+        let g = make_graph();
+        add(&g, "a");
+        add(&g, "b");
+        g.add_relationship(Relationship::new("a", "b", "NEG", -1.0))
+            .unwrap();
+        let result = g.shortest_path_weighted(&EntityId::new("a"), &EntityId::new("b"));
+        assert!(result.is_err());
+    }
+
+    // ── Degree centrality ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_degree_centrality_basic() {
+        // Star graph: a -> b, a -> c, a -> d
+        // a: out=3, in=0 => (3+0)/(4-1) = 1.0
+        // b: out=0, in=1 => (0+1)/3 = 0.333...
+        let g = make_graph();
+        add(&g, "a");
+        add(&g, "b");
+        add(&g, "c");
+        add(&g, "d");
+        link(&g, "a", "b");
+        link(&g, "a", "c");
+        link(&g, "a", "d");
+
+        let centrality = g.degree_centrality().unwrap();
+        let a_cent = *centrality.get(&EntityId::new("a")).unwrap();
+        let b_cent = *centrality.get(&EntityId::new("b")).unwrap();
+
+        assert!((a_cent - 1.0).abs() < 1e-5, "a centrality was {a_cent}");
+        assert!(
+            (b_cent - 1.0 / 3.0).abs() < 1e-5,
+            "b centrality was {b_cent}"
+        );
+    }
+
+    // ── Betweenness centrality ────────────────────────────────────────────────
+
+    #[test]
+    fn test_betweenness_centrality_chain() {
+        // Chain: a -> b -> c -> d
+        // b and c are on all paths from a to c, a to d, b to d
+        // Node b and c should have higher centrality than a and d.
+        let g = make_graph();
+        add(&g, "a");
+        add(&g, "b");
+        add(&g, "c");
+        add(&g, "d");
+        link(&g, "a", "b");
+        link(&g, "b", "c");
+        link(&g, "c", "d");
+
+        let centrality = g.betweenness_centrality().unwrap();
+        let a_cent = *centrality.get(&EntityId::new("a")).unwrap();
+        let b_cent = *centrality.get(&EntityId::new("b")).unwrap();
+        let c_cent = *centrality.get(&EntityId::new("c")).unwrap();
+        let d_cent = *centrality.get(&EntityId::new("d")).unwrap();
+
+        // Endpoints should have 0 centrality; intermediate nodes should be > 0.
+        assert!(
+            (a_cent).abs() < 1e-5,
+            "expected a_cent ~ 0, got {a_cent}"
+        );
+        assert!(b_cent > 0.0, "expected b_cent > 0, got {b_cent}");
+        assert!(c_cent > 0.0, "expected c_cent > 0, got {c_cent}");
+        assert!(
+            (d_cent).abs() < 1e-5,
+            "expected d_cent ~ 0, got {d_cent}"
+        );
+    }
+
+    // ── Label propagation communities ─────────────────────────────────────────
+
+    #[test]
+    fn test_label_propagation_communities_two_clusters() {
+        // Cluster 1: a <-> b <-> c (fully connected via bidirectional edges)
+        // Cluster 2: x <-> y <-> z
+        // No edges between clusters.
+        let g = make_graph();
+        for id in &["a", "b", "c", "x", "y", "z"] {
+            add(&g, id);
+        }
+        // Cluster 1 (bidirectional via two directed edges each)
+        link(&g, "a", "b");
+        link(&g, "b", "a");
+        link(&g, "b", "c");
+        link(&g, "c", "b");
+        link(&g, "a", "c");
+        link(&g, "c", "a");
+        // Cluster 2
+        link(&g, "x", "y");
+        link(&g, "y", "x");
+        link(&g, "y", "z");
+        link(&g, "z", "y");
+        link(&g, "x", "z");
+        link(&g, "z", "x");
+
+        let communities = g.label_propagation_communities(100).unwrap();
+
+        let label_a = communities[&EntityId::new("a")];
+        let label_b = communities[&EntityId::new("b")];
+        let label_c = communities[&EntityId::new("c")];
+        let label_x = communities[&EntityId::new("x")];
+        let label_y = communities[&EntityId::new("y")];
+        let label_z = communities[&EntityId::new("z")];
+
+        // All nodes in cluster 1 share a label, all in cluster 2 share a label,
+        // and the two clusters have different labels.
+        assert_eq!(label_a, label_b, "a and b should be in same community");
+        assert_eq!(label_b, label_c, "b and c should be in same community");
+        assert_eq!(label_x, label_y, "x and y should be in same community");
+        assert_eq!(label_y, label_z, "y and z should be in same community");
+        assert_ne!(
+            label_a, label_x,
+            "cluster 1 and cluster 2 should be different communities"
+        );
+    }
+
+    // ── Subgraph extraction ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_subgraph_extracts_correct_nodes_and_edges() {
+        // Full graph: a -> b -> c -> d
+        // Subgraph of {a, b, c} should contain edges a->b and b->c but not c->d.
+        let g = make_graph();
+        add(&g, "a");
+        add(&g, "b");
+        add(&g, "c");
+        add(&g, "d");
+        link(&g, "a", "b");
+        link(&g, "b", "c");
+        link(&g, "c", "d");
+
+        let sub = g
+            .subgraph(&[
+                EntityId::new("a"),
+                EntityId::new("b"),
+                EntityId::new("c"),
+            ])
+            .unwrap();
+
+        assert_eq!(sub.entity_count().unwrap(), 3);
+        assert_eq!(sub.relationship_count().unwrap(), 2);
+
+        // d should not be present in the subgraph.
+        assert!(sub.get_entity(&EntityId::new("d")).is_err());
+
+        // a -> b and b -> c should be present; c -> d should not.
+        let path = sub
+            .shortest_path(&EntityId::new("a"), &EntityId::new("c"))
+            .unwrap();
+        assert!(path.is_some());
+        assert_eq!(path.unwrap().len(), 3);
     }
 }

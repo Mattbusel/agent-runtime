@@ -8,11 +8,16 @@ categories = ["asynchronous", "concurrency"]
 
 [features]
 default = ["orchestrator", "memory", "graph", "wasm"]
-orchestrator = []   # tokio-prompt-orchestrator integration
-memory = []         # tokio-agent-memory integration
-graph = []          # mem-graph integration
-wasm = []           # wasm-agent ReAct loop
-full = ["orchestrator", "memory", "graph", "wasm"]
+orchestrator = []       # tokio-prompt-orchestrator integration
+memory = []             # tokio-agent-memory integration
+graph = []              # mem-graph integration
+wasm = []               # wasm-agent ReAct loop
+persistence = []        # pluggable persistence backend + disk implementation
+providers = []          # LlmProvider trait
+anthropic = ["reqwest", "providers"]   # built-in Anthropic provider
+openai = ["reqwest", "providers"]      # built-in OpenAI provider
+redis-circuit-breaker = ["redis"]      # distributed circuit breaker backend
+full = ["orchestrator", "memory", "graph", "wasm", "persistence", "providers", "anthropic", "openai"]
 
 [dependencies]
 # tokio: async runtime — core dependency, never remove
@@ -36,9 +41,20 @@ chrono = { version = "0.4", features = ["serde"] }
 # tracing: structured async-aware logging
 tracing = "0.1"
 
+# async-trait: object-safe async trait methods (persistence, providers, circuit breaker backends)
+async-trait = "0.1"
+
+# reqwest: HTTP client for built-in LLM providers (optional)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], optional = true }
+
+# redis: distributed circuit breaker backend (optional)
+redis = { version = "0.26", features = ["tokio-comp"], optional = true }
+
 [dev-dependencies]
 # tokio-test: async test utilities
 tokio-test = "0.4"
+# tracing-subscriber: test logging setup
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [lints.rust]
 # Enforce zero-panic production policy per CLAUDE.md

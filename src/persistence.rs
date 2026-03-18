@@ -1,0 +1,202 @@
+//! # Module: Persistence
+//!
+//! ## Responsibility
+//! Provides a pluggable persistence backend trait and a `FilePersistenceBackend`
+//! that stores serialized state as files on disk using `tokio::fs`.
+//!
+//! ## Guarantees
+//! - `PersistenceBackend` is object-safe via `async-trait`
+//! - `FilePersistenceBackend` stores each key as a file in a configurable directory
+//! - Non-panicking: all operations return `Result`
+//!
+//! ## Feature Gate
+//! This module is only compiled when the `persistence` feature is enabled.
+
+use crate::error::AgentRuntimeError;
+use async_trait::async_trait;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+// ── PersistenceBackend ────────────────────────────────────────────────────────
+
+/// Pluggable storage backend for agent state (memory, graph, session checkpoints).
+///
+/// Implement this trait to persist agent state to any storage system
+/// (disk, Redis, S3, databases, etc.).
+#[async_trait]
+pub trait PersistenceBackend: Send + Sync {
+    /// Persist raw bytes under the given key.
+    async fn save(&self, key: &str, value: &[u8]) -> Result<(), AgentRuntimeError>;
+
+    /// Load raw bytes for the given key.
+    ///
+    /// Returns `None` if no data has been stored under this key.
+    async fn load(&self, key: &str) -> Result<Option<Vec<u8>>, AgentRuntimeError>;
+
+    /// Delete the entry for the given key. No-op if the key does not exist.
+    async fn delete(&self, key: &str) -> Result<(), AgentRuntimeError>;
+}
+
+// ── FilePersistenceBackend ────────────────────────────────────────────────────
+
+/// Persists data as files in a directory on disk.
+///
+/// Each key maps to a file named `<key>.bin` inside the base directory.
+/// The base directory must exist before calling any methods.
+#[derive(Debug, Clone)]
+pub struct FilePersistenceBackend {
+    base_dir: Arc<PathBuf>,
+}
+
+impl FilePersistenceBackend {
+    /// Create a new backend that stores files in `base_dir`.
+    ///
+    /// The directory is not created automatically — it must already exist.
+    pub fn new(base_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            base_dir: Arc::new(base_dir.into()),
+        }
+    }
+
+    /// Compute the file path for a given key.
+    fn path_for(&self, key: &str) -> PathBuf {
+        // Sanitize the key to remove path separators that could escape base_dir.
+        let sanitized = key.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+        self.base_dir.join(format!("{sanitized}.bin"))
+    }
+}
+
+#[async_trait]
+impl PersistenceBackend for FilePersistenceBackend {
+    async fn save(&self, key: &str, value: &[u8]) -> Result<(), AgentRuntimeError> {
+        let path = self.path_for(key);
+        tokio::fs::write(&path, value)
+            .await
+            .map_err(|e| AgentRuntimeError::Persistence(format!("write {path:?}: {e}")))?;
+        Ok(())
+    }
+
+    async fn load(&self, key: &str) -> Result<Option<Vec<u8>>, AgentRuntimeError> {
+        let path = self.path_for(key);
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(AgentRuntimeError::Persistence(format!(
+                "read {path:?}: {e}"
+            ))),
+        }
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), AgentRuntimeError> {
+        let path = self.path_for(key);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(AgentRuntimeError::Persistence(format!(
+                "delete {path:?}: {e}"
+            ))),
+        }
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    async fn temp_backend() -> (FilePersistenceBackend, tempdir::Handle) {
+        // Fall back to a simple temp path approach without the tempdir crate.
+        // We use tokio's temp file support via std's temp_dir.
+        let dir = std::env::temp_dir().join(format!("agent_runtime_test_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let backend = FilePersistenceBackend::new(dir.clone());
+        (backend, tempdir::Handle { path: dir })
+    }
+
+    // Use a simple inline struct instead of a crate dependency.
+    mod tempdir {
+        pub struct Handle {
+            pub path: std::path::PathBuf,
+        }
+        impl Drop for Handle {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.path);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_file_backend_save_and_load() {
+        let dir = std::env::temp_dir().join(format!("art_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let _guard = tempdir::Handle { path: dir.clone() };
+        let backend = FilePersistenceBackend::new(&dir);
+
+        backend.save("test-key", b"hello world").await.unwrap();
+        let loaded = backend.load("test-key").await.unwrap();
+        assert_eq!(loaded, Some(b"hello world".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_file_backend_load_missing_returns_none() {
+        let dir = std::env::temp_dir().join(format!("art_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let _guard = tempdir::Handle { path: dir.clone() };
+        let backend = FilePersistenceBackend::new(&dir);
+
+        let loaded = backend.load("nonexistent").await.unwrap();
+        assert_eq!(loaded, None);
+    }
+
+    #[tokio::test]
+    async fn test_file_backend_delete_removes_file() {
+        let dir = std::env::temp_dir().join(format!("art_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let _guard = tempdir::Handle { path: dir.clone() };
+        let backend = FilePersistenceBackend::new(&dir);
+
+        backend.save("to-delete", b"data").await.unwrap();
+        backend.delete("to-delete").await.unwrap();
+        let loaded = backend.load("to-delete").await.unwrap();
+        assert_eq!(loaded, None);
+    }
+
+    #[tokio::test]
+    async fn test_file_backend_delete_missing_is_noop() {
+        let dir = std::env::temp_dir().join(format!("art_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let _guard = tempdir::Handle { path: dir.clone() };
+        let backend = FilePersistenceBackend::new(&dir);
+
+        // Should not error
+        backend.delete("never-existed").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_file_backend_key_sanitization() {
+        let dir = std::env::temp_dir().join(format!("art_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let _guard = tempdir::Handle { path: dir.clone() };
+        let backend = FilePersistenceBackend::new(&dir);
+
+        // Key with path separators must not escape base_dir
+        backend.save("agent/session:1", b"data").await.unwrap();
+        let loaded = backend.load("agent/session:1").await.unwrap();
+        assert_eq!(loaded, Some(b"data".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_persistence_backend_object_safe() {
+        // Verify FilePersistenceBackend can be used as a trait object.
+        let dir = std::env::temp_dir().join(format!("art_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let _guard = tempdir::Handle { path: dir.clone() };
+        let backend: Arc<dyn PersistenceBackend> =
+            Arc::new(FilePersistenceBackend::new(&dir));
+        backend.save("obj-safe", b"ok").await.unwrap();
+        let r = backend.load("obj-safe").await.unwrap();
+        assert_eq!(r, Some(b"ok".to_vec()));
+    }
+}

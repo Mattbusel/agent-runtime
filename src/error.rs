@@ -44,6 +44,14 @@ pub enum AgentRuntimeError {
     /// A deduplication key collision was detected.
     #[error("Deduplication key collision: {key}")]
     DeduplicationConflict { key: String },
+
+    /// An LLM provider call failed.
+    #[error("Provider error: {0}")]
+    Provider(String),
+
+    /// A persistence operation failed.
+    #[error("Persistence error: {0}")]
+    Persistence(String),
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@
 //! - Non-panicking: all operations return `Result`
 //!
 //! ## NOT Responsible For
-//! - Cross-node circuit breakers (single-process only)
+//! - Cross-node circuit breakers (single-process only, unless a distributed backend is provided)
 //! - Persistent deduplication (in-memory, bounded TTL)
 //! - Distributed backpressure
 
@@ -24,6 +24,28 @@ use std::time::{Duration, Instant};
 
 /// Maximum delay between retries — caps exponential growth.
 pub const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+// ── Lock recovery helper ───────────────────────────────────────────────────────
+
+/// Recover from a poisoned mutex by extracting the inner value.
+///
+/// Instead of propagating a lock-poison error, this logs a warning and
+/// returns the inner guard so the caller can continue operating.
+fn recover_lock<'a, T>(
+    result: std::sync::LockResult<std::sync::MutexGuard<'a, T>>,
+    ctx: &str,
+) -> std::sync::MutexGuard<'a, T>
+where
+    T: ?Sized,
+{
+    match result {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("mutex poisoned in {ctx}, recovering inner value");
+            poisoned.into_inner()
+        }
+    }
+}
 
 // ── RetryPolicy ───────────────────────────────────────────────────────────────
 
@@ -85,31 +107,115 @@ pub enum CircuitState {
     HalfOpen,
 }
 
+/// Backend for circuit breaker state storage.
+///
+/// Implement this trait to share circuit breaker state across processes
+/// (e.g., via Redis). The in-process default is `InMemoryCircuitBreakerBackend`.
+///
+/// Note: Methods are synchronous to avoid pulling in `async-trait`. A
+/// distributed backend (e.g., Redis) can internally spawn a Tokio runtime.
+pub trait CircuitBreakerBackend: Send + Sync {
+    fn increment_failures(&self, service: &str) -> u32;
+    fn reset_failures(&self, service: &str);
+    fn get_failures(&self, service: &str) -> u32;
+    fn set_open_at(&self, service: &str, at: std::time::Instant);
+    fn clear_open_at(&self, service: &str);
+    fn get_open_at(&self, service: &str) -> Option<std::time::Instant>;
+}
+
+// ── InMemoryCircuitBreakerBackend ─────────────────────────────────────────────
+
+/// In-process circuit breaker backend backed by a `Mutex`.
+pub struct InMemoryCircuitBreakerBackend {
+    inner: Arc<Mutex<InMemoryBackendState>>,
+}
+
+struct InMemoryBackendState {
+    consecutive_failures: u32,
+    open_at: Option<std::time::Instant>,
+}
+
+impl InMemoryCircuitBreakerBackend {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(InMemoryBackendState {
+                consecutive_failures: 0,
+                open_at: None,
+            })),
+        }
+    }
+}
+
+impl Default for InMemoryCircuitBreakerBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CircuitBreakerBackend for InMemoryCircuitBreakerBackend {
+    fn increment_failures(&self, _service: &str) -> u32 {
+        let mut state = recover_lock(self.inner.lock(), "InMemoryCircuitBreakerBackend::increment_failures");
+        state.consecutive_failures += 1;
+        state.consecutive_failures
+    }
+
+    fn reset_failures(&self, _service: &str) {
+        let mut state = recover_lock(self.inner.lock(), "InMemoryCircuitBreakerBackend::reset_failures");
+        state.consecutive_failures = 0;
+    }
+
+    fn get_failures(&self, _service: &str) -> u32 {
+        let state = recover_lock(self.inner.lock(), "InMemoryCircuitBreakerBackend::get_failures");
+        state.consecutive_failures
+    }
+
+    fn set_open_at(&self, _service: &str, at: std::time::Instant) {
+        let mut state = recover_lock(self.inner.lock(), "InMemoryCircuitBreakerBackend::set_open_at");
+        state.open_at = Some(at);
+    }
+
+    fn clear_open_at(&self, _service: &str) {
+        let mut state = recover_lock(self.inner.lock(), "InMemoryCircuitBreakerBackend::clear_open_at");
+        state.open_at = None;
+    }
+
+    fn get_open_at(&self, _service: &str) -> Option<std::time::Instant> {
+        let state = recover_lock(self.inner.lock(), "InMemoryCircuitBreakerBackend::get_open_at");
+        state.open_at
+    }
+}
+
+// ── CircuitBreaker ────────────────────────────────────────────────────────────
+
 /// Circuit breaker guarding a fallible operation.
 ///
 /// ## Guarantees
 /// - Opens after `threshold` consecutive failures
 /// - Transitions to `HalfOpen` after `recovery_window` has elapsed
 /// - Closes on the first successful probe in `HalfOpen`
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CircuitBreaker {
-    inner: Arc<Mutex<CircuitBreakerInner>>,
-}
-
-#[derive(Debug)]
-struct CircuitBreakerInner {
     threshold: u32,
     recovery_window: Duration,
-    consecutive_failures: u32,
-    state: CircuitState,
     service: String,
+    backend: Arc<dyn CircuitBreakerBackend>,
+}
+
+impl std::fmt::Debug for CircuitBreaker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CircuitBreaker")
+            .field("threshold", &self.threshold)
+            .field("recovery_window", &self.recovery_window)
+            .field("service", &self.service)
+            .finish()
+    }
 }
 
 impl CircuitBreaker {
-    /// Create a new circuit breaker.
+    /// Create a new circuit breaker backed by an in-memory backend.
     ///
     /// # Arguments
-    /// * `service` — name used in error messages
+    /// * `service` — name used in error messages and logs
     /// * `threshold` — consecutive failures before opening
     /// * `recovery_window` — how long to stay open before probing
     pub fn new(
@@ -122,15 +228,37 @@ impl CircuitBreaker {
                 "circuit breaker threshold must be >= 1".into(),
             ));
         }
+        let service = service.into();
         Ok(Self {
-            inner: Arc::new(Mutex::new(CircuitBreakerInner {
-                threshold,
-                recovery_window,
-                consecutive_failures: 0,
-                state: CircuitState::Closed,
-                service: service.into(),
-            })),
+            threshold,
+            recovery_window,
+            service,
+            backend: Arc::new(InMemoryCircuitBreakerBackend::new()),
         })
+    }
+
+    /// Replace the default in-memory backend with a custom one.
+    ///
+    /// Useful for sharing circuit breaker state across processes.
+    pub fn with_backend(mut self, backend: Arc<dyn CircuitBreakerBackend>) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    /// Derive the current `CircuitState` from backend storage.
+    #[allow(dead_code)]
+    fn current_state(&self) -> CircuitState {
+        match self.backend.get_open_at(&self.service) {
+            Some(opened_at) => CircuitState::Open { opened_at },
+            None => {
+                // We encode HalfOpen as failures == threshold but no open_at.
+                // However, the transition to HalfOpen is done in `call`, so
+                // outside of `call` we can only observe Closed here.
+                // The `call` method manages the HalfOpen flag via a per-call
+                // transient field — see below.
+                CircuitState::Closed
+            }
+        }
     }
 
     /// Attempt to call `f`, respecting the circuit breaker state.
@@ -139,52 +267,62 @@ impl CircuitBreaker {
     /// - `Ok(T)` — if `f` succeeds (resets failure count)
     /// - `Err(AgentRuntimeError::CircuitOpen)` — if the breaker is open
     /// - `Err(...)` — if `f` fails (may open the breaker)
+    #[tracing::instrument(skip(self, f))]
     pub fn call<T, E, F>(&self, f: F) -> Result<T, AgentRuntimeError>
     where
         F: FnOnce() -> Result<T, E>,
         E: std::fmt::Display,
     {
-        // Check and potentially transition state
-        {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
-
-            match &inner.state {
-                CircuitState::Open { opened_at } => {
-                    if opened_at.elapsed() >= inner.recovery_window {
-                        inner.state = CircuitState::HalfOpen;
-                    } else {
-                        return Err(AgentRuntimeError::CircuitOpen {
-                            service: inner.service.clone(),
-                        });
-                    }
+        // Determine effective state, potentially transitioning Open → HalfOpen.
+        let effective_state = match self.backend.get_open_at(&self.service) {
+            Some(opened_at) => {
+                if opened_at.elapsed() >= self.recovery_window {
+                    // Clear open_at to signal HalfOpen; failures remain.
+                    self.backend.clear_open_at(&self.service);
+                    tracing::info!("circuit moved to half-open for {}", self.service);
+                    CircuitState::HalfOpen
+                } else {
+                    CircuitState::Open { opened_at }
                 }
-                CircuitState::Closed | CircuitState::HalfOpen => {}
             }
+            None => {
+                // Either Closed or HalfOpen (after a prior transition).
+                // We distinguish by checking whether failures >= threshold
+                // but no open_at is set — that means we are in HalfOpen.
+                let failures = self.backend.get_failures(&self.service);
+                if failures >= self.threshold {
+                    CircuitState::HalfOpen
+                } else {
+                    CircuitState::Closed
+                }
+            }
+        };
+
+        tracing::debug!("circuit state: {:?}", effective_state);
+
+        match effective_state {
+            CircuitState::Open { .. } => {
+                return Err(AgentRuntimeError::CircuitOpen {
+                    service: self.service.clone(),
+                });
+            }
+            CircuitState::Closed | CircuitState::HalfOpen => {}
         }
 
-        // Execute the operation
+        // Execute the operation.
         match f() {
             Ok(val) => {
-                let mut inner = self
-                    .inner
-                    .lock()
-                    .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
-                inner.consecutive_failures = 0;
-                inner.state = CircuitState::Closed;
+                self.backend.reset_failures(&self.service);
+                self.backend.clear_open_at(&self.service);
+                tracing::info!("circuit closed for {}", self.service);
                 Ok(val)
             }
             Err(e) => {
-                let mut inner = self.inner.lock().map_err(|e2| {
-                    AgentRuntimeError::Orchestration(format!("lock poisoned: {e2}"))
-                })?;
-                inner.consecutive_failures += 1;
-                if inner.consecutive_failures >= inner.threshold {
-                    inner.state = CircuitState::Open {
-                        opened_at: Instant::now(),
-                    };
+                let failures = self.backend.increment_failures(&self.service);
+                if failures >= self.threshold {
+                    let now = Instant::now();
+                    self.backend.set_open_at(&self.service, now);
+                    tracing::info!("circuit opened for {}", self.service);
                 }
                 Err(AgentRuntimeError::Orchestration(e.to_string()))
             }
@@ -193,20 +331,35 @@ impl CircuitBreaker {
 
     /// Return the current circuit state.
     pub fn state(&self) -> Result<CircuitState, AgentRuntimeError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
-        Ok(inner.state.clone())
+        let state = match self.backend.get_open_at(&self.service) {
+            Some(opened_at) => {
+                if opened_at.elapsed() >= self.recovery_window {
+                    // Would transition to HalfOpen on next call; report HalfOpen.
+                    let failures = self.backend.get_failures(&self.service);
+                    if failures >= self.threshold {
+                        CircuitState::HalfOpen
+                    } else {
+                        CircuitState::Closed
+                    }
+                } else {
+                    CircuitState::Open { opened_at }
+                }
+            }
+            None => {
+                let failures = self.backend.get_failures(&self.service);
+                if failures >= self.threshold {
+                    CircuitState::HalfOpen
+                } else {
+                    CircuitState::Closed
+                }
+            }
+        };
+        Ok(state)
     }
 
     /// Return the consecutive failure count.
     pub fn failure_count(&self) -> Result<u32, AgentRuntimeError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
-        Ok(inner.consecutive_failures)
+        Ok(self.backend.get_failures(&self.service))
     }
 }
 
@@ -415,9 +568,11 @@ impl Pipeline {
     }
 
     /// Execute the pipeline, passing `input` through each stage in order.
+    #[tracing::instrument(skip(self))]
     pub fn run(&self, input: String) -> Result<String, AgentRuntimeError> {
         let mut current = input;
         for stage in &self.stages {
+            tracing::debug!("running stage: {}", stage.name);
             current = (stage.handler)(current)?;
         }
         Ok(current)
@@ -532,6 +687,58 @@ mod tests {
         let result: Result<i32, AgentRuntimeError> = cb.call(|| Ok::<i32, AgentRuntimeError>(99));
         assert_eq!(result.unwrap_or(0), 99);
         assert_eq!(cb.state().unwrap(), CircuitState::Closed);
+    }
+
+    #[test]
+    fn test_circuit_breaker_with_custom_backend_uses_backend_state() {
+        // Build a custom backend and share it between two circuit breakers
+        // to verify that state is read from and written to the backend.
+        let shared_backend: Arc<dyn CircuitBreakerBackend> =
+            Arc::new(InMemoryCircuitBreakerBackend::new());
+
+        let cb1 = CircuitBreaker::new("svc", 2, Duration::from_secs(60))
+            .unwrap()
+            .with_backend(Arc::clone(&shared_backend));
+
+        let cb2 = CircuitBreaker::new("svc", 2, Duration::from_secs(60))
+            .unwrap()
+            .with_backend(Arc::clone(&shared_backend));
+
+        // Trigger one failure via cb1
+        let _: Result<(), AgentRuntimeError> = cb1.call(|| Err::<(), _>("fail".to_string()));
+
+        // cb2 should observe the failure recorded by cb1
+        assert_eq!(cb2.failure_count().unwrap(), 1);
+
+        // Trigger the second failure to open the circuit via cb1
+        let _: Result<(), AgentRuntimeError> = cb1.call(|| Err::<(), _>("fail again".to_string()));
+
+        // cb2 should now see the circuit as open
+        assert!(matches!(cb2.state().unwrap(), CircuitState::Open { .. }));
+    }
+
+    #[test]
+    fn test_in_memory_backend_increments_and_resets() {
+        let backend = InMemoryCircuitBreakerBackend::new();
+
+        assert_eq!(backend.get_failures("svc"), 0);
+
+        let count = backend.increment_failures("svc");
+        assert_eq!(count, 1);
+
+        let count = backend.increment_failures("svc");
+        assert_eq!(count, 2);
+
+        backend.reset_failures("svc");
+        assert_eq!(backend.get_failures("svc"), 0);
+
+        // open_at round-trip
+        assert!(backend.get_open_at("svc").is_none());
+        let now = Instant::now();
+        backend.set_open_at("svc", now);
+        assert!(backend.get_open_at("svc").is_some());
+        backend.clear_open_at("svc");
+        assert!(backend.get_open_at("svc").is_none());
     }
 
     // ── Deduplicator ──────────────────────────────────────────────────────────

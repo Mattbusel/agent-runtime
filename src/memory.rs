@@ -9,11 +9,11 @@
 //! - Bounded: WorkingMemory evicts the oldest entry when capacity is exceeded
 //! - Decaying: DecayPolicy reduces importance scores over time
 //! - Non-panicking: all operations return `Result`
+//! - Lock-poisoning resilient: a panicking thread does not permanently break a store
 //!
 //! ## NOT Responsible For
 //! - Cross-agent shared memory (see runtime.rs coordinator)
 //! - Persistence to disk or external store
-//! - Semantic similarity search (tag-based retrieval only)
 
 use crate::error::AgentRuntimeError;
 use chrono::{DateTime, Utc};
@@ -21,6 +21,42 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+
+// ── Lock-poisoning recovery ───────────────────────────────────────────────────
+
+/// Acquire a mutex guard, recovering from a poisoned mutex rather than
+/// propagating an error.  A panicking thread does not permanently break the
+/// store; we simply take ownership of the inner value and emit a warning.
+fn recover_lock<'a, T>(
+    result: std::sync::LockResult<std::sync::MutexGuard<'a, T>>,
+    ctx: &str,
+) -> std::sync::MutexGuard<'a, T>
+where
+    T: ?Sized,
+{
+    match result {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("mutex poisoned in {ctx}, recovering inner value");
+            poisoned.into_inner()
+        }
+    }
+}
+
+// ── Cosine similarity ─────────────────────────────────────────────────────────
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
+}
 
 // ── Newtype IDs ───────────────────────────────────────────────────────────────
 
@@ -197,37 +233,33 @@ impl EpisodicStore {
     ///
     /// # Returns
     /// The `MemoryId` of the newly created memory item.
+    #[tracing::instrument(skip(self))]
     pub fn add_episode(
         &self,
         agent_id: AgentId,
-        content: impl Into<String>,
+        content: impl Into<String> + std::fmt::Debug,
         importance: f32,
     ) -> Result<MemoryId, AgentRuntimeError> {
         let item = MemoryItem::new(agent_id, content, importance, Vec::new());
         let id = item.id.clone();
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Memory(format!("lock poisoned: {e}")))?;
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::add_episode");
         inner.items.push(item);
         Ok(id)
     }
 
     /// Add an episode with an explicit timestamp.
+    #[tracing::instrument(skip(self))]
     pub fn add_episode_at(
         &self,
         agent_id: AgentId,
-        content: impl Into<String>,
+        content: impl Into<String> + std::fmt::Debug,
         importance: f32,
         timestamp: chrono::DateTime<chrono::Utc>,
     ) -> Result<MemoryId, AgentRuntimeError> {
         let mut item = MemoryItem::new(agent_id, content, importance, Vec::new());
         item.timestamp = timestamp;
         let id = item.id.clone();
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Memory(format!("lock poisoned: {e}")))?;
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::add_episode_at");
         inner.items.push(item);
         Ok(id)
     }
@@ -235,18 +267,17 @@ impl EpisodicStore {
     /// Recall up to `limit` memories for the given agent.
     ///
     /// Applies decay if configured, then returns items sorted by descending importance.
+    #[tracing::instrument(skip(self))]
     pub fn recall(
         &self,
         agent_id: &AgentId,
         limit: usize,
     ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Memory(format!("lock poisoned: {e}")))?;
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::recall");
 
         // Apply decay in-place
-        if let Some(ref policy) = inner.decay.clone() {
+        let decay_clone: Option<DecayPolicy> = inner.decay.clone();
+        if let Some(policy) = decay_clone {
             for item in inner.items.iter_mut() {
                 policy.decay_item(item);
             }
@@ -265,15 +296,13 @@ impl EpisodicStore {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         items.truncate(limit);
+        tracing::debug!("recalled {} items", items.len());
         Ok(items)
     }
 
     /// Return the total number of stored episodes across all agents.
     pub fn len(&self) -> Result<usize, AgentRuntimeError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Memory(format!("lock poisoned: {e}")))?;
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::len");
         Ok(inner.items.len())
     }
 
@@ -296,6 +325,7 @@ impl Default for EpisodicStore {
 /// ## Guarantees
 /// - Thread-safe via `Arc<Mutex<_>>`
 /// - Retrieval by tag intersection
+/// - Optional vector-based similarity search via stored embeddings
 #[derive(Debug, Clone)]
 pub struct SemanticStore {
     inner: Arc<Mutex<Vec<SemanticEntry>>>,
@@ -306,6 +336,7 @@ struct SemanticEntry {
     key: String,
     value: String,
     tags: Vec<String>,
+    embedding: Option<Vec<f32>>,
 }
 
 impl SemanticStore {
@@ -317,20 +348,38 @@ impl SemanticStore {
     }
 
     /// Store a key-value pair with associated tags.
+    #[tracing::instrument(skip(self))]
     pub fn store(
         &self,
-        key: impl Into<String>,
-        value: impl Into<String>,
+        key: impl Into<String> + std::fmt::Debug,
+        value: impl Into<String> + std::fmt::Debug,
         tags: Vec<String>,
     ) -> Result<(), AgentRuntimeError> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Memory(format!("lock poisoned: {e}")))?;
+        let mut inner = recover_lock(self.inner.lock(), "SemanticStore::store");
         inner.push(SemanticEntry {
             key: key.into(),
             value: value.into(),
             tags,
+            embedding: None,
+        });
+        Ok(())
+    }
+
+    /// Store a key-value pair with an embedding vector for similarity search.
+    #[tracing::instrument(skip(self))]
+    pub fn store_with_embedding(
+        &self,
+        key: impl Into<String> + std::fmt::Debug,
+        value: impl Into<String> + std::fmt::Debug,
+        tags: Vec<String>,
+        embedding: Vec<f32>,
+    ) -> Result<(), AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "SemanticStore::store_with_embedding");
+        inner.push(SemanticEntry {
+            key: key.into(),
+            value: value.into(),
+            tags,
+            embedding: Some(embedding),
         });
         Ok(())
     }
@@ -338,11 +387,9 @@ impl SemanticStore {
     /// Retrieve all entries that contain **all** of the given tags.
     ///
     /// If `tags` is empty, returns all entries.
+    #[tracing::instrument(skip(self))]
     pub fn retrieve(&self, tags: &[&str]) -> Result<Vec<(String, String)>, AgentRuntimeError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Memory(format!("lock poisoned: {e}")))?;
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::retrieve");
 
         let results = inner
             .iter()
@@ -356,12 +403,39 @@ impl SemanticStore {
         Ok(results)
     }
 
+    /// Retrieve top-k entries by cosine similarity to `query_embedding`.
+    ///
+    /// Only entries that were stored with an embedding (via [`store_with_embedding`])
+    /// are considered.  Returns `(key, value, similarity)` sorted by descending
+    /// similarity.
+    ///
+    /// [`store_with_embedding`]: SemanticStore::store_with_embedding
+    #[tracing::instrument(skip(self, query_embedding))]
+    pub fn retrieve_similar(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<(String, String, f32)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::retrieve_similar");
+
+        let mut scored: Vec<(String, String, f32)> = inner
+            .iter()
+            .filter_map(|entry| {
+                entry.embedding.as_ref().map(|emb| {
+                    let sim = cosine_similarity(query_embedding, emb);
+                    (entry.key.clone(), entry.value.clone(), sim)
+                })
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(top_k);
+        Ok(scored)
+    }
+
     /// Return the total number of stored entries.
     pub fn len(&self) -> Result<usize, AgentRuntimeError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Memory(format!("lock poisoned: {e}")))?;
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::len");
         Ok(inner.len())
     }
 
@@ -421,17 +495,15 @@ impl WorkingMemory {
     }
 
     /// Insert or update a key-value pair, evicting the oldest entry if over capacity.
+    #[tracing::instrument(skip(self))]
     pub fn set(
         &self,
-        key: impl Into<String>,
-        value: impl Into<String>,
+        key: impl Into<String> + std::fmt::Debug,
+        value: impl Into<String> + std::fmt::Debug,
     ) -> Result<(), AgentRuntimeError> {
         let key = key.into();
         let value = value.into();
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Memory(format!("lock poisoned: {e}")))?;
+        let mut inner = recover_lock(self.inner.lock(), "WorkingMemory::set");
 
         // Remove existing key from order tracking if present
         if inner.map.contains_key(&key) {
@@ -453,20 +525,15 @@ impl WorkingMemory {
     /// # Returns
     /// - `Some(value)` — if the key exists
     /// - `None` — if not found
+    #[tracing::instrument(skip(self))]
     pub fn get(&self, key: &str) -> Result<Option<String>, AgentRuntimeError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Memory(format!("lock poisoned: {e}")))?;
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::get");
         Ok(inner.map.get(key).cloned())
     }
 
     /// Remove all entries from working memory.
     pub fn clear(&self) -> Result<(), AgentRuntimeError> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Memory(format!("lock poisoned: {e}")))?;
+        let mut inner = recover_lock(self.inner.lock(), "WorkingMemory::clear");
         inner.map.clear();
         inner.order.clear();
         Ok(())
@@ -474,10 +541,7 @@ impl WorkingMemory {
 
     /// Return the current number of entries.
     pub fn len(&self) -> Result<usize, AgentRuntimeError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Memory(format!("lock poisoned: {e}")))?;
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::len");
         Ok(inner.map.len())
     }
 
@@ -725,6 +789,67 @@ mod tests {
         let store = SemanticStore::new();
         store.store("k", "v", vec![]).unwrap();
         assert_eq!(store.len().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_semantic_store_retrieve_similar_returns_closest() {
+        let store = SemanticStore::new();
+        // "close" is in the same direction as the query
+        store
+            .store_with_embedding("close", "close value", vec![], vec![1.0, 0.0, 0.0])
+            .unwrap();
+        // "far" is orthogonal to the query
+        store
+            .store_with_embedding("far", "far value", vec![], vec![0.0, 1.0, 0.0])
+            .unwrap();
+
+        let query = vec![1.0, 0.0, 0.0];
+        let results = store.retrieve_similar(&query, 2).unwrap();
+        assert_eq!(results.len(), 2);
+        // The closest result should be "close"
+        assert_eq!(results[0].0, "close");
+        assert!((results[0].2 - 1.0).abs() < 1e-5, "expected similarity ~1.0, got {}", results[0].2);
+        // The far result should have similarity 0.0
+        assert!((results[1].2).abs() < 1e-5, "expected similarity ~0.0, got {}", results[1].2);
+    }
+
+    #[test]
+    fn test_semantic_store_retrieve_similar_ignores_unembedded_entries() {
+        let store = SemanticStore::new();
+        // This entry has no embedding — must not appear in similarity results
+        store.store("no-emb", "no embedding value", vec![]).unwrap();
+        // This entry has an embedding
+        store
+            .store_with_embedding("with-emb", "with embedding value", vec![], vec![1.0, 0.0])
+            .unwrap();
+
+        let query = vec![1.0, 0.0];
+        let results = store.retrieve_similar(&query, 10).unwrap();
+        assert_eq!(results.len(), 1, "only the embedded entry should appear");
+        assert_eq!(results[0].0, "with-emb");
+    }
+
+    #[test]
+    fn test_cosine_similarity_orthogonal_vectors_return_zero() {
+        // Exercise cosine_similarity through retrieve_similar with orthogonal vectors
+        let store = SemanticStore::new();
+        store
+            .store_with_embedding("a", "va", vec![], vec![1.0, 0.0])
+            .unwrap();
+        store
+            .store_with_embedding("b", "vb", vec![], vec![0.0, 1.0])
+            .unwrap();
+
+        // query is along [1, 0]; "b" is orthogonal → similarity should be 0
+        let query = vec![1.0, 0.0];
+        let results = store.retrieve_similar(&query, 2).unwrap();
+        assert_eq!(results.len(), 2);
+        let b_result = results.iter().find(|(k, _, _)| k == "b").unwrap();
+        assert!(
+            b_result.2.abs() < 1e-5,
+            "expected cosine similarity 0.0 for orthogonal vectors, got {}",
+            b_result.2
+        );
     }
 
     // ── WorkingMemory ─────────────────────────────────────────────────────────
