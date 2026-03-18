@@ -43,8 +43,24 @@ pub trait PersistenceBackend: Send + Sync {
 ///
 /// Each key maps to a file named `<key>.bin` inside the base directory.
 /// The base directory must exist before calling any methods.
+///
+/// # Key Sanitization
+///
+/// Characters that are invalid in file names on common operating systems
+/// (`/`, `\`, `:`, `*`, `?`, `"`, `<`, `>`, `|`) are replaced with `_`
+/// before the path is constructed. This prevents path-traversal attacks
+/// and ensures portability across Linux, macOS, and Windows.
+///
+/// # Concurrency
+///
+/// `FilePersistenceBackend` is `Clone` and `Send + Sync`. Each clone
+/// shares the same `base_dir` via `Arc` and can be used from multiple
+/// async tasks simultaneously. Concurrent writes to the **same key**
+/// are safe at the Rust level but are not serialized — the final file
+/// content is determined by the OS.
 #[derive(Debug, Clone)]
 pub struct FilePersistenceBackend {
+    /// Absolute path to the directory where `<key>.bin` files are stored.
     base_dir: Arc<PathBuf>,
 }
 

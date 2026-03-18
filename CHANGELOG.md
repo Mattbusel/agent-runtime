@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Integration tests that accessed the private `EpisodicStore::inner` field now use the
+  new `bump_recall_count_by_content` helper method and the public `add_episode_at` API.
+- Integration test `graph_entity_with_properties_stored_correctly` updated to use the
+  correct `Entity::with_properties(id, label, props)` associated-function signature.
+- `link_w` test helper corrected from `f64` to `f32` to match `Relationship::new` signature.
+
+### Added
+- `EpisodicStore::bump_recall_count_by_content` helper method for integration tests that
+  need to simulate prior recall history without accessing private fields.
+
 ## [0.2.0] - 2026-03-17
 
 ### Added

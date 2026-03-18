@@ -61,3 +61,32 @@ jobs:
 
       - name: Doc (all features, no deps, private items)
         run: cargo doc --no-deps --document-private-items --all-features
+
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-tarpaulin --locked
+      - run: cargo tarpaulin --out Xml --engine llvm --all-features
+      - uses: codecov/codecov-action@v4
+        with:
+          fail_ci_if_error: false
+
+  msrv:
+    name: MSRV Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75
+      - run: cargo build --all-features

@@ -1,5 +1,9 @@
 # agent-runtime
 
+[![CI](https://github.com/Mattbusel/agent-runtime/actions/workflows/ci.yml/badge.svg)](https://github.com/Mattbusel/agent-runtime/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/agent-runtime.svg)](https://crates.io/crates/agent-runtime)
+[![docs.rs](https://docs.rs/agent-runtime/badge.svg)](https://docs.rs/agent-runtime)
+
 A unified Tokio async agent runtime that brings together orchestration, episodic and semantic
 memory, an in-memory knowledge graph, and a ReAct (Thought-Action-Observation) agent loop in a
 single Rust crate. The library consolidates the public APIs of `tokio-prompt-orchestrator`,

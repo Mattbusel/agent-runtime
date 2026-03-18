@@ -36,6 +36,20 @@
 //! // });
 //! ```
 //!
+//! ## Extension Points
+//!
+//! The primary extension point is the [`PersistenceBackend`] trait (enabled by
+//! the `persistence` feature). Implement it to persist agent sessions and
+//! per-step checkpoints to any storage backend — disk, Redis, S3, or a
+//! database. The bundled [`FilePersistenceBackend`] stores each checkpoint as a
+//! `<key>.bin` file in a local directory and serves as a reference
+//! implementation.
+//!
+//! Additional extension points:
+//! - [`LlmProvider`] (`providers` feature) — plug in any LLM API.
+//! - `CircuitBreakerBackend` (`redis-circuit-breaker` feature) — distributed
+//!   circuit-breaker state via Redis.
+//!
 //! ## Upstream Crates
 //!
 //! This crate implements standalone versions of the APIs from:
