@@ -35,15 +35,26 @@ pub enum AgentRuntimeError {
 
     /// Circuit breaker is open — fast-fail without attempting the operation.
     #[error("Circuit breaker open for '{service}'")]
-    CircuitOpen { service: String },
+    CircuitOpen {
+        /// Name of the service whose circuit breaker is open.
+        service: String,
+    },
 
     /// Backpressure threshold exceeded — caller must shed or wait.
     #[error("Backpressure threshold exceeded: queue depth {depth}/{capacity}")]
-    BackpressureShed { depth: usize, capacity: usize },
+    BackpressureShed {
+        /// Current in-flight request count at the time of rejection.
+        depth: usize,
+        /// Maximum allowed in-flight request count.
+        capacity: usize,
+    },
 
     /// A deduplication key collision was detected.
     #[error("Deduplication key collision: {key}")]
-    DeduplicationConflict { key: String },
+    DeduplicationConflict {
+        /// The duplicated request key.
+        key: String,
+    },
 
     /// An LLM provider call failed.
     #[error("Provider error: {0}")]

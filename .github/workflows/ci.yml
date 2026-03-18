@@ -15,6 +15,49 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy -- -D warnings
-      - run: cargo test
+
+      # ── Format check ─────────────────────────────────────────────────────────
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      # ── Lint (all feature combinations) ──────────────────────────────────────
+      - name: Clippy (no features)
+        run: cargo clippy --no-default-features -- -D warnings
+
+      - name: Clippy (orchestrator only)
+        run: cargo clippy --no-default-features --features orchestrator -- -D warnings
+
+      - name: Clippy (memory only)
+        run: cargo clippy --no-default-features --features memory -- -D warnings
+
+      - name: Clippy (all features)
+        run: cargo clippy --all-features -- -D warnings
+
+      # ── Tests (all feature combinations) ─────────────────────────────────────
+      - name: Test (default features)
+        run: cargo test
+
+      - name: Test (no features)
+        run: cargo test --no-default-features
+
+      - name: Test (orchestrator only)
+        run: cargo test --no-default-features --features orchestrator
+
+      - name: Test (memory only)
+        run: cargo test --no-default-features --features memory
+
+      - name: Test (persistence feature)
+        run: cargo test --features persistence
+
+      - name: Test (providers feature)
+        run: cargo test --features providers
+
+      - name: Test (all features)
+        run: cargo test --all-features
+
+      # ── Documentation ─────────────────────────────────────────────────────────
+      - name: Doc (all features, no deps)
+        run: cargo doc --no-deps --all-features
+
+      - name: Doc (all features, no deps, private items)
+        run: cargo doc --no-deps --document-private-items --all-features

@@ -286,7 +286,6 @@ impl AgentRuntimeBuilder<HasConfig> {
 // ── AgentRuntime ──────────────────────────────────────────────────────────────
 
 /// Unified runtime that coordinates memory, graph, orchestration, and agent loop.
-#[derive(Debug)]
 pub struct AgentRuntime {
     memory: Option<EpisodicStore>,
     working: Option<WorkingMemory>,
@@ -297,6 +296,20 @@ pub struct AgentRuntime {
     metrics: Arc<RuntimeMetrics>,
     #[cfg(feature = "persistence")]
     checkpoint_backend: Option<Arc<dyn crate::persistence::PersistenceBackend>>,
+}
+
+impl std::fmt::Debug for AgentRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("AgentRuntime");
+        s.field("memory", &self.memory.is_some())
+            .field("working", &self.working.is_some())
+            .field("graph", &self.graph.is_some())
+            .field("backpressure", &self.backpressure.is_some())
+            .field("tools", &self.tools.len());
+        #[cfg(feature = "persistence")]
+        s.field("checkpoint_backend", &self.checkpoint_backend.is_some());
+        s.finish()
+    }
 }
 
 impl AgentRuntime {

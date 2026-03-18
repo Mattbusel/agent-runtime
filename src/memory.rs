@@ -467,6 +467,20 @@ impl EpisodicStore {
     pub fn is_empty(&self) -> Result<bool, AgentRuntimeError> {
         Ok(self.len()? == 0)
     }
+
+    /// Bump the `recall_count` of every item whose content equals `content` by `amount`.
+    ///
+    /// This method exists to support integration tests that need to simulate prior recall
+    /// history without accessing private fields. It is not intended for production use.
+    #[doc(hidden)]
+    pub fn bump_recall_count_by_content(&self, content: &str, amount: u64) {
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::bump_recall_count_by_content");
+        for item in inner.items.iter_mut() {
+            if item.content == content {
+                item.recall_count = item.recall_count.saturating_add(amount);
+            }
+        }
+    }
 }
 
 impl Default for EpisodicStore {

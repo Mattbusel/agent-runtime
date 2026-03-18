@@ -35,20 +35,31 @@ pub type AsyncToolHandler = Box<dyn Fn(Value) -> AsyncToolFuture + Send + Sync>;
 /// Role of a message in a conversation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
+    /// System-level instruction injected before the user turn.
     System,
+    /// Message from the human user.
     User,
+    /// Message produced by the language model.
     Assistant,
+    /// Message produced by a tool invocation.
     Tool,
 }
 
 /// A single message in the conversation history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
+    /// The role of the speaker who produced this message.
     pub role: Role,
+    /// The textual content of the message.
     pub content: String,
 }
 
 impl Message {
+    /// Create a new `Message` with the given role and content.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
     pub fn new(role: Role, content: impl Into<String>) -> Self {
         Self {
             role,
@@ -325,6 +336,7 @@ pub struct ReActLoop {
 }
 
 impl ReActLoop {
+    /// Create a new `ReActLoop` with the given configuration and an empty tool registry.
     pub fn new(config: AgentConfig) -> Self {
         Self {
             config,
@@ -332,10 +344,21 @@ impl ReActLoop {
         }
     }
 
+    /// Register a tool that the agent loop can invoke.
     pub fn register_tool(&mut self, spec: ToolSpec) {
         self.registry.register(spec);
     }
 
+    /// Execute the ReAct loop for the given prompt.
+    ///
+    /// # Arguments
+    /// * `prompt` — user input passed as the initial context
+    /// * `infer`  — async inference function: receives context string, returns response string
+    ///
+    /// # Returns
+    /// - `Ok(Vec<ReActStep>)` — steps executed, ending with a `FINAL_ANSWER` step
+    /// - `Err(AgentRuntimeError::AgentLoop)` — if max iterations reached without `FINAL_ANSWER`
+    ///   or if a ReAct response cannot be parsed
     #[tracing::instrument(skip(infer))]
     pub async fn run<F, Fut>(
         &self,
@@ -411,12 +434,17 @@ fn parse_tool_call(action: &str) -> (String, Value) {
 }
 
 /// Agent-specific errors, mirrors `wasm-agent::AgentError`.
+///
+/// Converts to `AgentRuntimeError::AgentLoop` via the `From` implementation.
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
+    /// The referenced tool name does not exist in the registry.
     #[error("Tool '{0}' not found")]
     ToolNotFound(String),
+    /// The ReAct loop consumed all iterations without emitting `FINAL_ANSWER`.
     #[error("Max iterations exceeded: {0}")]
     MaxIterations(usize),
+    /// The model response could not be parsed into a `ReActStep`.
     #[error("Parse error: {0}")]
     ParseError(String),
 }

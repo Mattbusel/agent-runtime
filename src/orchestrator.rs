@@ -130,8 +130,14 @@ impl RetryPolicy {
 /// States: `Closed` (normal) → `Open` (fast-fail) → `HalfOpen` (probe).
 #[derive(Debug, Clone, PartialEq)]
 pub enum CircuitState {
+    /// Circuit is operating normally; requests pass through.
     Closed,
-    Open { opened_at: Instant },
+    /// Circuit has tripped; requests are fast-failed without calling the operation.
+    Open {
+        /// The instant at which the circuit was opened.
+        opened_at: Instant,
+    },
+    /// Recovery probe period; the next request will be attempted to test recovery.
     HalfOpen,
 }
 

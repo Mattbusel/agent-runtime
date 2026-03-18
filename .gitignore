@@ -1,1 +1,15 @@
-target/
+# Rust build output
+/target/
+
+# Environment variables and secrets
+.env
+.env.*
+
+# Windows debug symbols
+*.pdb
+
+# macOS metadata
+.DS_Store
+
+# Windows thumbnail cache
+Thumbs.db
