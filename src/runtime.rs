@@ -356,14 +356,16 @@ impl AgentRuntime {
             Ok(())
         };
 
-        if let Err(e) = backpressure_result {
+        if let Err(ref e) = backpressure_result {
+            tracing::warn!(agent_id = %agent_id, error = %e, "backpressure shed: rejecting session");
             self.metrics
                 .backpressure_shed_count
                 .fetch_add(1, Ordering::Relaxed);
             self.metrics.active_sessions.fetch_sub(1, Ordering::Relaxed);
-            return Err(e);
+            return backpressure_result;
         }
 
+        tracing::info!(agent_id = %agent_id, "agent session starting");
         let outcome = self.run_agent_inner(agent_id.clone(), prompt, infer).await;
 
         // Always release backpressure — success or error.
@@ -373,10 +375,22 @@ impl AgentRuntime {
 
         self.metrics.active_sessions.fetch_sub(1, Ordering::Relaxed);
 
-        if let Ok(ref session) = outcome {
-            self.metrics
-                .total_steps
-                .fetch_add(session.step_count() as u64, Ordering::Relaxed);
+        match &outcome {
+            Ok(session) => {
+                tracing::info!(
+                    agent_id = %agent_id,
+                    session_id = %session.session_id,
+                    steps = session.step_count(),
+                    duration_ms = session.duration_ms,
+                    "agent session completed"
+                );
+                self.metrics
+                    .total_steps
+                    .fetch_add(session.step_count() as u64, Ordering::Relaxed);
+            }
+            Err(e) => {
+                tracing::error!(agent_id = %agent_id, error = %e, "agent session failed");
+            }
         }
 
         outcome
@@ -522,6 +536,7 @@ impl AgentRuntime {
         // Save final checkpoint if a backend is configured.
         #[cfg(feature = "persistence")]
         if let Some(ref backend) = self.checkpoint_backend {
+            tracing::info!(session_id = %session_id, "saving session checkpoint");
             session.save_checkpoint(backend.as_ref()).await?;
 
             // Save incremental per-step checkpoints.
@@ -536,7 +551,9 @@ impl AgentRuntime {
                 };
                 let key = format!("session:{session_id}:step:{i}");
                 if let Ok(bytes) = serde_json::to_vec(&partial) {
-                    let _ = backend.save(&key, &bytes).await;
+                    if let Err(e) = backend.save(&key, &bytes).await {
+                        tracing::warn!(session_id = %session_id, step = i, error = %e, "failed to save step checkpoint");
+                    }
                 }
             }
         }
