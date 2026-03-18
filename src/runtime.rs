@@ -20,9 +20,11 @@ use crate::agent::{AgentConfig, ReActLoop, ReActStep, ToolSpec};
 use crate::error::AgentRuntimeError;
 use crate::graph::GraphStore;
 use crate::memory::{AgentId, EpisodicStore, WorkingMemory};
+use crate::metrics::RuntimeMetrics;
 use crate::orchestrator::BackpressureGuard;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -88,6 +90,26 @@ impl AgentSession {
             }
         }
     }
+
+    /// Load a step-scoped checkpoint saved by `AgentRuntime`.
+    ///
+    /// Returns `None` if no checkpoint exists for the given session/step.
+    #[cfg(feature = "persistence")]
+    pub async fn load_step_checkpoint(
+        backend: &dyn crate::persistence::PersistenceBackend,
+        session_id: &str,
+        step: usize,
+    ) -> Result<Option<AgentSession>, AgentRuntimeError> {
+        let key = format!("session:{session_id}:step:{step}");
+        match backend.load(&key).await? {
+            None => Ok(None),
+            Some(bytes) => {
+                let session = serde_json::from_slice(&bytes)
+                    .map_err(|e| AgentRuntimeError::Persistence(format!("deserialize: {e}")))?;
+                Ok(Some(session))
+            }
+        }
+    }
 }
 
 // ── AgentRuntimeBuilder ───────────────────────────────────────────────────────
@@ -112,6 +134,7 @@ pub struct AgentRuntimeBuilder<S = NeedsConfig> {
     backpressure: Option<BackpressureGuard>,
     agent_config: Option<AgentConfig>,
     tools: Vec<Arc<ToolSpec>>,
+    metrics: Arc<RuntimeMetrics>,
     #[cfg(feature = "persistence")]
     checkpoint_backend: Option<Arc<dyn crate::persistence::PersistenceBackend>>,
     _state: PhantomData<S>,
@@ -151,6 +174,7 @@ impl Default for AgentRuntimeBuilder<NeedsConfig> {
             backpressure: None,
             agent_config: None,
             tools: Vec::new(),
+            metrics: RuntimeMetrics::new(),
             #[cfg(feature = "persistence")]
             checkpoint_backend: None,
             _state: PhantomData,
@@ -190,6 +214,12 @@ impl<S> AgentRuntimeBuilder<S> {
         self
     }
 
+    /// Attach a shared `RuntimeMetrics` instance.
+    pub fn with_metrics(mut self, metrics: Arc<RuntimeMetrics>) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
     /// Attach a persistence backend for session checkpointing.
     #[cfg(feature = "persistence")]
     pub fn with_checkpoint_backend(
@@ -220,6 +250,7 @@ impl AgentRuntimeBuilder<NeedsConfig> {
             backpressure: self.backpressure,
             agent_config: Some(config),
             tools: self.tools,
+            metrics: self.metrics,
             #[cfg(feature = "persistence")]
             checkpoint_backend: self.checkpoint_backend,
             _state: PhantomData,
@@ -245,6 +276,7 @@ impl AgentRuntimeBuilder<HasConfig> {
             backpressure: self.backpressure,
             agent_config,
             tools: self.tools,
+            metrics: self.metrics,
             #[cfg(feature = "persistence")]
             checkpoint_backend: self.checkpoint_backend,
         }
@@ -262,6 +294,7 @@ pub struct AgentRuntime {
     backpressure: Option<BackpressureGuard>,
     agent_config: AgentConfig,
     tools: Vec<Arc<ToolSpec>>,
+    metrics: Arc<RuntimeMetrics>,
     #[cfg(feature = "persistence")]
     checkpoint_backend: Option<Arc<dyn crate::persistence::PersistenceBackend>>,
 }
@@ -270,6 +303,11 @@ impl AgentRuntime {
     /// Return a new builder in the `NeedsConfig` state.
     pub fn builder() -> AgentRuntimeBuilder<NeedsConfig> {
         AgentRuntimeBuilder::new()
+    }
+
+    /// Return a shared reference to the runtime metrics.
+    pub fn metrics(&self) -> Arc<RuntimeMetrics> {
+        Arc::clone(&self.metrics)
     }
 
     /// Run the agent loop for the given prompt.
@@ -295,9 +333,22 @@ impl AgentRuntime {
         F: FnMut(String) -> Fut,
         Fut: std::future::Future<Output = String>,
     {
+        self.metrics.total_sessions.fetch_add(1, Ordering::Relaxed);
+        self.metrics.active_sessions.fetch_add(1, Ordering::Relaxed);
+
         // Acquire backpressure slot before any work.
-        if let Some(ref guard) = self.backpressure {
-            guard.try_acquire()?;
+        let backpressure_result = if let Some(ref guard) = self.backpressure {
+            guard.try_acquire()
+        } else {
+            Ok(())
+        };
+
+        if let Err(e) = backpressure_result {
+            self.metrics
+                .backpressure_shed_count
+                .fetch_add(1, Ordering::Relaxed);
+            self.metrics.active_sessions.fetch_sub(1, Ordering::Relaxed);
+            return Err(e);
         }
 
         let outcome = self.run_agent_inner(agent_id.clone(), prompt, infer).await;
@@ -305,6 +356,14 @@ impl AgentRuntime {
         // Always release backpressure — success or error.
         if let Some(ref guard) = self.backpressure {
             let _ = guard.release();
+        }
+
+        self.metrics.active_sessions.fetch_sub(1, Ordering::Relaxed);
+
+        if let Ok(ref session) = outcome {
+            self.metrics
+                .total_steps
+                .fetch_add(session.step_count() as u64, Ordering::Relaxed);
         }
 
         outcome
@@ -330,8 +389,40 @@ impl AgentRuntime {
         // Build enriched prompt from episodic memory.
         let enriched_prompt = if let Some(ref store) = self.memory {
             let memories = store.recall(&agent_id, self.agent_config.max_memory_recalls)?;
+
+            // Apply token budget if configured.
+            let memories = if let Some(token_budget) = self.agent_config.max_memory_tokens {
+                let mut used = 0usize;
+                memories
+                    .into_iter()
+                    .filter(|m| {
+                        let tokens = (m.content.len() / 4).max(1);
+                        if used + tokens <= token_budget {
+                            used += tokens;
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                memories
+            };
+
             memory_hits = memories.len();
-            tracing::debug!("enriched prompt with {} memory items", memory_hits);
+            self.metrics
+                .memory_recall_count
+                .fetch_add(1, Ordering::Relaxed);
+
+            if let Some(budget) = self.agent_config.max_memory_tokens {
+                tracing::debug!(
+                    "memory token budget: {budget}, injecting {} items",
+                    memory_hits
+                );
+            } else {
+                tracing::debug!("enriched prompt with {} memory items", memory_hits);
+            }
+
             if memories.is_empty() {
                 prompt.to_owned()
             } else {
@@ -346,6 +437,25 @@ impl AgentRuntime {
             }
         } else {
             prompt.to_owned()
+        };
+
+        // Inject working memory into prompt.
+        let enriched_prompt = if let Some(ref wm) = self.working {
+            let entries = wm.entries()?;
+            if entries.is_empty() {
+                enriched_prompt
+            } else {
+                let wm_context: Vec<String> = entries
+                    .iter()
+                    .map(|(k, v)| format!("  {k}: {v}"))
+                    .collect();
+                format!(
+                    "{enriched_prompt}\n\nCurrent working state:\n{}",
+                    wm_context.join("\n")
+                )
+            }
+        } else {
+            enriched_prompt
         };
 
         // Count graph entities as "lookups" for session metadata.
@@ -386,6 +496,22 @@ impl AgentRuntime {
         #[cfg(feature = "persistence")]
         if let Some(ref backend) = self.checkpoint_backend {
             session.save_checkpoint(backend.as_ref()).await?;
+
+            // Save incremental per-step checkpoints.
+            for i in 1..=session.steps.len() {
+                let partial = AgentSession {
+                    session_id: session_id.clone(),
+                    agent_id: session.agent_id.clone(),
+                    steps: session.steps[..i].to_vec(),
+                    memory_hits: session.memory_hits,
+                    graph_lookups: session.graph_lookups,
+                    duration_ms: session.duration_ms,
+                };
+                let key = format!("session:{session_id}:step:{i}");
+                if let Ok(bytes) = serde_json::to_vec(&partial) {
+                    let _ = backend.save(&key, &bytes).await;
+                }
+            }
         }
 
         Ok(session)
@@ -754,5 +880,139 @@ mod tests {
             .unwrap();
 
         assert_eq!(session.graph_lookups, 2); // 2 entities
+    }
+
+    // ── Metrics ───────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_metrics_active_sessions_decrements_after_run() {
+        let runtime = AgentRuntime::builder()
+            .with_agent_config(simple_config())
+            .build();
+
+        runtime
+            .run_agent(AgentId::new("a"), "prompt", final_answer_infer)
+            .await
+            .unwrap();
+
+        assert_eq!(runtime.metrics().active_sessions(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_metrics_total_sessions_increments() {
+        let runtime = AgentRuntime::builder()
+            .with_agent_config(simple_config())
+            .build();
+
+        runtime
+            .run_agent(AgentId::new("a"), "prompt", final_answer_infer)
+            .await
+            .unwrap();
+        runtime
+            .run_agent(AgentId::new("a"), "prompt", final_answer_infer)
+            .await
+            .unwrap();
+
+        assert_eq!(runtime.metrics().total_sessions(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_metrics_backpressure_shed_increments_on_shed() {
+        let guard = BackpressureGuard::new(1).unwrap();
+        guard.try_acquire().unwrap(); // pre-fill
+
+        let runtime = AgentRuntime::builder()
+            .with_agent_config(simple_config())
+            .with_backpressure(guard)
+            .build();
+
+        let _ = runtime
+            .run_agent(AgentId::new("a"), "prompt", final_answer_infer)
+            .await;
+
+        assert_eq!(runtime.metrics().backpressure_shed_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_metrics_memory_recall_count_increments() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "fact", 0.9).unwrap();
+
+        let runtime = AgentRuntime::builder()
+            .with_agent_config(simple_config())
+            .with_memory(store)
+            .build();
+
+        runtime
+            .run_agent(agent, "prompt", final_answer_infer)
+            .await
+            .unwrap();
+
+        assert_eq!(runtime.metrics().memory_recall_count(), 1);
+    }
+
+    // ── Memory token budgeting ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_agent_config_max_memory_tokens_limits_injection() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("budget-agent");
+        // Each memory has ~100 chars → ~25 tokens each
+        for i in 0..5 {
+            let content = format!("{:0>100}", i); // 100-char string
+            store.add_episode(agent.clone(), content, 0.9).unwrap();
+        }
+
+        // Token budget of 10 allows at most ~1 memory (each is ~25 tokens).
+        let cfg = AgentConfig::new(5, "test").with_max_memory_tokens(10);
+        let runtime = AgentRuntime::builder()
+            .with_agent_config(cfg)
+            .with_memory(store)
+            .build();
+
+        let session = runtime
+            .run_agent(agent, "prompt", final_answer_infer)
+            .await
+            .unwrap();
+
+        assert!(
+            session.memory_hits <= 1,
+            "expected at most 1 memory hit with tight token budget, got {}",
+            session.memory_hits
+        );
+    }
+
+    // ── Working memory injection ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_working_memory_injected_into_prompt() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("task", "write tests").unwrap();
+        wm.set("status", "in progress").unwrap();
+
+        let runtime = AgentRuntime::builder()
+            .with_agent_config(simple_config())
+            .with_working_memory(wm)
+            .build();
+
+        let mut captured_ctx: Option<String> = None;
+        let captured_ref = &mut captured_ctx;
+
+        runtime
+            .run_agent(AgentId::new("a"), "do stuff", |ctx: String| {
+                *captured_ref = Some(ctx.clone());
+                async move { "Thought: done\nAction: FINAL_ANSWER ok".to_string() }
+            })
+            .await
+            .unwrap();
+
+        let ctx = captured_ctx.expect("infer should have been called");
+        assert!(
+            ctx.contains("Current working state:"),
+            "expected working memory injection in context, got: {ctx}"
+        );
+        assert!(ctx.contains("task: write tests"));
+        assert!(ctx.contains("status: in progress"));
     }
 }

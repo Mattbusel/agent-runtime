@@ -61,6 +61,7 @@ pub mod graph;
 pub mod orchestrator;
 
 pub mod agent;
+pub mod metrics;
 
 #[cfg(feature = "persistence")]
 pub mod persistence;

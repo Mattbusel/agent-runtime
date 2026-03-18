@@ -21,6 +21,9 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
+#[cfg(feature = "orchestrator")]
+use std::sync::Arc;
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /// A pinned, boxed future returning a `Value`. Used for async tool handlers.
@@ -77,6 +80,9 @@ pub struct AgentConfig {
     /// Maximum number of episodic memories to inject into the prompt.
     /// Keeping this small prevents silent token-budget overruns.  Default: 3.
     pub max_memory_recalls: usize,
+    /// Maximum approximate token budget for injected memories.
+    /// Uses ~4 chars/token heuristic. None means no limit.
+    pub max_memory_tokens: Option<usize>,
 }
 
 impl AgentConfig {
@@ -87,6 +93,7 @@ impl AgentConfig {
             model: model.into(),
             system_prompt: "You are a helpful AI agent.".into(),
             max_memory_recalls: 3,
+            max_memory_tokens: None,
         }
     }
 
@@ -101,6 +108,12 @@ impl AgentConfig {
         self.max_memory_recalls = n;
         self
     }
+
+    /// Set a maximum token budget for injected memories (~4 chars/token heuristic).
+    pub fn with_max_memory_tokens(mut self, n: usize) -> Self {
+        self.max_memory_tokens = Some(n);
+        self
+    }
 }
 
 // ── ToolSpec ──────────────────────────────────────────────────────────────────
@@ -113,14 +126,26 @@ pub struct ToolSpec {
     pub description: String,
     /// Async handler: receives JSON arguments, returns a future resolving to a JSON result.
     pub handler: AsyncToolHandler,
+    /// Field names that must be present in the JSON args object.
+    /// Empty means no validation is performed.
+    pub required_fields: Vec<String>,
+    /// Optional per-tool circuit breaker.
+    #[cfg(feature = "orchestrator")]
+    pub circuit_breaker: Option<Arc<crate::orchestrator::CircuitBreaker>>,
 }
 
 impl std::fmt::Debug for ToolSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ToolSpec")
-            .field("name", &self.name)
+        let mut s = f.debug_struct("ToolSpec");
+        s.field("name", &self.name)
             .field("description", &self.description)
-            .finish()
+            .field("required_fields", &self.required_fields);
+        #[cfg(feature = "orchestrator")]
+        s.field(
+            "has_circuit_breaker",
+            &self.circuit_breaker.is_some(),
+        );
+        s.finish()
     }
 }
 
@@ -139,6 +164,9 @@ impl ToolSpec {
                 let result = handler(args);
                 Box::pin(async move { result })
             }),
+            required_fields: Vec::new(),
+            #[cfg(feature = "orchestrator")]
+            circuit_breaker: None,
         }
     }
 
@@ -152,7 +180,23 @@ impl ToolSpec {
             name: name.into(),
             description: description.into(),
             handler: Box::new(handler),
+            required_fields: Vec::new(),
+            #[cfg(feature = "orchestrator")]
+            circuit_breaker: None,
         }
+    }
+
+    /// Set the required fields that must be present in the JSON args object.
+    pub fn with_required_fields(mut self, fields: Vec<String>) -> Self {
+        self.required_fields = fields;
+        self
+    }
+
+    /// Attach a circuit breaker to this tool spec.
+    #[cfg(feature = "orchestrator")]
+    pub fn with_circuit_breaker(mut self, cb: Arc<crate::orchestrator::CircuitBreaker>) -> Self {
+        self.circuit_breaker = Some(cb);
+        self
     }
 
     /// Invoke the tool with the given JSON arguments.
@@ -186,14 +230,48 @@ impl ToolRegistry {
     ///
     /// # Returns
     /// - `Ok(Value)` — tool result
-    /// - `Err(AgentRuntimeError::AgentLoop)` — if the tool is not found
+    /// - `Err(AgentRuntimeError::AgentLoop)` — if the tool is not found or required fields
+    ///   are missing
+    /// - `Err(AgentRuntimeError::CircuitOpen)` — if the tool's circuit breaker is open
     #[tracing::instrument(skip_all, fields(tool_name = %name))]
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, AgentRuntimeError> {
         let spec = self
             .tools
             .get(name)
             .ok_or_else(|| AgentRuntimeError::AgentLoop(format!("tool '{name}' not found")))?;
-        Ok(spec.call(args).await)
+
+        // Item 3 — required field validation
+        if !spec.required_fields.is_empty() {
+            if let Some(obj) = args.as_object() {
+                for field in &spec.required_fields {
+                    if !obj.contains_key(field) {
+                        return Err(AgentRuntimeError::AgentLoop(format!(
+                            "tool '{}' missing required field '{}'",
+                            name, field
+                        )));
+                    }
+                }
+            } else {
+                return Err(AgentRuntimeError::AgentLoop(format!(
+                    "tool '{}' requires JSON object args, got {}",
+                    name, args
+                )));
+            }
+        }
+
+        // Item 7 — per-tool circuit breaker check
+        #[cfg(feature = "orchestrator")]
+        if let Some(ref cb) = spec.circuit_breaker {
+            use crate::orchestrator::CircuitState;
+            if let Ok(CircuitState::Open { .. }) = cb.state() {
+                return Err(AgentRuntimeError::CircuitOpen {
+                    service: format!("tool:{}", name),
+                });
+            }
+        }
+
+        let result = spec.call(args).await;
+        Ok(result)
     }
 
     /// Return the list of registered tool names.
@@ -205,15 +283,24 @@ impl ToolRegistry {
 // ── ReActLoop ─────────────────────────────────────────────────────────────────
 
 /// Parses a ReAct response string into a `ReActStep`.
+///
+/// Case-insensitive; tolerates spaces around the colon.
+/// e.g. `Thought :`, `thought:`, `THOUGHT :` all match.
 pub fn parse_react_step(text: &str) -> Result<ReActStep, AgentRuntimeError> {
     let mut thought = String::new();
     let mut action = String::new();
 
     for line in text.lines() {
-        if let Some(t) = line.strip_prefix("Thought:") {
-            thought = t.trim().to_owned();
-        } else if let Some(a) = line.strip_prefix("Action:") {
-            action = a.trim().to_owned();
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("thought") {
+            if let Some(colon_pos) = trimmed.find(':') {
+                thought = trimmed[colon_pos + 1..].trim().to_owned();
+            }
+        } else if lower.starts_with("action") {
+            if let Some(colon_pos) = trimmed.find(':') {
+                action = trimmed[colon_pos + 1..].trim().to_owned();
+            }
         }
     }
 
@@ -281,9 +368,22 @@ impl ReActLoop {
             }
 
             let (tool_name, args) = parse_tool_call(&step.action);
+
+            // Item 9 — structured error categorization in observation
             let observation = match self.registry.call(&tool_name, args).await {
                 Ok(result) => serde_json::json!({ "ok": true, "data": result }).to_string(),
-                Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
+                Err(e) => {
+                    let kind = match &e {
+                        AgentRuntimeError::AgentLoop(msg) if msg.contains("not found") => {
+                            "not_found"
+                        }
+                        #[cfg(feature = "orchestrator")]
+                        AgentRuntimeError::CircuitOpen { .. } => "transient",
+                        _ => "permanent",
+                    };
+                    serde_json::json!({ "ok": false, "error": e.to_string(), "kind": kind })
+                        .to_string()
+                }
             };
 
             step.observation = observation.clone();
@@ -442,5 +542,121 @@ mod tests {
 
         let result = spec.call(serde_json::json!({"input": "test"})).await;
         assert!(result.get("echo").is_some());
+    }
+
+    // Item 1 — Robust ReAct Parser tests
+
+    #[tokio::test]
+    async fn test_parse_react_step_case_insensitive() {
+        let text = "THOUGHT: done\nACTION: FINAL_ANSWER";
+        let step = parse_react_step(text).unwrap();
+        assert_eq!(step.thought, "done");
+        assert_eq!(step.action, "FINAL_ANSWER");
+    }
+
+    #[tokio::test]
+    async fn test_parse_react_step_space_before_colon() {
+        let text = "Thought : done\nAction : go";
+        let step = parse_react_step(text).unwrap();
+        assert_eq!(step.thought, "done");
+        assert_eq!(step.action, "go");
+    }
+
+    // Item 3 — Tool required field validation tests
+
+    #[tokio::test]
+    async fn test_tool_required_fields_missing_returns_error() {
+        let config = AgentConfig::new(3, "test-model");
+        let mut loop_ = ReActLoop::new(config);
+
+        loop_.register_tool(
+            ToolSpec::new("search", "Searches for something", |args| {
+                serde_json::json!({ "result": args })
+            })
+            .with_required_fields(vec!["q".to_string()]),
+        );
+
+        let mut call_count = 0;
+        let steps = loop_
+            .run("test", |_ctx| {
+                call_count += 1;
+                let count = call_count;
+                async move {
+                    if count == 1 {
+                        // Call with empty object — missing "q"
+                        "Thought: searching\nAction: search {}".to_string()
+                    } else {
+                        "Thought: done\nAction: FINAL_ANSWER done".to_string()
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 2);
+        assert!(
+            steps[0].observation.contains("missing required field"),
+            "observation was: {}",
+            steps[0].observation
+        );
+    }
+
+    // Item 9 — Structured error observation tests
+
+    #[tokio::test]
+    async fn test_tool_error_observation_includes_kind() {
+        let config = AgentConfig::new(3, "test-model");
+        let loop_ = ReActLoop::new(config);
+
+        let mut call_count = 0;
+        let steps = loop_
+            .run("test", |_ctx| {
+                call_count += 1;
+                let count = call_count;
+                async move {
+                    if count == 1 {
+                        "Thought: try missing\nAction: nonexistent_tool {}".to_string()
+                    } else {
+                        "Thought: done\nAction: FINAL_ANSWER done".to_string()
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 2);
+        let obs = &steps[0].observation;
+        assert!(obs.contains("\"ok\":false"), "observation: {obs}");
+        assert!(obs.contains("\"kind\":\"not_found\""), "observation: {obs}");
+    }
+
+    // Item 7 — Circuit breaker test (only compiled when feature is active)
+
+    #[cfg(feature = "orchestrator")]
+    #[tokio::test]
+    async fn test_tool_with_circuit_breaker_passes_when_closed() {
+        use std::sync::Arc;
+
+        let cb = Arc::new(crate::orchestrator::CircuitBreaker::new(
+            "echo-tool",
+            5,
+            std::time::Duration::from_secs(30),
+        ).unwrap());
+
+        let spec = ToolSpec::new("echo", "Echoes args", |args| {
+            serde_json::json!({ "echoed": args })
+        })
+        .with_circuit_breaker(cb);
+
+        let registry = {
+            let mut r = ToolRegistry::new();
+            r.register(spec);
+            r
+        };
+
+        let result = registry
+            .call("echo", serde_json::json!({ "msg": "hi" }))
+            .await;
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
     }
 }

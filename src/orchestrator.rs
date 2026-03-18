@@ -25,12 +25,13 @@ use std::time::{Duration, Instant};
 /// Maximum delay between retries — caps exponential growth.
 pub const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 
-// ── Lock recovery helper ───────────────────────────────────────────────────────
+// ── Lock recovery helpers ──────────────────────────────────────────────────────
 
 /// Recover from a poisoned mutex by extracting the inner value.
 ///
 /// Instead of propagating a lock-poison error, this logs a warning and
 /// returns the inner guard so the caller can continue operating.
+#[allow(dead_code)]
 fn recover_lock<'a, T>(
     result: std::sync::LockResult<std::sync::MutexGuard<'a, T>>,
     ctx: &str,
@@ -38,6 +39,33 @@ fn recover_lock<'a, T>(
 where
     T: ?Sized,
 {
+    match result {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("mutex poisoned in {ctx}, recovering inner value");
+            poisoned.into_inner()
+        }
+    }
+}
+
+/// Acquire a lock, recovering from poisoning and logging slow acquisitions.
+///
+/// Times the lock acquisition; if it exceeds 5 ms a warning is emitted so
+/// contention hot-spots can be identified in production logs.
+fn timed_lock<'a, T>(mutex: &'a Mutex<T>, ctx: &str) -> std::sync::MutexGuard<'a, T>
+where
+    T: ?Sized,
+{
+    let start = std::time::Instant::now();
+    let result = mutex.lock();
+    let elapsed = start.elapsed();
+    if elapsed > std::time::Duration::from_millis(5) {
+        tracing::warn!(
+            duration_ms = elapsed.as_millis(),
+            ctx = ctx,
+            "slow mutex acquisition"
+        );
+    }
     match result {
         Ok(guard) => guard,
         Err(poisoned) => {
@@ -154,33 +182,33 @@ impl Default for InMemoryCircuitBreakerBackend {
 
 impl CircuitBreakerBackend for InMemoryCircuitBreakerBackend {
     fn increment_failures(&self, _service: &str) -> u32 {
-        let mut state = recover_lock(self.inner.lock(), "InMemoryCircuitBreakerBackend::increment_failures");
+        let mut state = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::increment_failures");
         state.consecutive_failures += 1;
         state.consecutive_failures
     }
 
     fn reset_failures(&self, _service: &str) {
-        let mut state = recover_lock(self.inner.lock(), "InMemoryCircuitBreakerBackend::reset_failures");
+        let mut state = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::reset_failures");
         state.consecutive_failures = 0;
     }
 
     fn get_failures(&self, _service: &str) -> u32 {
-        let state = recover_lock(self.inner.lock(), "InMemoryCircuitBreakerBackend::get_failures");
+        let state = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::get_failures");
         state.consecutive_failures
     }
 
     fn set_open_at(&self, _service: &str, at: std::time::Instant) {
-        let mut state = recover_lock(self.inner.lock(), "InMemoryCircuitBreakerBackend::set_open_at");
+        let mut state = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::set_open_at");
         state.open_at = Some(at);
     }
 
     fn clear_open_at(&self, _service: &str) {
-        let mut state = recover_lock(self.inner.lock(), "InMemoryCircuitBreakerBackend::clear_open_at");
+        let mut state = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::clear_open_at");
         state.open_at = None;
     }
 
     fn get_open_at(&self, _service: &str) -> Option<std::time::Instant> {
-        let state = recover_lock(self.inner.lock(), "InMemoryCircuitBreakerBackend::get_open_at");
+        let state = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::get_open_at");
         state.open_at
     }
 }
@@ -410,10 +438,7 @@ impl Deduplicator {
     ///
     /// Marks the key as in-flight if it is new.
     pub fn check_and_register(&self, key: &str) -> Result<DeduplicationResult, AgentRuntimeError> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
+        let mut inner = timed_lock(&self.inner, "Deduplicator::check_and_register");
 
         let now = Instant::now();
 
@@ -439,10 +464,7 @@ impl Deduplicator {
 
     /// Complete a request: move from in-flight to cached with the given result.
     pub fn complete(&self, key: &str, result: impl Into<String>) -> Result<(), AgentRuntimeError> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
+        let mut inner = timed_lock(&self.inner, "Deduplicator::complete");
         inner.in_flight.remove(key);
         inner
             .cache
@@ -459,9 +481,11 @@ impl Deduplicator {
 /// - Thread-safe via `Arc<Mutex<_>>`
 /// - `try_acquire` is non-blocking
 /// - `release` decrements the counter; no-op if counter is already 0
+/// - Optional soft limit emits a warning when depth reaches the threshold
 #[derive(Debug, Clone)]
 pub struct BackpressureGuard {
     capacity: usize,
+    soft_capacity: Option<usize>,
     inner: Arc<Mutex<usize>>,
 }
 
@@ -479,20 +503,33 @@ impl BackpressureGuard {
         }
         Ok(Self {
             capacity,
+            soft_capacity: None,
             inner: Arc::new(Mutex::new(0)),
         })
     }
 
+    /// Set a soft capacity threshold. When depth reaches this level, a warning
+    /// is logged but the request is still accepted (up to hard capacity).
+    pub fn with_soft_limit(mut self, soft: usize) -> Result<Self, AgentRuntimeError> {
+        if soft >= self.capacity {
+            return Err(AgentRuntimeError::Orchestration(
+                "soft_capacity must be less than hard capacity".into(),
+            ));
+        }
+        self.soft_capacity = Some(soft);
+        Ok(self)
+    }
+
     /// Try to acquire a slot.
+    ///
+    /// Emits a warning when the soft limit is reached (if configured), but
+    /// still accepts the request until hard capacity is exceeded.
     ///
     /// # Returns
     /// - `Ok(())` — slot acquired
-    /// - `Err(AgentRuntimeError::BackpressureShed)` — capacity exceeded
+    /// - `Err(AgentRuntimeError::BackpressureShed)` — hard capacity exceeded
     pub fn try_acquire(&self) -> Result<(), AgentRuntimeError> {
-        let mut depth = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
+        let mut depth = timed_lock(&self.inner, "BackpressureGuard::try_acquire");
         if *depth >= self.capacity {
             return Err(AgentRuntimeError::BackpressureShed {
                 depth: *depth,
@@ -500,26 +537,44 @@ impl BackpressureGuard {
             });
         }
         *depth += 1;
+        if let Some(soft) = self.soft_capacity {
+            if *depth >= soft {
+                tracing::warn!(
+                    depth = *depth,
+                    soft_capacity = soft,
+                    hard_capacity = self.capacity,
+                    "backpressure approaching hard limit"
+                );
+            }
+        }
         Ok(())
     }
 
     /// Release a previously acquired slot.
     pub fn release(&self) -> Result<(), AgentRuntimeError> {
-        let mut depth = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
+        let mut depth = timed_lock(&self.inner, "BackpressureGuard::release");
         *depth = depth.saturating_sub(1);
         Ok(())
     }
 
     /// Return the current depth.
     pub fn depth(&self) -> Result<usize, AgentRuntimeError> {
-        let depth = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
+        let depth = timed_lock(&self.inner, "BackpressureGuard::depth");
         Ok(*depth)
+    }
+
+    /// Return the ratio of current depth to soft capacity as a value in `[0.0, ∞)`.
+    ///
+    /// Returns `0.0` if no soft limit has been configured.
+    /// Values above `1.0` mean the soft limit has been exceeded.
+    pub fn soft_depth_ratio(&self) -> f32 {
+        match self.soft_capacity {
+            None => 0.0,
+            Some(soft) => {
+                let depth = timed_lock(&self.inner, "BackpressureGuard::soft_depth_ratio");
+                *depth as f32 / soft as f32
+            }
+        }
     }
 }
 
@@ -860,5 +915,69 @@ mod tests {
             .add_stage("s1", |s| Ok(s))
             .add_stage("s2", |s| Ok(s));
         assert_eq!(p.stage_count(), 2);
+    }
+
+    // ── Item 13: BackpressureGuard soft limit ──────────────────────────────────
+
+    #[test]
+    fn test_backpressure_soft_limit_rejects_invalid_config() {
+        // soft >= capacity must be rejected
+        let g = BackpressureGuard::new(5).unwrap();
+        assert!(g.with_soft_limit(5).is_err());
+        let g = BackpressureGuard::new(5).unwrap();
+        assert!(g.with_soft_limit(6).is_err());
+    }
+
+    #[test]
+    fn test_backpressure_soft_limit_accepts_requests_below_soft() {
+        let g = BackpressureGuard::new(5)
+            .unwrap()
+            .with_soft_limit(2)
+            .unwrap();
+        // Both acquires below soft limit should succeed
+        assert!(g.try_acquire().is_ok());
+        assert!(g.try_acquire().is_ok());
+        assert_eq!(g.depth().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_backpressure_with_soft_limit_still_sheds_at_hard_capacity() {
+        let g = BackpressureGuard::new(3)
+            .unwrap()
+            .with_soft_limit(2)
+            .unwrap();
+        g.try_acquire().unwrap();
+        g.try_acquire().unwrap();
+        g.try_acquire().unwrap(); // reaches hard limit
+        let result = g.try_acquire();
+        assert!(matches!(
+            result,
+            Err(AgentRuntimeError::BackpressureShed { .. })
+        ));
+    }
+
+    // ── Item 14: timed_lock concurrency correctness ───────────────────────────
+
+    #[test]
+    fn test_backpressure_concurrent_acquires_are_consistent() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let g = Arc::new(BackpressureGuard::new(100).unwrap());
+        let mut handles = Vec::new();
+
+        for _ in 0..10 {
+            let g_clone = Arc::clone(&g);
+            handles.push(thread::spawn(move || {
+                g_clone.try_acquire().ok();
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All 10 threads acquired a slot; depth must be exactly 10
+        assert_eq!(g.depth().unwrap(), 10);
     }
 }

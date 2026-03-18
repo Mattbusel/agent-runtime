@@ -32,6 +32,23 @@ pub trait LlmProvider: Send + Sync {
     /// * `prompt` — the full prompt / context string
     /// * `model`  — model identifier (e.g. `"claude-sonnet-4-6"`, `"gpt-4o"`)
     async fn complete(&self, prompt: &str, model: &str) -> Result<String, AgentRuntimeError>;
+
+    /// Stream the completion token-by-token.
+    ///
+    /// Returns a `Receiver` that yields string chunks as they arrive.
+    /// The channel closes when the stream is complete or an error occurs.
+    /// The default implementation wraps `complete` as a single-chunk stream.
+    async fn stream_complete(
+        &self,
+        prompt: &str,
+        model: &str,
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<String, AgentRuntimeError>>, AgentRuntimeError> {
+        let result = self.complete(prompt, model).await;
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        // Ignore send error — receiver may already be dropped
+        let _ = tx.send(result).await;
+        Ok(rx)
+    }
 }
 
 // ── AnthropicProvider ─────────────────────────────────────────────────────────
@@ -111,6 +128,74 @@ impl LlmProvider for AnthropicProvider {
             })?;
 
         Ok(text.to_owned())
+    }
+
+    async fn stream_complete(
+        &self,
+        prompt: &str,
+        model: &str,
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<String, AgentRuntimeError>>, AgentRuntimeError> {
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": Self::MAX_TOKENS,
+            "stream": true,
+            "messages": [{ "role": "user", "content": prompt }]
+        });
+
+        let response = self
+            .client
+            .post(Self::API_URL)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", Self::API_VERSION)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AgentRuntimeError::Provider(format!("Anthropic stream request failed: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AgentRuntimeError::Provider(format!(
+                "Anthropic stream API error {status}: {text}"
+            )));
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, AgentRuntimeError>>(32);
+
+        // Parse SSE in a background task
+        tokio::spawn(async move {
+            // Collect all bytes and parse SSE events from the full body
+            match response.bytes().await {
+                Ok(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    for line in text.lines() {
+                        if let Some(data) = line.strip_prefix("data: ") {
+                            if data == "[DONE]" {
+                                break;
+                            }
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                // Anthropic streaming event: content_block_delta
+                                if let Some(delta_text) = json["delta"]["text"].as_str() {
+                                    if tx.send(Ok(delta_text.to_owned())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(AgentRuntimeError::Provider(format!(
+                            "Anthropic stream read failed: {e}"
+                        ))))
+                        .await;
+                }
+            }
+        });
+
+        Ok(rx)
     }
 }
 
@@ -203,6 +288,74 @@ impl LlmProvider for OpenAiProvider {
 
         Ok(text.to_owned())
     }
+
+    async fn stream_complete(
+        &self,
+        prompt: &str,
+        model: &str,
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<String, AgentRuntimeError>>, AgentRuntimeError> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let body = serde_json::json!({
+            "model": model,
+            "stream": true,
+            "messages": [{ "role": "user", "content": prompt }]
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AgentRuntimeError::Provider(format!("OpenAI stream request failed: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AgentRuntimeError::Provider(format!(
+                "OpenAI stream API error {status}: {text}"
+            )));
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, AgentRuntimeError>>(32);
+
+        tokio::spawn(async move {
+            match response.bytes().await {
+                Ok(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    for line in text.lines() {
+                        if let Some(data) = line.strip_prefix("data: ") {
+                            if data == "[DONE]" {
+                                break;
+                            }
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                if let Some(content) = json["choices"]
+                                    .as_array()
+                                    .and_then(|c| c.first())
+                                    .and_then(|c| c["delta"]["content"].as_str())
+                                {
+                                    if tx.send(Ok(content.to_owned())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(AgentRuntimeError::Provider(format!(
+                            "OpenAI stream read failed: {e}"
+                        ))))
+                        .await;
+                }
+            }
+        });
+
+        Ok(rx)
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -222,6 +375,7 @@ mod tests {
         async fn complete(&self, _prompt: &str, _model: &str) -> Result<String, AgentRuntimeError> {
             Ok(self.response.clone())
         }
+        // Uses default stream_complete implementation which wraps complete().
     }
 
     #[tokio::test]
@@ -250,5 +404,30 @@ mod tests {
         let r1 = p.complete("q", "model-a").await.unwrap();
         let r2 = p.complete("q", "model-b").await.unwrap();
         assert_eq!(r1, r2);
+    }
+
+    #[tokio::test]
+    async fn test_stub_provider_stream_returns_single_chunk() {
+        let p = StubProvider {
+            response: "hello world".into(),
+        };
+        let mut rx = p.stream_complete("prompt", "model").await.unwrap();
+        let mut collected = String::new();
+        while let Some(chunk) = rx.recv().await {
+            collected.push_str(&chunk.unwrap());
+        }
+        assert_eq!(collected, "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_stream_receiver_closes_after_completion() {
+        let p = StubProvider {
+            response: "done".into(),
+        };
+        let mut rx = p.stream_complete("prompt", "model").await.unwrap();
+        // Drain all chunks
+        while let Some(_chunk) = rx.recv().await {}
+        // Channel should now be closed — next recv returns None
+        assert!(rx.recv().await.is_none());
     }
 }

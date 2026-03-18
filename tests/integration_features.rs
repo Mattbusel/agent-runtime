@@ -4,8 +4,8 @@ use agent_runtime::prelude::*;
 
 // ── Memory × Graph ────────────────────────────────────────────────────────────
 
-#[test]
-fn integration_memory_and_graph_coexist_in_runtime() {
+#[tokio::test]
+async fn integration_memory_and_graph_coexist_in_runtime() {
     let store = EpisodicStore::new();
     let graph = GraphStore::new();
 
@@ -24,13 +24,13 @@ fn integration_memory_and_graph_coexist_in_runtime() {
         .with_agent_config(AgentConfig::new(5, "model"))
         .with_memory(store)
         .with_graph(graph)
-        .build()
-        .unwrap();
+        .build();
 
     let session = runtime
-        .run_agent(agent, "what do you know?", |_| {
-            "Thought: done\nAction: FINAL_ANSWER ok".into()
+        .run_agent(agent, "what do you know?", |_ctx: String| async {
+            "Thought: done\nAction: FINAL_ANSWER ok".to_string()
         })
+        .await
         .unwrap();
 
     assert_eq!(session.memory_hits, 1);
@@ -99,8 +99,8 @@ fn integration_backpressure_allows_sequential_requests() {
 
 // ── Agent loop ────────────────────────────────────────────────────────────────
 
-#[test]
-fn integration_react_loop_tool_chain() {
+#[tokio::test]
+async fn integration_react_loop_tool_chain() {
     let cfg = AgentConfig::new(10, "model");
     let mut loop_ = ReActLoop::new(cfg);
 
@@ -113,21 +113,25 @@ fn integration_react_loop_tool_chain() {
 
     let mut count = 0;
     let steps = loop_
-        .run("execute pipeline", move |_| {
+        .run("execute pipeline", move |_ctx: String| {
             count += 1;
-            match count {
-                1 => "Thought: run step1\nAction: step1 {}".into(),
-                2 => "Thought: run step2\nAction: step2 {}".into(),
-                _ => "Thought: complete\nAction: FINAL_ANSWER done".into(),
+            let n = count;
+            async move {
+                match n {
+                    1 => "Thought: run step1\nAction: step1 {}".into(),
+                    2 => "Thought: run step2\nAction: step2 {}".into(),
+                    _ => "Thought: complete\nAction: FINAL_ANSWER done".into(),
+                }
             }
         })
+        .await
         .unwrap();
 
     assert_eq!(steps.len(), 3); // 2 tool calls + final answer
 }
 
-#[test]
-fn integration_react_loop_with_json_tool_args() {
+#[tokio::test]
+async fn integration_react_loop_with_json_tool_args() {
     let cfg = AgentConfig::new(5, "model");
     let mut loop_ = ReActLoop::new(cfg);
 
@@ -138,16 +142,20 @@ fn integration_react_loop_with_json_tool_args() {
 
     let mut count = 0;
     let steps = loop_
-        .run("double 21", move |_| {
+        .run("double 21", move |_ctx: String| {
             count += 1;
-            if count == 1 {
-                r#"Thought: call calc
+            let n = count;
+            async move {
+                if n == 1 {
+                    r#"Thought: call calc
 Action: calc {"n":21}"#
-                    .into()
-            } else {
-                "Thought: done\nAction: FINAL_ANSWER 42".into()
+                        .into()
+                } else {
+                    "Thought: done\nAction: FINAL_ANSWER 42".into()
+                }
             }
         })
+        .await
         .unwrap();
 
     assert!(steps[0].observation.contains("42"));

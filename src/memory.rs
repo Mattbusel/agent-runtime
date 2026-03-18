@@ -121,6 +121,9 @@ pub struct MemoryItem {
     pub timestamp: DateTime<Utc>,
     /// Searchable tags attached to this memory.
     pub tags: Vec<String>,
+    /// Number of times this memory has been recalled. Updated in-place by `recall`.
+    #[serde(default)]
+    pub recall_count: u64,
 }
 
 impl MemoryItem {
@@ -138,6 +141,7 @@ impl MemoryItem {
             importance: importance.clamp(0.0, 1.0),
             timestamp: Utc::now(),
             tags,
+            recall_count: 0,
         }
     }
 }
@@ -189,6 +193,39 @@ impl DecayPolicy {
     }
 }
 
+// ── RecallPolicy ──────────────────────────────────────────────────────────────
+
+/// Controls how memories are scored and ranked during recall.
+#[derive(Debug, Clone)]
+pub enum RecallPolicy {
+    /// Rank purely by importance score (default).
+    Importance,
+    /// Hybrid score: blends importance, recency, and recall frequency.
+    ///
+    /// `score = importance + recency_score * recency_weight + frequency_score * frequency_weight`
+    /// where `recency_score = exp(-age_hours / 24.0)` and
+    /// `frequency_score = recall_count / (max_recall_count + 1)` (normalized).
+    Hybrid {
+        recency_weight: f32,
+        frequency_weight: f32,
+    },
+}
+
+// ── Hybrid scoring helper ─────────────────────────────────────────────────────
+
+fn compute_hybrid_score(
+    item: &MemoryItem,
+    recency_weight: f32,
+    frequency_weight: f32,
+    max_recall: u64,
+    now: chrono::DateTime<Utc>,
+) -> f32 {
+    let age_hours = (now - item.timestamp).num_seconds().max(0) as f64 / 3600.0;
+    let recency_score = (-age_hours / 24.0).exp() as f32;
+    let frequency_score = item.recall_count as f32 / (max_recall as f32 + 1.0);
+    item.importance + recency_score * recency_weight + frequency_score * frequency_weight
+}
+
 // ── EpisodicStore ─────────────────────────────────────────────────────────────
 
 /// Stores episodic (event-based) memories for agents, ordered by insertion time.
@@ -206,6 +243,9 @@ pub struct EpisodicStore {
 struct EpisodicInner {
     items: Vec<MemoryItem>,
     decay: Option<DecayPolicy>,
+    recall_policy: RecallPolicy,
+    /// Maximum items stored per agent. Oldest (lowest-importance) items evicted when exceeded.
+    per_agent_capacity: Option<usize>,
 }
 
 impl EpisodicStore {
@@ -215,6 +255,8 @@ impl EpisodicStore {
             inner: Arc::new(Mutex::new(EpisodicInner {
                 items: Vec::new(),
                 decay: None,
+                recall_policy: RecallPolicy::Importance,
+                per_agent_capacity: None,
             })),
         }
     }
@@ -225,6 +267,35 @@ impl EpisodicStore {
             inner: Arc::new(Mutex::new(EpisodicInner {
                 items: Vec::new(),
                 decay: Some(policy),
+                recall_policy: RecallPolicy::Importance,
+                per_agent_capacity: None,
+            })),
+        }
+    }
+
+    /// Create a new episodic store with the given recall policy.
+    pub fn with_recall_policy(policy: RecallPolicy) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(EpisodicInner {
+                items: Vec::new(),
+                decay: None,
+                recall_policy: policy,
+                per_agent_capacity: None,
+            })),
+        }
+    }
+
+    /// Create a new episodic store with the given per-agent capacity limit.
+    ///
+    /// When an agent exceeds this capacity, the lowest-importance item for that
+    /// agent is evicted.
+    pub fn with_per_agent_capacity(capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(EpisodicInner {
+                items: Vec::new(),
+                decay: None,
+                recall_policy: RecallPolicy::Importance,
+                per_agent_capacity: Some(capacity),
             })),
         }
     }
@@ -240,10 +311,29 @@ impl EpisodicStore {
         content: impl Into<String> + std::fmt::Debug,
         importance: f32,
     ) -> Result<MemoryId, AgentRuntimeError> {
-        let item = MemoryItem::new(agent_id, content, importance, Vec::new());
+        let item = MemoryItem::new(agent_id.clone(), content, importance, Vec::new());
         let id = item.id.clone();
         let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::add_episode");
         inner.items.push(item);
+        if let Some(cap) = inner.per_agent_capacity {
+            let agent_count = inner.items.iter().filter(|i| i.agent_id == agent_id).count();
+            if agent_count > cap {
+                if let Some(pos) = inner
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, i)| i.agent_id == agent_id)
+                    .min_by(|(_, a), (_, b)| {
+                        a.importance
+                            .partial_cmp(&b.importance)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(pos, _)| pos)
+                {
+                    inner.items.remove(pos);
+                }
+            }
+        }
         Ok(id)
     }
 
@@ -256,17 +346,38 @@ impl EpisodicStore {
         importance: f32,
         timestamp: chrono::DateTime<chrono::Utc>,
     ) -> Result<MemoryId, AgentRuntimeError> {
-        let mut item = MemoryItem::new(agent_id, content, importance, Vec::new());
+        let mut item = MemoryItem::new(agent_id.clone(), content, importance, Vec::new());
         item.timestamp = timestamp;
         let id = item.id.clone();
         let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::add_episode_at");
         inner.items.push(item);
+        if let Some(cap) = inner.per_agent_capacity {
+            let agent_count = inner.items.iter().filter(|i| i.agent_id == agent_id).count();
+            if agent_count > cap {
+                if let Some(pos) = inner
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, i)| i.agent_id == agent_id)
+                    .min_by(|(_, a), (_, b)| {
+                        a.importance
+                            .partial_cmp(&b.importance)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(pos, _)| pos)
+                {
+                    inner.items.remove(pos);
+                }
+            }
+        }
         Ok(id)
     }
 
     /// Recall up to `limit` memories for the given agent.
     ///
-    /// Applies decay if configured, then returns items sorted by descending importance.
+    /// Applies decay if configured, increments `recall_count` for each recalled
+    /// item in-place, then returns items sorted according to the configured
+    /// `RecallPolicy` (default: descending importance).
     #[tracing::instrument(skip(self))]
     pub fn recall(
         &self,
@@ -283,6 +394,21 @@ impl EpisodicStore {
             }
         }
 
+        // Collect IDs of items belonging to this agent
+        let agent_ids_to_update: Vec<MemoryId> = inner
+            .items
+            .iter()
+            .filter(|i| &i.agent_id == agent_id)
+            .map(|i| i.id.clone())
+            .collect();
+
+        // Increment recall_count in-place for all matching items
+        for item in inner.items.iter_mut() {
+            if agent_ids_to_update.contains(&item.id) {
+                item.recall_count += 1;
+            }
+        }
+
         let mut items: Vec<MemoryItem> = inner
             .items
             .iter()
@@ -290,11 +416,42 @@ impl EpisodicStore {
             .cloned()
             .collect();
 
-        items.sort_by(|a, b| {
-            b.importance
-                .partial_cmp(&a.importance)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        match inner.recall_policy {
+            RecallPolicy::Importance => {
+                items.sort_by(|a, b| {
+                    b.importance
+                        .partial_cmp(&a.importance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            RecallPolicy::Hybrid {
+                recency_weight,
+                frequency_weight,
+            } => {
+                let max_recall = items.iter().map(|i| i.recall_count).max().unwrap_or(1).max(1);
+                let now = Utc::now();
+                items.sort_by(|a, b| {
+                    let score_a = compute_hybrid_score(
+                        a,
+                        recency_weight,
+                        frequency_weight,
+                        max_recall,
+                        now,
+                    );
+                    let score_b = compute_hybrid_score(
+                        b,
+                        recency_weight,
+                        frequency_weight,
+                        max_recall,
+                        now,
+                    );
+                    score_b
+                        .partial_cmp(&score_a)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+        }
+
         items.truncate(limit);
         tracing::debug!("recalled {} items", items.len());
         Ok(items)
@@ -549,6 +706,17 @@ impl WorkingMemory {
     pub fn is_empty(&self) -> Result<bool, AgentRuntimeError> {
         Ok(self.len()? == 0)
     }
+
+    /// Return all key-value pairs in insertion order.
+    pub fn entries(&self) -> Result<Vec<(String, String)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::entries");
+        let entries = inner
+            .order
+            .iter()
+            .filter_map(|k| inner.map.get(k).map(|v| (k.clone(), v.clone())))
+            .collect();
+        Ok(entries)
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -741,6 +909,86 @@ mod tests {
             items[0].importance < 0.01,
             "expected near-zero importance, got {}",
             items[0].importance
+        );
+    }
+
+    // ── Item 10: RecallPolicy / per-agent capacity tests ──────────────────────
+
+    #[test]
+    fn test_recall_increments_recall_count() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("agent-rc");
+        store.add_episode(agent.clone(), "memory", 0.5).unwrap();
+
+        // First recall — count becomes 1
+        let items = store.recall(&agent, 10).unwrap();
+        assert_eq!(items[0].recall_count, 1);
+
+        // Second recall — count becomes 2
+        let items = store.recall(&agent, 10).unwrap();
+        assert_eq!(items[0].recall_count, 2);
+    }
+
+    #[test]
+    fn test_hybrid_recall_policy_prefers_recently_used() {
+        // "old_frequent": added 48 h ago with importance 0.5, recall_count bumped
+        // manually to simulate frequent use.
+        // "new_never": added just now with importance 0.5, never recalled.
+        // With a large frequency_weight the frequently-recalled item should rank higher.
+        let store = EpisodicStore::with_recall_policy(RecallPolicy::Hybrid {
+            recency_weight: 0.1,
+            frequency_weight: 2.0,
+        });
+        let agent = AgentId::new("agent-hybrid");
+
+        let old_ts = Utc::now() - chrono::Duration::hours(48);
+        store
+            .add_episode_at(agent.clone(), "old_frequent", 0.5, old_ts)
+            .unwrap();
+        store
+            .add_episode(agent.clone(), "new_never", 0.5)
+            .unwrap();
+
+        // Simulate many prior recalls of "old_frequent" by manually bumping its count
+        {
+            let mut inner = store.inner.lock().unwrap();
+            for item in inner.items.iter_mut() {
+                if item.content == "old_frequent" {
+                    item.recall_count = 100;
+                }
+            }
+        }
+
+        let items = store.recall(&agent, 10).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0].content, "old_frequent",
+            "hybrid policy should rank the frequently-recalled item first"
+        );
+    }
+
+    #[test]
+    fn test_per_agent_capacity_evicts_lowest_importance() {
+        let store = EpisodicStore::with_per_agent_capacity(2);
+        let agent = AgentId::new("agent-cap");
+
+        store.add_episode(agent.clone(), "mid", 0.5).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        // Adding "low" (0.1) should trigger eviction of the lowest-importance item
+        store.add_episode(agent.clone(), "low", 0.1).unwrap();
+
+        assert_eq!(
+            store.len().unwrap(),
+            2,
+            "store should hold exactly 2 items after eviction"
+        );
+
+        let items = store.recall(&agent, 10).unwrap();
+        let contents: Vec<&str> = items.iter().map(|i| i.content.as_str()).collect();
+        assert!(
+            !contents.contains(&"low"),
+            "the lowest-importance item should have been evicted; remaining: {:?}",
+            contents
         );
     }
 
