@@ -1,9 +1,9 @@
 [package]
 name = "agent-runtime"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Unified Tokio agent runtime — orchestration, memory, knowledge graph, and ReAct loop in one crate"
+description = "Unified Tokio agent runtime â€” orchestration, memory, knowledge graph, and ReAct loop in one crate"
 keywords = ["tokio", "agent", "llm", "memory", "runtime"]
 categories = ["asynchronous", "concurrency"]
 license = "MIT"
@@ -26,13 +26,13 @@ redis-circuit-breaker = ["redis"]      # distributed circuit breaker backend
 full = ["orchestrator", "memory", "graph", "wasm", "persistence", "providers", "anthropic", "openai"]
 
 [dependencies]
-# tokio: async runtime — core dependency, never remove
+# tokio: async runtime â€” core dependency, never remove
 tokio = { version = "1", features = ["full"] }
 
-# thiserror: zero-cost error derive — replaces manual Display impls
+# thiserror: zero-cost error derive â€” replaces manual Display impls
 thiserror = "1"
 
-# serde: serialization framework — needed for MemoryItem, Entity, AgentSession
+# serde: serialization framework â€” needed for MemoryItem, Entity, AgentSession
 serde = { version = "1", features = ["derive"] }
 
 # serde_json: JSON value type used in graph properties and tool handlers
