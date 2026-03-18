@@ -7,10 +7,10 @@
 
 #[cfg(feature = "persistence")]
 mod persistence_tests {
-    use agent_runtime::agent::{AgentConfig, ToolSpec};
-    use agent_runtime::memory::AgentId;
-    use agent_runtime::persistence::{FilePersistenceBackend, PersistenceBackend};
-    use agent_runtime::runtime::{AgentRuntime, AgentSession};
+    use llm_agent_runtime::agent::{AgentConfig, ToolSpec};
+    use llm_agent_runtime::memory::AgentId;
+    use llm_agent_runtime::persistence::{FilePersistenceBackend, PersistenceBackend};
+    use llm_agent_runtime::runtime::{AgentRuntime, AgentSession};
     use std::sync::Arc;
 
     struct TempDir {
@@ -153,8 +153,8 @@ mod persistence_tests {
 
 #[cfg(feature = "providers")]
 mod providers_tests {
-    use agent_runtime::providers::LlmProvider;
-    use agent_runtime::AgentRuntimeError;
+    use llm_agent_runtime::providers::LlmProvider;
+    use llm_agent_runtime::AgentRuntimeError;
     use async_trait::async_trait;
     use std::sync::Arc;
 
@@ -235,11 +235,11 @@ mod providers_tests {
 
 #[cfg(feature = "orchestrator")]
 mod orchestrator_tests {
-    use agent_runtime::orchestrator::{
+    use llm_agent_runtime::orchestrator::{
         BackpressureGuard, CircuitBreaker, CircuitState, DeduplicationResult, Deduplicator,
         Pipeline, RetryPolicy, MAX_RETRY_DELAY,
     };
-    use agent_runtime::AgentRuntimeError;
+    use llm_agent_runtime::AgentRuntimeError;
     use std::time::Duration;
 
     #[test]
@@ -352,7 +352,7 @@ mod orchestrator_tests {
 
 #[cfg(feature = "memory")]
 mod memory_tests {
-    use agent_runtime::memory::{
+    use llm_agent_runtime::memory::{
         AgentId, DecayPolicy, EpisodicStore, MemoryId, SemanticStore, WorkingMemory,
     };
 
@@ -450,8 +450,8 @@ mod memory_tests {
 
 #[cfg(feature = "graph")]
 mod graph_tests {
-    use agent_runtime::graph::{Entity, EntityId, GraphStore, Relationship};
-    use agent_runtime::AgentRuntimeError;
+    use llm_agent_runtime::graph::{Entity, EntityId, GraphStore, Relationship};
+    use llm_agent_runtime::AgentRuntimeError;
 
     #[test]
     fn test_graph_store_add_and_get_entity() {

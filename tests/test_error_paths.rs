@@ -1,7 +1,7 @@
 //! Integration tests: error paths — invalid config, provider failure simulation,
 //! circuit breaker, backpressure, missing tools, and required-field validation.
 
-use agent_runtime::prelude::*;
+use llm_agent_runtime::prelude::*;
 
 // ── Invalid / zero configuration ─────────────────────────────────────────────
 

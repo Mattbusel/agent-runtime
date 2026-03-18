@@ -12,7 +12,7 @@
 //! out of scope; instead they assert that the code paths compile, execute
 //! without error, and that the subscriber can be installed in a scoped context.
 
-use agent_runtime::{
+use llm_agent_runtime::{
     agent::{AgentConfig, ReActLoop, ToolSpec},
     memory::AgentId,
     runtime::AgentRuntime,

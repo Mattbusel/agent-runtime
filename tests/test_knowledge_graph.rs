@@ -1,8 +1,8 @@
 //! Tests for the knowledge graph: node insertion, edge traversal, cycle detection,
 //! shortest paths, centrality, community detection, and subgraph extraction.
 
-use agent_runtime::graph::{Entity, EntityId, GraphStore, Relationship};
-use agent_runtime::AgentRuntimeError;
+use llm_agent_runtime::graph::{Entity, EntityId, GraphStore, Relationship};
+use llm_agent_runtime::AgentRuntimeError;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

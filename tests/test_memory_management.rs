@@ -1,10 +1,10 @@
 //! Tests for memory management: eviction under capacity, TTL expiry, concurrent access,
 //! and the full spectrum of memory subsystem behaviors.
 
-use agent_runtime::memory::{
+use llm_agent_runtime::memory::{
     AgentId, DecayPolicy, EpisodicStore, MemoryItem, RecallPolicy, SemanticStore, WorkingMemory,
 };
-use agent_runtime::AgentRuntimeError;
+use llm_agent_runtime::AgentRuntimeError;
 use std::sync::Arc;
 
 // ── WorkingMemory: eviction under capacity ────────────────────────────────────

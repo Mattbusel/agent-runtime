@@ -1,6 +1,6 @@
 //! Integration tests: memory persistence — write, read back, and verify durability.
 
-use agent_runtime::prelude::*;
+use llm_agent_runtime::prelude::*;
 
 // ── EpisodicStore: write and read back ───────────────────────────────────────
 

@@ -1,11 +1,11 @@
 //! Tests for the ReAct loop and orchestrator: action/observation cycles,
 //! max-iterations cutoff, error recovery, and pipeline/deduplication.
 
-use agent_runtime::agent::{AgentConfig, ReActLoop, ToolSpec};
-use agent_runtime::orchestrator::{
+use llm_agent_runtime::agent::{AgentConfig, ReActLoop, ToolSpec};
+use llm_agent_runtime::orchestrator::{
     BackpressureGuard, DeduplicationResult, Deduplicator, Pipeline, RetryPolicy,
 };
-use agent_runtime::AgentRuntimeError;
+use llm_agent_runtime::AgentRuntimeError;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,

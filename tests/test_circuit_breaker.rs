@@ -1,8 +1,8 @@
 //! Tests for CircuitBreaker state machine: closed, open, half-open transitions,
 //! threshold triggering, and recovery timing.
 
-use agent_runtime::orchestrator::{CircuitBreaker, CircuitState, InMemoryCircuitBreakerBackend};
-use agent_runtime::AgentRuntimeError;
+use llm_agent_runtime::orchestrator::{CircuitBreaker, CircuitState, InMemoryCircuitBreakerBackend};
+use llm_agent_runtime::AgentRuntimeError;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -119,7 +119,7 @@ fn cb_success_resets_failure_count_to_zero() {
 
 #[test]
 fn cb_shared_backend_propagates_failures_across_instances() {
-    let backend: Arc<dyn agent_runtime::orchestrator::CircuitBreakerBackend> =
+    let backend: Arc<dyn llm_agent_runtime::orchestrator::CircuitBreakerBackend> =
         Arc::new(InMemoryCircuitBreakerBackend::new());
 
     let cb1 = CircuitBreaker::new("svc", 2, Duration::from_secs(60))

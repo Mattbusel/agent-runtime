@@ -1,6 +1,6 @@
 //! Integration tests: cross-feature interactions and edge cases.
 
-use agent_runtime::prelude::*;
+use llm_agent_runtime::prelude::*;
 
 // ── Memory × Graph ────────────────────────────────────────────────────────────
 

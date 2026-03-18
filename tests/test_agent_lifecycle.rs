@@ -1,6 +1,6 @@
 //! Integration tests: agent lifecycle — create, run, stop (completion).
 
-use agent_runtime::prelude::*;
+use llm_agent_runtime::prelude::*;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

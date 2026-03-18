@@ -4,7 +4,7 @@
 //! shared state (EpisodicStore, GraphStore, SemanticStore, WorkingMemory)
 //! is correctly handled under concurrent access.
 
-use agent_runtime::{
+use llm_agent_runtime::{
     agent::AgentConfig,
     graph::{Entity, GraphStore},
     memory::{AgentId, EpisodicStore, SemanticStore, WorkingMemory},

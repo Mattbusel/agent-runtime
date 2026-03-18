@@ -1,6 +1,6 @@
 //! Integration tests: AgentRuntime end-to-end lifecycle.
 
-use agent_runtime::prelude::*;
+use llm_agent_runtime::prelude::*;
 
 async fn final_infer(_ctx: String) -> String {
     "Thought: complete\nAction: FINAL_ANSWER done".into()

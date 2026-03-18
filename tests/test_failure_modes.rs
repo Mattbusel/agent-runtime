@@ -19,11 +19,11 @@
 
 #[cfg(feature = "persistence")]
 mod persistence_failure_tests {
-    use agent_runtime::agent::AgentConfig;
-    use agent_runtime::memory::AgentId;
-    use agent_runtime::persistence::PersistenceBackend;
-    use agent_runtime::runtime::{AgentRuntime, AgentSession};
-    use agent_runtime::AgentRuntimeError;
+    use llm_agent_runtime::agent::AgentConfig;
+    use llm_agent_runtime::memory::AgentId;
+    use llm_agent_runtime::persistence::PersistenceBackend;
+    use llm_agent_runtime::runtime::{AgentRuntime, AgentSession};
+    use llm_agent_runtime::AgentRuntimeError;
     use async_trait::async_trait;
     use std::sync::Arc;
 
@@ -312,7 +312,7 @@ mod persistence_failure_tests {
         let runtime = AgentRuntime::builder()
             .with_agent_config(AgentConfig::new(10, "test"))
             .with_checkpoint_backend(backend_arc)
-            .register_tool(agent_runtime::agent::ToolSpec::new(
+            .register_tool(llm_agent_runtime::agent::ToolSpec::new(
                 "noop",
                 "does nothing",
                 |_| serde_json::json!(null),
@@ -352,9 +352,9 @@ mod persistence_failure_tests {
 
 #[cfg(feature = "providers")]
 mod network_split_tests {
-    use agent_runtime::agent::{AgentConfig, ReActLoop};
-    use agent_runtime::providers::LlmProvider;
-    use agent_runtime::AgentRuntimeError;
+    use llm_agent_runtime::agent::{AgentConfig, ReActLoop};
+    use llm_agent_runtime::providers::LlmProvider;
+    use llm_agent_runtime::AgentRuntimeError;
     use async_trait::async_trait;
     use std::sync::{
         atomic::{AtomicU32, Ordering},
