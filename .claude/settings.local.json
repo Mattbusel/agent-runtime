@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /d R:workspacesagent-runtime)",
+      "Bash(cargo build:*)",
+      "Bash(wc:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo check:*)",
+      "Bash(grep -n \"pub fn\\\\|pub async fn\\\\|pub struct\\\\|pub trait\\\\|pub enum\\\\|pub type\\\\|pub mod\" src/*.rs)",
+      "Bash(for dir:*)",
+      "Bash(do)",
+      "Bash(echo \"=== $dir ===\")",
+      "Bash(git -C \"$dir\" remote get-url origin)",
+      "Bash(git -C \"$dir\" log --oneline -3)",
+      "Bash(for repo:*)",
+      "Bash(echo \"=== $repo ===\")",
+      "Bash(gh pr:*)",
+      "Bash(done)",
+      "Bash(du -sh R:/workspaces/*)",
+      "Bash(find R:/workspaces/FinRL_DeepSeek_Crypto_Trading -name *.csv -o -name *.parquet)",
+      "Bash(xargs du:*)",
+      "Bash(cargo clean:*)",
+      "Bash(cmd.exe /c \"dir F:\\\\\" 2>&1 || echo \"not found\")",
+      "Bash(cmd.exe /c \"wmic logicaldisk get name,description 2>&1\")",
+      "Bash(find /r/workspaces -maxdepth 1 -type d -name Every-Other-Token -o -name FinRL_DeepSeek_Crypto_Trading -o -name HelixRouter* -o -name LLMTokenStreamQuantEngine -o -name Reddit-Options-Trader* -o -name Special-Relativity* -o -name fin-primitives -o -name fin-stream -o -name geodesic-wallpaper -o -name llm-cost-dashboard -o -name math-sonify -o -name tokio-prompt-orchestrator)",
+      "Bash(find /r/workspaces/HelixRouter-adaptive-async-compute-router- -maxdepth 2 -type f \\\\\\(-name *.yml -o -name .github/workflows/* \\\\\\))",
+      "Bash(find /r/workspaces/LLMTokenStreamQuantEngine -maxdepth 2 -type f \\\\\\(-name *.yml -o -name .github/workflows/* \\\\\\))",
+      "Bash(find /r/workspaces/Reddit-Options-Trader-ROT- -maxdepth 2 -type f \\\\\\(-name *.yml -o -name .github/workflows/* \\\\\\))",
+      "Bash(find /r/workspaces/Special-Relativity-in-Financial-Modeling -maxdepth 2 -type f \\\\\\(-name *.yml -o -name .github/workflows/* \\\\\\))",
+      "Bash(do echo:*)",
+      "Bash(git config:*)",
+      "Bash(do cd:*)",
+      "Skill(update-config)"
+    ]
+  }
+}

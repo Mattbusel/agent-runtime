@@ -2,8 +2,6 @@
 //!
 //! A unified Tokio agent runtime that brings together orchestration, memory,
 //! knowledge graph, and a ReAct agent loop in a single crate.
-// Enforce documentation on all public items in production code.
-#![deny(missing_docs)]
 //!
 //! ## Feature Flags
 //!
@@ -46,6 +44,9 @@
 //! - `mem-graph` (Mattbusel/mem-graph)
 //! - `wasm-agent` (Mattbusel/wasm-agent)
 //! - `tokio-memory` (Mattbusel/tokio-memory)
+
+// Enforce documentation on all public items in production code.
+#![deny(missing_docs)]
 
 // ── Public modules ─────────────────────────────────────────────────────────
 

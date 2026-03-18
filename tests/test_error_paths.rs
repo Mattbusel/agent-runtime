@@ -235,8 +235,9 @@ async fn error_circuit_open_fast_fails_tool() {
         CircuitBreaker::new("failing-service", 1, std::time::Duration::from_secs(60)).unwrap(),
     );
 
-    // Trip the circuit by recording a failure.
-    cb.record_failure().unwrap();
+    // Trip the circuit by executing a failing call (threshold=1, so one failure opens it).
+    let _: Result<(), _> = cb.call(|| Err::<(), &str>("simulated failure"));
+    // After 1 failure with threshold=1 the circuit should be open.
 
     let runtime = AgentRuntime::builder()
         .with_agent_config(AgentConfig::new(5, "test-model"))

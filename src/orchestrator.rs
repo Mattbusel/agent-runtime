@@ -149,11 +149,17 @@ pub enum CircuitState {
 /// Note: Methods are synchronous to avoid pulling in `async-trait`. A
 /// distributed backend (e.g., Redis) can internally spawn a Tokio runtime.
 pub trait CircuitBreakerBackend: Send + Sync {
+    /// Increment the consecutive failure count for `service` and return the new count.
     fn increment_failures(&self, service: &str) -> u32;
+    /// Reset the consecutive failure count for `service` to zero.
     fn reset_failures(&self, service: &str);
+    /// Return the current consecutive failure count for `service`.
     fn get_failures(&self, service: &str) -> u32;
+    /// Record the instant at which the circuit was opened for `service`.
     fn set_open_at(&self, service: &str, at: std::time::Instant);
+    /// Clear the open-at timestamp, effectively moving the circuit to Closed or HalfOpen.
     fn clear_open_at(&self, service: &str);
+    /// Return the instant at which the circuit was opened, or `None` if it is not open.
     fn get_open_at(&self, service: &str) -> Option<std::time::Instant>;
 }
 
@@ -170,6 +176,7 @@ struct InMemoryBackendState {
 }
 
 impl InMemoryCircuitBreakerBackend {
+    /// Create a new in-memory backend with all counters at zero.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(InMemoryBackendState {
@@ -588,7 +595,9 @@ impl BackpressureGuard {
 
 /// A single named stage in the pipeline.
 pub struct Stage {
+    /// Human-readable name used in log output and error messages.
     pub name: String,
+    /// The transform function; receives the current string and returns the transformed string.
     pub handler: Box<dyn Fn(String) -> Result<String, AgentRuntimeError> + Send + Sync>,
 }
 

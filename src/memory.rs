@@ -206,7 +206,9 @@ pub enum RecallPolicy {
     /// where `recency_score = exp(-age_hours / 24.0)` and
     /// `frequency_score = recall_count / (max_recall_count + 1)` (normalized).
     Hybrid {
+        /// Weight applied to the recency component of the hybrid score.
         recency_weight: f32,
+        /// Weight applied to the recall-frequency component of the hybrid score.
         frequency_weight: f32,
     },
 }

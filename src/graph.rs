@@ -163,8 +163,11 @@ pub enum MemGraphError {
     /// A relationship between the two entities already exists with the same kind.
     #[error("Relationship '{kind}' from '{from}' to '{to}' already exists")]
     DuplicateRelationship {
+        /// Source entity ID.
         from: String,
+        /// Target entity ID.
         to: String,
+        /// Relationship kind label.
         kind: String,
     },
 
