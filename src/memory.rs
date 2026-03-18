@@ -318,7 +318,11 @@ impl EpisodicStore {
         let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::add_episode");
         inner.items.push(item);
         if let Some(cap) = inner.per_agent_capacity {
-            let agent_count = inner.items.iter().filter(|i| i.agent_id == agent_id).count();
+            let agent_count = inner
+                .items
+                .iter()
+                .filter(|i| i.agent_id == agent_id)
+                .count();
             if agent_count > cap {
                 if let Some(pos) = inner
                     .items
@@ -354,7 +358,11 @@ impl EpisodicStore {
         let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::add_episode_at");
         inner.items.push(item);
         if let Some(cap) = inner.per_agent_capacity {
-            let agent_count = inner.items.iter().filter(|i| i.agent_id == agent_id).count();
+            let agent_count = inner
+                .items
+                .iter()
+                .filter(|i| i.agent_id == agent_id)
+                .count();
             if agent_count > cap {
                 if let Some(pos) = inner
                     .items
