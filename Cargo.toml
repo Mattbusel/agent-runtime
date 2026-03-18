@@ -3,7 +3,8 @@ name = "agent-runtime"
 version = "1.0.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Unified Tokio agent runtime â€” orchestration, memory, knowledge graph, and ReAct loop in one crate"
+authors = ["Matt Busel <mattbusel@users.noreply.github.com>"]
+description = "Unified Tokio agent runtime -- orchestration, memory, knowledge graph, and ReAct loop in one crate"
 keywords = ["tokio", "agent", "llm", "memory", "runtime"]
 categories = ["asynchronous", "concurrency"]
 license = "MIT"
@@ -11,6 +12,7 @@ repository = "https://github.com/Mattbusel/agent-runtime"
 homepage = "https://github.com/Mattbusel/agent-runtime"
 documentation = "https://docs.rs/agent-runtime"
 readme = "README.md"
+exclude = [".github/", "CHANGELOG.md"]
 
 [features]
 default = ["orchestrator", "memory", "graph", "wasm"]
@@ -26,13 +28,13 @@ redis-circuit-breaker = ["redis"]      # distributed circuit breaker backend
 full = ["orchestrator", "memory", "graph", "wasm", "persistence", "providers", "anthropic", "openai"]
 
 [dependencies]
-# tokio: async runtime â€” core dependency, never remove
+# tokio: async runtime -- core dependency, never remove
 tokio = { version = "1", features = ["full"] }
 
-# thiserror: zero-cost error derive â€” replaces manual Display impls
-thiserror = "1"
+# thiserror: zero-cost error derive -- replaces manual Display impls
+thiserror = "2"
 
-# serde: serialization framework â€” needed for MemoryItem, Entity, AgentSession
+# serde: serialization framework -- needed for MemoryItem, Entity, AgentSession
 serde = { version = "1", features = ["derive"] }
 
 # serde_json: JSON value type used in graph properties and tool handlers
@@ -62,10 +64,33 @@ tokio-test = "0.4"
 # tracing-subscriber: test logging setup
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# ── Release profile (production) ────────────────────────────────────────────────
+[profile.release]
+opt-level = 3        # maximum optimization
+lto = true           # link-time optimization for smaller, faster binaries
+codegen-units = 1    # single codegen unit enables maximum LTO effectiveness
+strip = true         # strip debug symbols from the binary
+panic = "abort"      # remove panic unwinding machinery; reduces binary size ~10 %
+
+# ── Development profile (fast incremental builds) ───────────────────────────────
+[profile.dev]
+opt-level = 0
+debug = true
+
+# ── Lint configuration ──────────────────────────────────────────────────────────
 [lints.rust]
-# Enforce zero-panic production policy per CLAUDE.md
+# Warn on missing documentation for public items -- enforced at crate level via
+# #![deny(missing_docs)] in lib.rs; kept here as a belt-and-suspenders reminder.
+missing_docs = "warn"
+
 [lints.clippy]
+# Zero-panic production policy: deny all panic-inducing methods in production code.
+# Tests use #[allow(clippy::unwrap_used)] where appropriate.
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
 todo = "deny"
+# Additional quality lints
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
