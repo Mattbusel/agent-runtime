@@ -397,6 +397,7 @@ impl AgentRuntime {
     }
 
     /// Inner implementation of `run_agent`, called after backpressure is acquired.
+    #[tracing::instrument(skip(self, infer), fields(agent_id = %agent_id, session_id = tracing::field::Empty))]
     async fn run_agent_inner<F, Fut>(
         &self,
         agent_id: AgentId,
@@ -520,6 +521,10 @@ impl AgentRuntime {
 
             react_loop.register_tool(spec);
         }
+
+        // Record the session_id into the current tracing span so that all
+        // child spans (ReActLoop iterations, tool calls) carry this field.
+        tracing::Span::current().record("session_id", &session_id.as_str());
 
         let steps = react_loop.run(&enriched_prompt, infer).await?;
         let duration_ms = start.elapsed().as_millis() as u64;

@@ -392,6 +392,12 @@ impl ReActLoop {
 
             let (tool_name, args) = parse_tool_call(&step.action);
 
+            tracing::debug!(
+                step = iteration,
+                tool_name = %tool_name,
+                "dispatching tool call"
+            );
+
             // Item 9 — structured error categorization in observation
             let observation = match self.registry.call(&tool_name, args).await {
                 Ok(result) => serde_json::json!({ "ok": true, "data": result }).to_string(),
