@@ -195,7 +195,10 @@ impl Default for InMemoryCircuitBreakerBackend {
 
 impl CircuitBreakerBackend for InMemoryCircuitBreakerBackend {
     fn increment_failures(&self, _service: &str) -> u32 {
-        let mut state = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::increment_failures");
+        let mut state = timed_lock(
+            &self.inner,
+            "InMemoryCircuitBreakerBackend::increment_failures",
+        );
         state.consecutive_failures += 1;
         state.consecutive_failures
     }

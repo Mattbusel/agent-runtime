@@ -77,10 +77,16 @@ fn memory_episodic_shared_store_clone_shares_data() {
     let agent = AgentId::new("shared-agent");
     let store2 = store.clone();
 
-    store.add_episode(agent.clone(), "written via original", 0.7).unwrap();
+    store
+        .add_episode(agent.clone(), "written via original", 0.7)
+        .unwrap();
     let items = store2.recall(&agent, 10).unwrap();
 
-    assert_eq!(items.len(), 1, "clone should see data written by the original");
+    assert_eq!(
+        items.len(),
+        1,
+        "clone should see data written by the original"
+    );
     assert_eq!(items[0].content, "written via original");
 }
 
@@ -164,9 +170,7 @@ fn memory_semantic_tag_filter_matches_correct_entries() {
     store
         .store("k1", "v1", vec!["rust".into(), "async".into()])
         .unwrap();
-    store
-        .store("k2", "v2", vec!["python".into()])
-        .unwrap();
+    store.store("k2", "v2", vec!["python".into()]).unwrap();
 
     let results = store.retrieve(&["rust"]).unwrap();
     assert_eq!(results.len(), 1);

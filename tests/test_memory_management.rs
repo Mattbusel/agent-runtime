@@ -29,10 +29,7 @@ fn wm_always_holds_exactly_capacity_entries() {
     let wm = WorkingMemory::new(cap).unwrap();
     for i in 0..20 {
         wm.set(format!("k{i}"), format!("v{i}")).unwrap();
-        assert!(
-            wm.len().unwrap() <= cap,
-            "len exceeded capacity at i={i}"
-        );
+        assert!(wm.len().unwrap() <= cap, "len exceeded capacity at i={i}");
     }
 }
 
@@ -121,7 +118,9 @@ fn episodic_fast_decay_reduces_importance_to_near_zero() {
 
     // Insert a memory item timestamped 1 hour in the past using the public API.
     let old_ts = chrono::Utc::now() - chrono::Duration::hours(1);
-    store.add_episode_at(agent.clone(), "old", 1.0, old_ts).unwrap();
+    store
+        .add_episode_at(agent.clone(), "old", 1.0, old_ts)
+        .unwrap();
 
     let items = store.recall(&agent, 10).unwrap();
     assert!(items[0].importance < 0.01, "expected near-zero importance");
@@ -291,7 +290,10 @@ fn semantic_similarity_search_returns_top_k_in_order() {
 
     let results = store.retrieve_similar(&[1.0, 0.0], 3).unwrap();
     assert_eq!(results[0].0, "close");
-    assert!(results[0].2 > results[1].2, "results should be sorted by descending similarity");
+    assert!(
+        results[0].2 > results[1].2,
+        "results should be sorted by descending similarity"
+    );
 }
 
 #[test]
@@ -299,12 +301,7 @@ fn semantic_similarity_top_k_limits_results() {
     let store = SemanticStore::new();
     for i in 0..10 {
         store
-            .store_with_embedding(
-                format!("k{i}"),
-                "v",
-                vec![],
-                vec![i as f32, 0.0],
-            )
+            .store_with_embedding(format!("k{i}"), "v", vec![], vec![i as f32, 0.0])
             .unwrap();
     }
     let results = store.retrieve_similar(&[5.0, 0.0], 3).unwrap();

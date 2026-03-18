@@ -3,7 +3,7 @@
 
 use agent_runtime::agent::{AgentConfig, ReActLoop, ToolSpec};
 use agent_runtime::orchestrator::{
-    BackpressureGuard, Deduplicator, DeduplicationResult, Pipeline, RetryPolicy,
+    BackpressureGuard, DeduplicationResult, Deduplicator, Pipeline, RetryPolicy,
 };
 use agent_runtime::AgentRuntimeError;
 use std::sync::{
@@ -41,7 +41,11 @@ async fn react_single_tool_call_produces_observation() {
         .unwrap();
 
     assert_eq!(steps.len(), 2);
-    assert!(steps[0].observation.contains("pong"), "observation: {}", steps[0].observation);
+    assert!(
+        steps[0].observation.contains("pong"),
+        "observation: {}",
+        steps[0].observation
+    );
 }
 
 #[tokio::test]
@@ -242,8 +246,7 @@ async fn react_context_grows_with_each_step() {
 
     loop_.register_tool(ToolSpec::new("echo", "echoes", |v| v));
 
-    let contexts: Arc<std::sync::Mutex<Vec<usize>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let contexts: Arc<std::sync::Mutex<Vec<usize>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     let ctx_clone = Arc::clone(&contexts);
 
     let call_count = Arc::new(AtomicUsize::new(0));
@@ -309,10 +312,7 @@ fn retry_policy_zero_attempts_is_invalid() {
 #[test]
 fn dedup_first_check_is_new() {
     let d = Deduplicator::new(Duration::from_secs(60));
-    assert_eq!(
-        d.check_and_register("k").unwrap(),
-        DeduplicationResult::New
-    );
+    assert_eq!(d.check_and_register("k").unwrap(), DeduplicationResult::New);
 }
 
 #[test]
@@ -341,20 +341,14 @@ fn dedup_expired_entry_becomes_new() {
     let d = Deduplicator::new(Duration::ZERO); // instant TTL
     d.check_and_register("k").unwrap();
     d.complete("k", "old").unwrap();
-    assert_eq!(
-        d.check_and_register("k").unwrap(),
-        DeduplicationResult::New
-    );
+    assert_eq!(d.check_and_register("k").unwrap(), DeduplicationResult::New);
 }
 
 #[test]
 fn dedup_different_keys_are_independent() {
     let d = Deduplicator::new(Duration::from_secs(60));
     d.check_and_register("a").unwrap();
-    assert_eq!(
-        d.check_and_register("b").unwrap(),
-        DeduplicationResult::New
-    );
+    assert_eq!(d.check_and_register("b").unwrap(), DeduplicationResult::New);
 }
 
 // ── BackpressureGuard ─────────────────────────────────────────────────────────

@@ -107,7 +107,10 @@ fn graph_bfs_single_node_visits_nothing() {
     let g = store();
     add(&g, "alone");
     let visited = g.bfs(&EntityId::new("alone")).unwrap();
-    assert!(visited.is_empty(), "BFS from isolated node should return no neighbors");
+    assert!(
+        visited.is_empty(),
+        "BFS from isolated node should return no neighbors"
+    );
 }
 
 #[test]
@@ -365,7 +368,10 @@ fn graph_degree_centrality_hub_node_has_highest_value() {
     let centrality = g.degree_centrality().unwrap();
     let hub_val = *centrality.get(&EntityId::new("hub")).unwrap();
     let a_val = *centrality.get(&EntityId::new("a")).unwrap();
-    assert!(hub_val > a_val, "hub centrality {hub_val} should exceed leaf {a_val}");
+    assert!(
+        hub_val > a_val,
+        "hub centrality {hub_val} should exceed leaf {a_val}"
+    );
 }
 
 #[test]

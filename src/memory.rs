@@ -438,23 +438,18 @@ impl EpisodicStore {
                 recency_weight,
                 frequency_weight,
             } => {
-                let max_recall = items.iter().map(|i| i.recall_count).max().unwrap_or(1).max(1);
+                let max_recall = items
+                    .iter()
+                    .map(|i| i.recall_count)
+                    .max()
+                    .unwrap_or(1)
+                    .max(1);
                 let now = Utc::now();
                 items.sort_by(|a, b| {
-                    let score_a = compute_hybrid_score(
-                        a,
-                        recency_weight,
-                        frequency_weight,
-                        max_recall,
-                        now,
-                    );
-                    let score_b = compute_hybrid_score(
-                        b,
-                        recency_weight,
-                        frequency_weight,
-                        max_recall,
-                        now,
-                    );
+                    let score_a =
+                        compute_hybrid_score(a, recency_weight, frequency_weight, max_recall, now);
+                    let score_b =
+                        compute_hybrid_score(b, recency_weight, frequency_weight, max_recall, now);
                     score_b
                         .partial_cmp(&score_a)
                         .unwrap_or(std::cmp::Ordering::Equal)
@@ -484,7 +479,10 @@ impl EpisodicStore {
     /// history without accessing private fields. It is not intended for production use.
     #[doc(hidden)]
     pub fn bump_recall_count_by_content(&self, content: &str, amount: u64) {
-        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::bump_recall_count_by_content");
+        let mut inner = recover_lock(
+            self.inner.lock(),
+            "EpisodicStore::bump_recall_count_by_content",
+        );
         for item in inner.items.iter_mut() {
             if item.content == content {
                 item.recall_count = item.recall_count.saturating_add(amount);
@@ -969,9 +967,7 @@ mod tests {
         store
             .add_episode_at(agent.clone(), "old_frequent", 0.5, old_ts)
             .unwrap();
-        store
-            .add_episode(agent.clone(), "new_never", 0.5)
-            .unwrap();
+        store.add_episode(agent.clone(), "new_never", 0.5).unwrap();
 
         // Simulate many prior recalls of "old_frequent" by manually bumping its count
         {
@@ -1080,9 +1076,17 @@ mod tests {
         assert_eq!(results.len(), 2);
         // The closest result should be "close"
         assert_eq!(results[0].0, "close");
-        assert!((results[0].2 - 1.0).abs() < 1e-5, "expected similarity ~1.0, got {}", results[0].2);
+        assert!(
+            (results[0].2 - 1.0).abs() < 1e-5,
+            "expected similarity ~1.0, got {}",
+            results[0].2
+        );
         // The far result should have similarity 0.0
-        assert!((results[1].2).abs() < 1e-5, "expected similarity ~0.0, got {}", results[1].2);
+        assert!(
+            (results[1].2).abs() < 1e-5,
+            "expected similarity ~0.0, got {}",
+            results[1].2
+        );
     }
 
     #[test]

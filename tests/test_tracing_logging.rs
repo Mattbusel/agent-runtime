@@ -74,9 +74,11 @@ async fn test_react_loop_tool_dispatch_events_emitted() {
     let mut loop_ = ReActLoop::new(config);
 
     // Register a simple echo tool.
-    loop_.register_tool(ToolSpec::new("echo", "Echo the input", |args| {
-        serde_json::json!({ "echoed": args })
-    }));
+    loop_.register_tool(ToolSpec::new(
+        "echo",
+        "Echo the input",
+        |args| serde_json::json!({ "echoed": args }),
+    ));
 
     let mut call_count = 0u32;
     let result = loop_
@@ -173,9 +175,11 @@ async fn test_agent_runtime_run_agent_span_with_tracing() {
     // run_agent is instrumented with agent_id and session_id fields.
     // We verify the call succeeds; the fields are emitted into the test writer.
     let session = runtime
-        .run_agent(AgentId::new("tracing-agent-01"), "hi", |_ctx: String| async {
-            "Thought: ok\nAction: FINAL_ANSWER hi".to_string()
-        })
+        .run_agent(
+            AgentId::new("tracing-agent-01"),
+            "hi",
+            |_ctx: String| async { "Thought: ok\nAction: FINAL_ANSWER hi".to_string() },
+        )
         .await
         .unwrap();
 

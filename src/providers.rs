@@ -42,7 +42,8 @@ pub trait LlmProvider: Send + Sync {
         &self,
         prompt: &str,
         model: &str,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<String, AgentRuntimeError>>, AgentRuntimeError> {
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<String, AgentRuntimeError>>, AgentRuntimeError>
+    {
         let result = self.complete(prompt, model).await;
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         // Ignore send error — receiver may already be dropped
@@ -122,9 +123,7 @@ impl LlmProvider for AnthropicProvider {
             .and_then(|arr| arr.first())
             .and_then(|block| block["text"].as_str())
             .ok_or_else(|| {
-                AgentRuntimeError::Provider(
-                    "Anthropic response missing content[0].text".into(),
-                )
+                AgentRuntimeError::Provider("Anthropic response missing content[0].text".into())
             })?;
 
         Ok(text.to_owned())
@@ -134,7 +133,8 @@ impl LlmProvider for AnthropicProvider {
         &self,
         prompt: &str,
         model: &str,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<String, AgentRuntimeError>>, AgentRuntimeError> {
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<String, AgentRuntimeError>>, AgentRuntimeError>
+    {
         let body = serde_json::json!({
             "model": model,
             "max_tokens": Self::MAX_TOKENS,
@@ -151,7 +151,9 @@ impl LlmProvider for AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| AgentRuntimeError::Provider(format!("Anthropic stream request failed: {e}")))?;
+            .map_err(|e| {
+                AgentRuntimeError::Provider(format!("Anthropic stream request failed: {e}"))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -293,7 +295,8 @@ impl LlmProvider for OpenAiProvider {
         &self,
         prompt: &str,
         model: &str,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<String, AgentRuntimeError>>, AgentRuntimeError> {
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<String, AgentRuntimeError>>, AgentRuntimeError>
+    {
         let url = format!("{}/chat/completions", self.base_url);
         let body = serde_json::json!({
             "model": model,
@@ -309,7 +312,9 @@ impl LlmProvider for OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| AgentRuntimeError::Provider(format!("OpenAI stream request failed: {e}")))?;
+            .map_err(|e| {
+                AgentRuntimeError::Provider(format!("OpenAI stream request failed: {e}"))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();

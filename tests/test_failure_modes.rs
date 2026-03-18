@@ -19,10 +19,10 @@
 
 #[cfg(feature = "persistence")]
 mod persistence_failure_tests {
-    use agent_runtime::persistence::PersistenceBackend;
-    use agent_runtime::runtime::{AgentRuntime, AgentSession};
     use agent_runtime::agent::AgentConfig;
     use agent_runtime::memory::AgentId;
+    use agent_runtime::persistence::PersistenceBackend;
+    use agent_runtime::runtime::{AgentRuntime, AgentSession};
     use agent_runtime::AgentRuntimeError;
     use async_trait::async_trait;
     use std::sync::Arc;
@@ -89,8 +89,7 @@ mod persistence_failure_tests {
         }
 
         fn save_count(&self) -> u32 {
-            self.save_count
-                .load(std::sync::atomic::Ordering::Relaxed)
+            self.save_count.load(std::sync::atomic::Ordering::Relaxed)
         }
     }
 
@@ -197,17 +196,21 @@ mod persistence_failure_tests {
 
         // Run an agent that takes two steps: one tool call + final answer.
         let result = runtime
-            .run_agent(AgentId::new("step-fail-agent"), "test", move |_ctx: String| {
-                call_count += 1;
-                let count = call_count;
-                async move {
-                    if count == 1 {
-                        "Thought: step\nAction: noop {}".to_string()
-                    } else {
-                        "Thought: done\nAction: FINAL_ANSWER ok".to_string()
+            .run_agent(
+                AgentId::new("step-fail-agent"),
+                "test",
+                move |_ctx: String| {
+                    call_count += 1;
+                    let count = call_count;
+                    async move {
+                        if count == 1 {
+                            "Thought: step\nAction: noop {}".to_string()
+                        } else {
+                            "Thought: done\nAction: FINAL_ANSWER ok".to_string()
+                        }
                     }
-                }
-            })
+                },
+            )
             .await;
 
         // The agent run should succeed: step checkpoint failures are only warned.
@@ -226,8 +229,7 @@ mod persistence_failure_tests {
     async fn test_persistence_load_failure_propagates_from_load_checkpoint() {
         let backend = FailingLoadBackend;
 
-        let result =
-            AgentSession::load_checkpoint(&backend, "any-session-id").await;
+        let result = AgentSession::load_checkpoint(&backend, "any-session-id").await;
 
         assert!(
             result.is_err(),
@@ -303,7 +305,8 @@ mod persistence_failure_tests {
     #[tokio::test]
     async fn test_persistence_save_called_for_each_step_and_final_session() {
         let backend = CountingSaveBackend::new();
-        let backend_arc: Arc<dyn PersistenceBackend> = Arc::clone(&backend) as Arc<dyn PersistenceBackend>;
+        let backend_arc: Arc<dyn PersistenceBackend> =
+            Arc::clone(&backend) as Arc<dyn PersistenceBackend>;
 
         let mut call_count = 0u32;
         let runtime = AgentRuntime::builder()
@@ -317,17 +320,21 @@ mod persistence_failure_tests {
             .build();
 
         runtime
-            .run_agent(AgentId::new("counting-agent"), "test", move |_ctx: String| {
-                call_count += 1;
-                let count = call_count;
-                async move {
-                    if count == 1 {
-                        "Thought: step 1\nAction: noop {}".to_string()
-                    } else {
-                        "Thought: done\nAction: FINAL_ANSWER result".to_string()
+            .run_agent(
+                AgentId::new("counting-agent"),
+                "test",
+                move |_ctx: String| {
+                    call_count += 1;
+                    let count = call_count;
+                    async move {
+                        if count == 1 {
+                            "Thought: step 1\nAction: noop {}".to_string()
+                        } else {
+                            "Thought: done\nAction: FINAL_ANSWER result".to_string()
+                        }
                     }
-                }
-            })
+                },
+            )
             .await
             .unwrap();
 
@@ -345,8 +352,8 @@ mod persistence_failure_tests {
 
 #[cfg(feature = "providers")]
 mod network_split_tests {
-    use agent_runtime::providers::LlmProvider;
     use agent_runtime::agent::{AgentConfig, ReActLoop};
+    use agent_runtime::providers::LlmProvider;
     use agent_runtime::AgentRuntimeError;
     use async_trait::async_trait;
     use std::sync::{
@@ -363,11 +370,7 @@ mod network_split_tests {
 
     #[async_trait]
     impl LlmProvider for ConnectionErrorProvider {
-        async fn complete(
-            &self,
-            _prompt: &str,
-            _model: &str,
-        ) -> Result<String, AgentRuntimeError> {
+        async fn complete(&self, _prompt: &str, _model: &str) -> Result<String, AgentRuntimeError> {
             Err(AgentRuntimeError::Provider(
                 "connection refused: simulated network split".into(),
             ))
@@ -394,11 +397,7 @@ mod network_split_tests {
 
     #[async_trait]
     impl LlmProvider for MidSessionNetworkSplitProvider {
-        async fn complete(
-            &self,
-            _prompt: &str,
-            _model: &str,
-        ) -> Result<String, AgentRuntimeError> {
+        async fn complete(&self, _prompt: &str, _model: &str) -> Result<String, AgentRuntimeError> {
             let n = self.call_count.fetch_add(1, Ordering::Relaxed) + 1;
             if n <= self.calls_before_split {
                 // Return a valid but non-final ReAct step.
@@ -517,10 +516,7 @@ mod network_split_tests {
     async fn test_connection_error_provider_stream_complete_returns_error_in_channel() {
         let provider = ConnectionErrorProvider;
 
-        let mut rx = provider
-            .stream_complete("prompt", "model")
-            .await
-            .unwrap();
+        let mut rx = provider.stream_complete("prompt", "model").await.unwrap();
 
         let first = rx.recv().await;
         assert!(
@@ -528,10 +524,7 @@ mod network_split_tests {
             "channel should yield the error before closing"
         );
         let chunk = first.unwrap();
-        assert!(
-            chunk.is_err(),
-            "stream chunk should be an Err; got Ok"
-        );
+        assert!(chunk.is_err(), "stream chunk should be an Err; got Ok");
         let err = chunk.unwrap_err();
         assert!(
             matches!(err, AgentRuntimeError::Provider(_)),

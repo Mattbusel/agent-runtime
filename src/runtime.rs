@@ -473,10 +473,8 @@ impl AgentRuntime {
             if entries.is_empty() {
                 enriched_prompt
             } else {
-                let wm_context: Vec<String> = entries
-                    .iter()
-                    .map(|(k, v)| format!("  {k}: {v}"))
-                    .collect();
+                let wm_context: Vec<String> =
+                    entries.iter().map(|(k, v)| format!("  {k}: {v}")).collect();
                 format!(
                     "{enriched_prompt}\n\nCurrent working state:\n{}",
                     wm_context.join("\n")

@@ -7,10 +7,10 @@
 
 #[cfg(feature = "persistence")]
 mod persistence_tests {
-    use agent_runtime::persistence::{FilePersistenceBackend, PersistenceBackend};
-    use agent_runtime::runtime::{AgentRuntime, AgentSession};
     use agent_runtime::agent::{AgentConfig, ToolSpec};
     use agent_runtime::memory::AgentId;
+    use agent_runtime::persistence::{FilePersistenceBackend, PersistenceBackend};
+    use agent_runtime::runtime::{AgentRuntime, AgentSession};
     use std::sync::Arc;
 
     struct TempDir {
@@ -18,10 +18,8 @@ mod persistence_tests {
     }
     impl TempDir {
         async fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "agent_rt_feat_test_{}",
-                uuid::Uuid::new_v4()
-            ));
+            let path =
+                std::env::temp_dir().join(format!("agent_rt_feat_test_{}", uuid::Uuid::new_v4()));
             tokio::fs::create_dir_all(&path).await.unwrap();
             Self { path }
         }
@@ -49,8 +47,7 @@ mod persistence_tests {
     #[tokio::test]
     async fn test_persistence_backend_as_trait_object() {
         let tmp = TempDir::new().await;
-        let backend: Arc<dyn PersistenceBackend> =
-            Arc::new(FilePersistenceBackend::new(&tmp.path));
+        let backend: Arc<dyn PersistenceBackend> = Arc::new(FilePersistenceBackend::new(&tmp.path));
 
         backend.save("obj-safe-key", b"works").await.unwrap();
         let r = backend.load("obj-safe-key").await.unwrap();
@@ -76,8 +73,7 @@ mod persistence_tests {
     #[tokio::test]
     async fn test_agent_session_save_and_load_checkpoint() {
         let tmp = TempDir::new().await;
-        let backend: Arc<dyn PersistenceBackend> =
-            Arc::new(FilePersistenceBackend::new(&tmp.path));
+        let backend: Arc<dyn PersistenceBackend> = Arc::new(FilePersistenceBackend::new(&tmp.path));
 
         let runtime = AgentRuntime::builder()
             .with_agent_config(AgentConfig::new(5, "test"))
@@ -85,9 +81,11 @@ mod persistence_tests {
             .build();
 
         let session = runtime
-            .run_agent(AgentId::new("persist-agent"), "test", |_ctx: String| async {
-                "Thought: done\nAction: FINAL_ANSWER ok".to_string()
-            })
+            .run_agent(
+                AgentId::new("persist-agent"),
+                "test",
+                |_ctx: String| async { "Thought: done\nAction: FINAL_ANSWER ok".to_string() },
+            )
             .await
             .unwrap();
 
@@ -114,8 +112,7 @@ mod persistence_tests {
     #[tokio::test]
     async fn test_step_checkpoints_saved_incrementally() {
         let tmp = TempDir::new().await;
-        let backend: Arc<dyn PersistenceBackend> =
-            Arc::new(FilePersistenceBackend::new(&tmp.path));
+        let backend: Arc<dyn PersistenceBackend> = Arc::new(FilePersistenceBackend::new(&tmp.path));
 
         let mut call_count = 0;
         let runtime = AgentRuntime::builder()
@@ -144,10 +141,9 @@ mod persistence_tests {
         assert_eq!(session.step_count(), 2);
 
         // Verify step-1 checkpoint was saved
-        let step1 =
-            AgentSession::load_step_checkpoint(backend.as_ref(), &session.session_id, 1)
-                .await
-                .unwrap();
+        let step1 = AgentSession::load_step_checkpoint(backend.as_ref(), &session.session_id, 1)
+            .await
+            .unwrap();
         assert!(step1.is_some());
         assert_eq!(step1.unwrap().step_count(), 1);
     }
@@ -167,11 +163,7 @@ mod providers_tests {
 
     #[async_trait]
     impl LlmProvider for EchoProvider {
-        async fn complete(
-            &self,
-            prompt: &str,
-            _model: &str,
-        ) -> Result<String, AgentRuntimeError> {
+        async fn complete(&self, prompt: &str, _model: &str) -> Result<String, AgentRuntimeError> {
             Ok(prompt.to_owned())
         }
     }
@@ -181,12 +173,10 @@ mod providers_tests {
 
     #[async_trait]
     impl LlmProvider for ErrorProvider {
-        async fn complete(
-            &self,
-            _prompt: &str,
-            _model: &str,
-        ) -> Result<String, AgentRuntimeError> {
-            Err(AgentRuntimeError::Provider("intentional test failure".into()))
+        async fn complete(&self, _prompt: &str, _model: &str) -> Result<String, AgentRuntimeError> {
+            Err(AgentRuntimeError::Provider(
+                "intentional test failure".into(),
+            ))
         }
     }
 
@@ -232,10 +222,8 @@ mod providers_tests {
 
     #[tokio::test]
     async fn test_multiple_providers_behind_arc() {
-        let providers: Vec<Arc<dyn LlmProvider>> = vec![
-            Arc::new(EchoProvider),
-            Arc::new(EchoProvider),
-        ];
+        let providers: Vec<Arc<dyn LlmProvider>> =
+            vec![Arc::new(EchoProvider), Arc::new(EchoProvider)];
         for p in &providers {
             let r = p.complete("ping", "model").await.unwrap();
             assert_eq!(r, "ping");
@@ -284,8 +272,7 @@ mod orchestrator_tests {
     fn test_circuit_breaker_opens_after_threshold() {
         let cb = CircuitBreaker::new("svc", 2, Duration::from_secs(3600)).unwrap();
         for _ in 0..2 {
-            let _: Result<(), AgentRuntimeError> =
-                cb.call(|| Err::<(), _>("fail".to_string()));
+            let _: Result<(), AgentRuntimeError> = cb.call(|| Err::<(), _>("fail".to_string()));
         }
         assert!(matches!(cb.state().unwrap(), CircuitState::Open { .. }));
     }
@@ -293,8 +280,7 @@ mod orchestrator_tests {
     #[test]
     fn test_circuit_breaker_success_resets_to_closed() {
         let cb = CircuitBreaker::new("svc", 5, Duration::from_secs(3600)).unwrap();
-        let _: Result<(), AgentRuntimeError> =
-            cb.call(|| Err::<(), _>("fail".to_string()));
+        let _: Result<(), AgentRuntimeError> = cb.call(|| Err::<(), _>("fail".to_string()));
         let _: Result<i32, AgentRuntimeError> = cb.call(|| Ok::<i32, String>(1));
         assert_eq!(cb.state().unwrap(), CircuitState::Closed);
         assert_eq!(cb.failure_count().unwrap(), 0);

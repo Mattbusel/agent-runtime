@@ -158,11 +158,14 @@ fn cb_with_large_threshold_only_opens_at_limit() {
 
     for i in 0..threshold - 1 {
         let _: Result<(), AgentRuntimeError> = cb.call(|| Err::<(), _>(format!("err {i}")));
-        assert_eq!(cb.state().unwrap(), CircuitState::Closed, "should still be closed at {i}");
+        assert_eq!(
+            cb.state().unwrap(),
+            CircuitState::Closed,
+            "should still be closed at {i}"
+        );
     }
 
-    let _: Result<(), AgentRuntimeError> =
-        cb.call(|| Err::<(), _>("final err".to_string()));
+    let _: Result<(), AgentRuntimeError> = cb.call(|| Err::<(), _>("final err".to_string()));
     assert!(matches!(cb.state().unwrap(), CircuitState::Open { .. }));
 }
 

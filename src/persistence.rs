@@ -209,8 +209,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("art_{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let _guard = tempdir::Handle { path: dir.clone() };
-        let backend: Arc<dyn PersistenceBackend> =
-            Arc::new(FilePersistenceBackend::new(&dir));
+        let backend: Arc<dyn PersistenceBackend> = Arc::new(FilePersistenceBackend::new(&dir));
         backend.save("obj-safe", b"ok").await.unwrap();
         let r = backend.load("obj-safe").await.unwrap();
         assert_eq!(r, Some(b"ok".to_vec()));

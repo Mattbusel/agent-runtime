@@ -78,11 +78,9 @@ async fn error_backpressure_shed_increments_metric() {
         .build();
 
     let _ = runtime
-        .run_agent(
-            AgentId::new("a"),
-            "prompt",
-            |_ctx: String| async { "Thought: done\nAction: FINAL_ANSWER ok".to_string() },
-        )
+        .run_agent(AgentId::new("a"), "prompt", |_ctx: String| async {
+            "Thought: done\nAction: FINAL_ANSWER ok".to_string()
+        })
         .await;
 
     assert_eq!(runtime.metrics().backpressure_shed_count(), 1);
@@ -159,9 +157,11 @@ async fn error_missing_required_field_produces_structured_observation() {
     let runtime = AgentRuntime::builder()
         .with_agent_config(AgentConfig::new(5, "test-model"))
         .register_tool(
-            ToolSpec::new("search", "web search", |args| {
-                serde_json::json!({ "results": args })
-            })
+            ToolSpec::new(
+                "search",
+                "web search",
+                |args| serde_json::json!({ "results": args }),
+            )
             .with_required_fields(vec!["query".to_string()]),
         )
         .build();

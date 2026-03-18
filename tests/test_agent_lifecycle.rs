@@ -117,9 +117,11 @@ async fn lifecycle_final_answer_terminates_loop() {
         .build();
 
     let session = runtime
-        .run_agent(AgentId::new("stop-agent"), "stop now", |_ctx: String| {
-            async { "Thought: I'm done\nAction: FINAL_ANSWER stopped".to_string() }
-        })
+        .run_agent(
+            AgentId::new("stop-agent"),
+            "stop now",
+            |_ctx: String| async { "Thought: I'm done\nAction: FINAL_ANSWER stopped".to_string() },
+        )
         .await
         .unwrap();
 
@@ -168,6 +170,10 @@ async fn lifecycle_metrics_track_full_session() {
 
     let m = runtime.metrics();
     assert_eq!(m.total_sessions(), 1);
-    assert_eq!(m.active_sessions(), 0, "active count must return to 0 after run");
+    assert_eq!(
+        m.active_sessions(),
+        0,
+        "active count must return to 0 after run"
+    );
     assert_eq!(m.total_steps(), 1);
 }
