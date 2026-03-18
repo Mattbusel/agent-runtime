@@ -2,7 +2,7 @@
 name = "llm-agent-runtime"
 version = "1.0.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 authors = ["Matt Busel <mattbusel@users.noreply.github.com>"]
 description = "Unified Tokio agent runtime -- orchestration, memory, knowledge graph, and ReAct loop in one crate"
 keywords = ["tokio", "agent", "llm", "memory", "runtime"]

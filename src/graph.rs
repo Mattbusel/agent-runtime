@@ -733,9 +733,7 @@ impl GraphStore {
             let entity = inner
                 .entities
                 .get(id)
-                .ok_or_else(|| {
-                    AgentRuntimeError::Graph(format!("entity '{}' not found", id.0))
-                })?
+                .ok_or_else(|| AgentRuntimeError::Graph(format!("entity '{}' not found", id.0)))?
                 .clone();
             // We hold inner lock; call directly on the new store's inner.
             let mut new_inner = recover_lock(new_store.inner.lock(), "subgraph:add_entity");
@@ -1159,16 +1157,10 @@ mod tests {
         let d_cent = *centrality.get(&EntityId::new("d")).unwrap();
 
         // Endpoints should have 0 centrality; intermediate nodes should be > 0.
-        assert!(
-            (a_cent).abs() < 1e-5,
-            "expected a_cent ~ 0, got {a_cent}"
-        );
+        assert!((a_cent).abs() < 1e-5, "expected a_cent ~ 0, got {a_cent}");
         assert!(b_cent > 0.0, "expected b_cent > 0, got {b_cent}");
         assert!(c_cent > 0.0, "expected c_cent > 0, got {c_cent}");
-        assert!(
-            (d_cent).abs() < 1e-5,
-            "expected d_cent ~ 0, got {d_cent}"
-        );
+        assert!((d_cent).abs() < 1e-5, "expected d_cent ~ 0, got {d_cent}");
     }
 
     // ── Label propagation communities ─────────────────────────────────────────
@@ -1234,11 +1226,7 @@ mod tests {
         link(&g, "c", "d");
 
         let sub = g
-            .subgraph(&[
-                EntityId::new("a"),
-                EntityId::new("b"),
-                EntityId::new("c"),
-            ])
+            .subgraph(&[EntityId::new("a"), EntityId::new("b"), EntityId::new("c")])
             .unwrap();
 
         assert_eq!(sub.entity_count().unwrap(), 3);

@@ -152,10 +152,7 @@ impl std::fmt::Debug for ToolSpec {
             .field("description", &self.description)
             .field("required_fields", &self.required_fields);
         #[cfg(feature = "orchestrator")]
-        s.field(
-            "has_circuit_breaker",
-            &self.circuit_breaker.is_some(),
-        );
+        s.field("has_circuit_breaker", &self.circuit_breaker.is_some());
         s.finish()
     }
 }
@@ -485,7 +482,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert!(steps[0].action.to_ascii_uppercase().starts_with("FINAL_ANSWER"));
+        assert!(steps[0]
+            .action
+            .to_ascii_uppercase()
+            .starts_with("FINAL_ANSWER"));
     }
 
     #[tokio::test]
@@ -515,7 +515,10 @@ mod tests {
 
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].action, "greet {}");
-        assert!(steps[1].action.to_ascii_uppercase().starts_with("FINAL_ANSWER"));
+        assert!(steps[1]
+            .action
+            .to_ascii_uppercase()
+            .starts_with("FINAL_ANSWER"));
     }
 
     #[tokio::test]
@@ -609,9 +612,11 @@ mod tests {
         let mut loop_ = ReActLoop::new(config);
 
         loop_.register_tool(
-            ToolSpec::new("search", "Searches for something", |args| {
-                serde_json::json!({ "result": args })
-            })
+            ToolSpec::new(
+                "search",
+                "Searches for something",
+                |args| serde_json::json!({ "result": args }),
+            )
             .with_required_fields(vec!["q".to_string()]),
         );
 
@@ -676,15 +681,20 @@ mod tests {
     async fn test_tool_with_circuit_breaker_passes_when_closed() {
         use std::sync::Arc;
 
-        let cb = Arc::new(crate::orchestrator::CircuitBreaker::new(
-            "echo-tool",
-            5,
-            std::time::Duration::from_secs(30),
-        ).unwrap());
+        let cb = Arc::new(
+            crate::orchestrator::CircuitBreaker::new(
+                "echo-tool",
+                5,
+                std::time::Duration::from_secs(30),
+            )
+            .unwrap(),
+        );
 
-        let spec = ToolSpec::new("echo", "Echoes args", |args| {
-            serde_json::json!({ "echoed": args })
-        })
+        let spec = ToolSpec::new(
+            "echo",
+            "Echoes args",
+            |args| serde_json::json!({ "echoed": args }),
+        )
         .with_circuit_breaker(cb);
 
         let registry = {
