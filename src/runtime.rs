@@ -480,17 +480,31 @@ impl AgentRuntime {
         // Build the ReAct loop and register tools.
         // Each ToolSpec is stored as an Arc so we can clone the Arc into the
         // handler closure without moving ownership out of self.tools.
+        // Required fields and the per-tool circuit breaker are preserved so
+        // that validation and fast-fail behaviour work correctly at run time.
         let mut react_loop = ReActLoop::new(self.agent_config.clone());
         for tool in &self.tools {
             let tool_arc = Arc::clone(tool);
-            react_loop.register_tool(ToolSpec::new_async(
+            let required_fields = tool_arc.required_fields.clone();
+            #[cfg(feature = "orchestrator")]
+            let circuit_breaker = tool_arc.circuit_breaker.clone();
+
+            let mut spec = ToolSpec::new_async(
                 tool_arc.name.clone(),
                 tool_arc.description.clone(),
                 move |args| {
                     let t = Arc::clone(&tool_arc);
                     Box::pin(async move { t.call(args).await })
                 },
-            ));
+            )
+            .with_required_fields(required_fields);
+
+            #[cfg(feature = "orchestrator")]
+            if let Some(cb) = circuit_breaker {
+                spec = spec.with_circuit_breaker(cb);
+            }
+
+            react_loop.register_tool(spec);
         }
 
         let steps = react_loop.run(&enriched_prompt, infer).await?;
