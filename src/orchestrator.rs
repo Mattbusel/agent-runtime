@@ -642,8 +642,11 @@ impl Pipeline {
     pub fn run(&self, input: String) -> Result<String, AgentRuntimeError> {
         let mut current = input;
         for stage in &self.stages {
-            tracing::debug!("running stage: {}", stage.name);
-            current = (stage.handler)(current)?;
+            tracing::debug!(stage = %stage.name, "running pipeline stage");
+            current = (stage.handler)(current).map_err(|e| {
+                tracing::error!(stage = %stage.name, error = %e, "pipeline stage failed");
+                e
+            })?;
         }
         Ok(current)
     }

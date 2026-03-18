@@ -417,10 +417,15 @@ impl ReActLoop {
             steps.push(step);
         }
 
-        Err(AgentRuntimeError::AgentLoop(format!(
+        let err = AgentRuntimeError::AgentLoop(format!(
             "max iterations ({}) reached without final answer",
             self.config.max_iterations
-        )))
+        ));
+        tracing::warn!(
+            max_iterations = self.config.max_iterations,
+            "ReAct loop exhausted max iterations without FINAL_ANSWER"
+        );
+        Err(err)
     }
 }
 

@@ -356,13 +356,13 @@ impl AgentRuntime {
             Ok(())
         };
 
-        if let Err(ref e) = backpressure_result {
+        if let Err(e) = backpressure_result {
             tracing::warn!(agent_id = %agent_id, error = %e, "backpressure shed: rejecting session");
             self.metrics
                 .backpressure_shed_count
                 .fetch_add(1, Ordering::Relaxed);
             self.metrics.active_sessions.fetch_sub(1, Ordering::Relaxed);
-            return backpressure_result;
+            return Err(e);
         }
 
         tracing::info!(agent_id = %agent_id, "agent session starting");
@@ -550,9 +550,24 @@ impl AgentRuntime {
                     duration_ms: session.duration_ms,
                 };
                 let key = format!("session:{session_id}:step:{i}");
-                if let Ok(bytes) = serde_json::to_vec(&partial) {
-                    if let Err(e) = backend.save(&key, &bytes).await {
-                        tracing::warn!(session_id = %session_id, step = i, error = %e, "failed to save step checkpoint");
+                match serde_json::to_vec(&partial) {
+                    Ok(bytes) => {
+                        if let Err(e) = backend.save(&key, &bytes).await {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                step = i,
+                                error = %e,
+                                "failed to save step checkpoint"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            step = i,
+                            error = %e,
+                            "failed to serialize step checkpoint"
+                        );
                     }
                 }
             }
