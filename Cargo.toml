@@ -1,5 +1,5 @@
 [package]
-name = "agent-runtime"
+name = "llm-agent-runtime"
 version = "1.0.0"
 edition = "2021"
 rust-version = "1.75"
@@ -10,7 +10,7 @@ categories = ["asynchronous", "concurrency"]
 license = "MIT"
 repository = "https://github.com/Mattbusel/agent-runtime"
 homepage = "https://github.com/Mattbusel/agent-runtime"
-documentation = "https://docs.rs/agent-runtime"
+documentation = "https://docs.rs/llm-agent-runtime"
 readme = "README.md"
 exclude = [".github/", "CHANGELOG.md"]
 
