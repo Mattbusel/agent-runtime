@@ -139,12 +139,18 @@ pub trait CircuitBreakerBackend: Send + Sync {
 
 // ── InMemoryCircuitBreakerBackend ─────────────────────────────────────────────
 
-/// In-process circuit breaker backend backed by a `Mutex`.
+/// In-process circuit breaker backend backed by a `Mutex<HashMap>`.
+///
+/// Each service name gets its own independent failure counter and open-at
+/// timestamp.  Multiple `CircuitBreaker` instances that share the same
+/// backend (via [`CircuitBreaker::with_backend`]) will correctly track
+/// failures per service rather than sharing a single counter.
 pub struct InMemoryCircuitBreakerBackend {
-    inner: Arc<Mutex<InMemoryBackendState>>,
+    inner: Arc<Mutex<HashMap<String, InMemoryServiceState>>>,
 }
 
-struct InMemoryBackendState {
+#[derive(Default)]
+struct InMemoryServiceState {
     consecutive_failures: u32,
     open_at: Option<std::time::Instant>,
 }
@@ -153,10 +159,7 @@ impl InMemoryCircuitBreakerBackend {
     /// Create a new in-memory backend with all counters at zero.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(InMemoryBackendState {
-                consecutive_failures: 0,
-                open_at: None,
-            })),
+            inner: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -168,38 +171,43 @@ impl Default for InMemoryCircuitBreakerBackend {
 }
 
 impl CircuitBreakerBackend for InMemoryCircuitBreakerBackend {
-    fn increment_failures(&self, _service: &str) -> u32 {
-        let mut state = timed_lock(
+    fn increment_failures(&self, service: &str) -> u32 {
+        let mut map = timed_lock(
             &self.inner,
             "InMemoryCircuitBreakerBackend::increment_failures",
         );
+        let state = map.entry(service.to_owned()).or_default();
         state.consecutive_failures += 1;
         state.consecutive_failures
     }
 
-    fn reset_failures(&self, _service: &str) {
-        let mut state = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::reset_failures");
-        state.consecutive_failures = 0;
+    fn reset_failures(&self, service: &str) {
+        let mut map = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::reset_failures");
+        if let Some(state) = map.get_mut(service) {
+            state.consecutive_failures = 0;
+        }
     }
 
-    fn get_failures(&self, _service: &str) -> u32 {
-        let state = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::get_failures");
-        state.consecutive_failures
+    fn get_failures(&self, service: &str) -> u32 {
+        let map = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::get_failures");
+        map.get(service).map_or(0, |s| s.consecutive_failures)
     }
 
-    fn set_open_at(&self, _service: &str, at: std::time::Instant) {
-        let mut state = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::set_open_at");
-        state.open_at = Some(at);
+    fn set_open_at(&self, service: &str, at: std::time::Instant) {
+        let mut map = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::set_open_at");
+        map.entry(service.to_owned()).or_default().open_at = Some(at);
     }
 
-    fn clear_open_at(&self, _service: &str) {
-        let mut state = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::clear_open_at");
-        state.open_at = None;
+    fn clear_open_at(&self, service: &str) {
+        let mut map = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::clear_open_at");
+        if let Some(state) = map.get_mut(service) {
+            state.open_at = None;
+        }
     }
 
-    fn get_open_at(&self, _service: &str) -> Option<std::time::Instant> {
-        let state = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::get_open_at");
-        state.open_at
+    fn get_open_at(&self, service: &str) -> Option<std::time::Instant> {
+        let map = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::get_open_at");
+        map.get(service).and_then(|s| s.open_at)
     }
 }
 
@@ -261,22 +269,6 @@ impl CircuitBreaker {
     pub fn with_backend(mut self, backend: Arc<dyn CircuitBreakerBackend>) -> Self {
         self.backend = backend;
         self
-    }
-
-    /// Derive the current `CircuitState` from backend storage.
-    #[allow(dead_code)]
-    fn current_state(&self) -> CircuitState {
-        match self.backend.get_open_at(&self.service) {
-            Some(opened_at) => CircuitState::Open { opened_at },
-            None => {
-                // We encode HalfOpen as failures == threshold but no open_at.
-                // However, the transition to HalfOpen is done in `call`, so
-                // outside of `call` we can only observe Closed here.
-                // The `call` method manages the HalfOpen flag via a per-call
-                // transient field — see below.
-                CircuitState::Closed
-            }
-        }
     }
 
     /// Attempt to call `f`, respecting the circuit breaker state.
@@ -992,6 +984,73 @@ mod tests {
             result,
             Err(AgentRuntimeError::BackpressureShed { .. })
         ));
+    }
+
+    // ── Task 11: Concurrent CircuitBreaker state transition tests ─────────────
+
+    #[test]
+    fn test_concurrent_circuit_breaker_opens_under_concurrent_failures() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let cb = Arc::new(
+            CircuitBreaker::new("svc", 5, Duration::from_secs(60)).unwrap(),
+        );
+        let n_threads = 8;
+        let failures_per_thread = 2;
+
+        let mut handles = Vec::new();
+        for _ in 0..n_threads {
+            let cb = Arc::clone(&cb);
+            handles.push(thread::spawn(move || {
+                for _ in 0..failures_per_thread {
+                    let _ = cb.call(|| Err::<(), &str>("fail"));
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // After n_threads * failures_per_thread = 16 failures with threshold=5,
+        // the circuit must be Open.
+        let state = cb.state().unwrap();
+        assert!(
+            matches!(state, CircuitState::Open { .. }),
+            "circuit should be open after many concurrent failures; got: {state:?}"
+        );
+    }
+
+    #[test]
+    fn test_per_service_tracking_is_independent() {
+        let backend = Arc::new(InMemoryCircuitBreakerBackend::new());
+
+        let cb_a = CircuitBreaker::new("service-a", 3, Duration::from_secs(60))
+            .unwrap()
+            .with_backend(Arc::clone(&backend) as Arc<dyn CircuitBreakerBackend>);
+        let cb_b = CircuitBreaker::new("service-b", 3, Duration::from_secs(60))
+            .unwrap()
+            .with_backend(Arc::clone(&backend) as Arc<dyn CircuitBreakerBackend>);
+
+        // Fail service-a 3 times → opens
+        for _ in 0..3 {
+            let _ = cb_a.call(|| Err::<(), &str>("fail"));
+        }
+
+        // service-b should still be Closed
+        let state_b = cb_b.state().unwrap();
+        assert_eq!(
+            state_b,
+            CircuitState::Closed,
+            "service-b should be unaffected by service-a failures"
+        );
+
+        // service-a should be Open
+        let state_a = cb_a.state().unwrap();
+        assert!(
+            matches!(state_a, CircuitState::Open { .. }),
+            "service-a should be open"
+        );
     }
 
     // ── Item 14: timed_lock concurrency correctness ───────────────────────────

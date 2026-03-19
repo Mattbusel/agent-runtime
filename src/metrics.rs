@@ -41,6 +41,20 @@ impl Default for LatencyHistogram {
 }
 
 impl LatencyHistogram {
+    /// Bucket upper bounds in milliseconds.
+    ///
+    /// Boundaries were chosen to cover the full range of observed latencies in
+    /// LLM-backed agent systems:
+    ///
+    /// | Bucket | Range      | Typical source                         |
+    /// |--------|------------|----------------------------------------|
+    /// | 0      | ≤ 1 ms     | In-process tool calls, cache hits      |
+    /// | 1      | ≤ 5 ms     | Fast local I/O, simple calculations    |
+    /// | 2      | ≤ 10 ms    | Network round-trips to local services  |
+    /// | 3      | ≤ 50 ms    | p50 LLM token latency (streaming)      |
+    /// | 4      | ≤ 100 ms   | p95 for small LLM completions          |
+    /// | 5      | ≤ 500 ms   | p99 for medium LLM completions         |
+    /// | 6      | > 500 ms   | Slow completions, network retries      |
     const BOUNDS: [u64; 7] = [1, 5, 10, 50, 100, 500, u64::MAX];
 
     /// Record a latency sample in milliseconds.

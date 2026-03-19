@@ -329,7 +329,29 @@ impl ToolSpec {
 
 // ── ToolCache ─────────────────────────────────────────────────────────────────
 
-/// Cache for tool call results. Implement to deduplicate repeated identical tool calls.
+/// Cache for tool call results.
+///
+/// Implement to deduplicate repeated identical tool calls within a single
+/// [`ReActLoop::run`] invocation.
+///
+/// ## Cache key
+/// Implementations should key on `(tool_name, args)`.  The `args` value is the
+/// full parsed JSON object passed to the tool.
+///
+/// ## Thread safety
+/// The trait is `Send + Sync`, so implementations must be safe to share across
+/// threads.  Wrap mutable state in a `Mutex` or use lock-free atomics.
+///
+/// ## TTL
+/// TTL semantics are implementation-defined.  A simple in-memory cache may
+/// keep results for the lifetime of the [`ReActLoop::run`] call; a distributed
+/// cache may use Redis with explicit expiry.
+///
+/// ## Lifetime
+/// A cache instance is attached to a `ToolRegistry` and lives for the lifetime
+/// of that registry.  Results are **not** automatically cleared between
+/// `ReActLoop::run` calls — clear the cache explicitly if cross-run dedup is
+/// not desired.
 pub trait ToolCache: Send + Sync {
     /// Look up a cached result for `(tool_name, args)`.
     fn get(&self, tool_name: &str, args: &serde_json::Value) -> Option<serde_json::Value>;
@@ -391,6 +413,21 @@ impl ToolRegistry {
         for spec in specs {
             self.register(spec);
         }
+    }
+
+    /// Fluent builder: register a tool and return `self`.
+    ///
+    /// Allows chaining multiple registrations:
+    /// ```no_run
+    /// use llm_agent_runtime::agent::{ToolRegistry, ToolSpec};
+    ///
+    /// let registry = ToolRegistry::new()
+    ///     .with_tool(ToolSpec::new("search", "Search", |args| args.clone()))
+    ///     .with_tool(ToolSpec::new("calc", "Calculate", |args| args.clone()));
+    /// ```
+    pub fn with_tool(mut self, spec: ToolSpec) -> Self {
+        self.register(spec);
+        self
     }
 
     /// Call a tool by name.
@@ -610,6 +647,28 @@ impl ReActLoop {
         }
     }
 
+    /// Emit a blocked-action observation string.
+    fn blocked_observation() -> String {
+        serde_json::json!({
+            "ok": false,
+            "error": "action blocked by reviewer",
+            "kind": "blocked"
+        })
+        .to_string()
+    }
+
+    /// Build the error observation JSON for a failed tool call.
+    fn error_observation(tool_name: &str, e: &AgentRuntimeError) -> String {
+        let _ = tool_name;
+        let kind = match e {
+            AgentRuntimeError::AgentLoop(msg) if msg.contains("not found") => "not_found",
+            #[cfg(feature = "orchestrator")]
+            AgentRuntimeError::CircuitOpen { .. } => "transient",
+            _ => "permanent",
+        };
+        serde_json::json!({ "ok": false, "error": e.to_string(), "kind": kind }).to_string()
+    }
+
     /// Execute the ReAct loop for the given prompt.
     ///
     /// # Arguments
@@ -705,7 +764,14 @@ impl ReActLoop {
             // Action hook check.
             if let Some(ref hook) = self.action_hook {
                 if !hook(tool_name.clone(), args.clone()).await {
-                    step.observation = serde_json::json!({"ok": false, "error": "action blocked by reviewer", "kind": "blocked"}).to_string();
+                    if let Some(ref obs) = self.observer {
+                        obs.on_action_blocked(&tool_name, &args);
+                    }
+                    if let Some(ref m) = self.metrics {
+                        m.record_tool_call(&tool_name);
+                        m.record_tool_failure(&tool_name);
+                    }
+                    step.observation = Self::blocked_observation();
                     step.step_duration_ms = step_start.elapsed().as_millis() as u64;
                     if let Some(ref m) = self.metrics {
                         m.record_step_latency(step.step_duration_ms);
@@ -740,16 +806,7 @@ impl ReActLoop {
                     if let Some(ref m) = self.metrics {
                         m.record_tool_failure(&tool_name);
                     }
-                    let kind = match &e {
-                        AgentRuntimeError::AgentLoop(msg) if msg.contains("not found") => {
-                            "not_found"
-                        }
-                        #[cfg(feature = "orchestrator")]
-                        AgentRuntimeError::CircuitOpen { .. } => "transient",
-                        _ => "permanent",
-                    };
-                    serde_json::json!({ "ok": false, "error": e.to_string(), "kind": kind })
-                        .to_string()
+                    Self::error_observation(&tool_name, &e)
                 }
             };
 
@@ -1006,6 +1063,13 @@ pub trait Observer: Send + Sync {
     fn on_tool_call(&self, tool_name: &str, args: &serde_json::Value) {
         let _ = (tool_name, args);
     }
+    /// Called when an action hook blocks a tool call before dispatch.
+    ///
+    /// `tool_name` is the name of the blocked tool; `args` are the arguments
+    /// that were passed to the hook.  This is called *instead of* `on_tool_call`.
+    fn on_action_blocked(&self, tool_name: &str, args: &serde_json::Value) {
+        let _ = (tool_name, args);
+    }
     /// Called when the loop starts.
     fn on_loop_start(&self, prompt: &str) {
         let _ = prompt;
@@ -1052,7 +1116,42 @@ impl Action {
 /// When blocked, the loop inserts a synthetic observation
 /// `{"ok": false, "error": "action blocked by reviewer", "kind": "blocked"}`
 /// and continues to the next iteration without invoking the tool.
+///
+/// ## Observer interaction
+///
+/// When a hook **allows** an action (`true`), the normal observer sequence fires:
+/// 1. `Observer::on_tool_call` — called before the tool is dispatched
+/// 2. `Observer::on_step` — called after the observation is recorded
+///
+/// When a hook **blocks** an action (`false`), the sequence is:
+/// 1. `Observer::on_action_blocked` — called instead of `on_tool_call`
+/// 2. `Observer::on_step` — called after the synthetic blocked observation is recorded
+///
+/// Use [`make_action_hook`] to construct a hook from a plain `async fn` without
+/// writing the `Arc<dyn Fn…>` boilerplate by hand.
 pub type ActionHook = Arc<dyn Fn(String, serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> + Send + Sync>;
+
+/// Create an [`ActionHook`] from a plain `async fn` or closure.
+///
+/// This helper eliminates the need to manually write
+/// `Arc::new(|name, args| Box::pin(async move { … }))`.
+///
+/// # Example
+/// ```no_run
+/// use llm_agent_runtime::agent::make_action_hook;
+///
+/// let hook = make_action_hook(|tool_name: String, _args| async move {
+///     // Block any tool called "dangerous"
+///     tool_name != "dangerous"
+/// });
+/// ```
+pub fn make_action_hook<F, Fut>(f: F) -> ActionHook
+where
+    F: Fn(String, serde_json::Value) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = bool> + Send + 'static,
+{
+    Arc::new(move |name, args| Box::pin(f(name, args)))
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -1613,6 +1712,72 @@ mod tests {
         assert_eq!(r1, r2);
         // The handler should only be called once; second call hits cache.
         assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    // ── Task 12: Chained validator short-circuit ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_validators_short_circuit_on_first_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        use std::sync::Arc;
+
+        let second_called = Arc::new(AtomicUsize::new(0));
+        let second_called_clone = Arc::clone(&second_called);
+
+        struct AlwaysFail;
+        impl ToolValidator for AlwaysFail {
+            fn validate(&self, _args: &Value) -> Result<(), AgentRuntimeError> {
+                Err(AgentRuntimeError::AgentLoop("first validator failed".into()))
+            }
+        }
+
+        struct CountCalls(Arc<AtomicUsize>);
+        impl ToolValidator for CountCalls {
+            fn validate(&self, _args: &Value) -> Result<(), AgentRuntimeError> {
+                self.0.fetch_add(1, AOrdering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register(
+            ToolSpec::new("guarded", "A guarded tool", |args| args.clone())
+                .with_validators(vec![
+                    Box::new(AlwaysFail),
+                    Box::new(CountCalls(second_called_clone)),
+                ]),
+        );
+
+        let result = registry.call("guarded", serde_json::json!({})).await;
+        assert!(result.is_err(), "should fail due to first validator");
+        assert_eq!(
+            second_called.load(AOrdering::SeqCst),
+            0,
+            "second validator must not be called when first fails"
+        );
+    }
+
+    // ── Task 14: loop_timeout integration test ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_loop_timeout_fires_between_iterations() {
+        let mut config = AgentConfig::new(100, "test-model");
+        // 30 ms deadline; each infer call sleeps 20 ms, so timeout fires after 2 iterations.
+        config.loop_timeout = Some(std::time::Duration::from_millis(30));
+        let loop_ = ReActLoop::new(config);
+
+        let result = loop_
+            .run("test", |_ctx| async {
+                // Sleep just long enough that the cumulative time exceeds the deadline.
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                // Return a valid step that keeps the loop going (unknown tool → error observation → next iter).
+                "Thought: still working\nAction: noop {}".to_string()
+            })
+            .await;
+
+        assert!(result.is_err(), "loop should time out");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("loop timeout"), "unexpected error: {msg}");
     }
 
     // ── Improvement 15: ActionHook ────────────────────────────────────────────
