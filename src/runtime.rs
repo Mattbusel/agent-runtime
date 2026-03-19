@@ -128,6 +128,21 @@ impl AgentSession {
 
     /// Load the session snapshot saved after step `step` completed.
     ///
+    /// Alias for [`load_checkpoint_at_step`] — provided for ergonomic
+    /// compatibility with call sites that prefer this naming convention.
+    ///
+    /// [`load_checkpoint_at_step`]: AgentSession::load_checkpoint_at_step
+    #[cfg(feature = "persistence")]
+    pub async fn load_step_checkpoint(
+        backend: &dyn crate::persistence::PersistenceBackend,
+        session_id: &str,
+        step: usize,
+    ) -> Result<Option<AgentSession>, AgentRuntimeError> {
+        Self::load_checkpoint_at_step(backend, session_id, step).await
+    }
+
+    /// Load the session snapshot saved after step `step` completed.
+    ///
     /// Returns `None` if no checkpoint exists for the given session/step pair.
     /// The step number is 1-based (step 1 = after the first ReAct iteration).
     #[cfg(feature = "persistence")]

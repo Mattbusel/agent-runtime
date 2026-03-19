@@ -48,7 +48,9 @@ pub struct AgentId(pub String);
 impl AgentId {
     /// Create a new `AgentId` from any string-like value.
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        let id = id.into();
+        debug_assert!(!id.is_empty(), "AgentId must not be empty");
+        Self(id)
     }
 
     /// Generate a random `AgentId` backed by a UUID v4.
@@ -81,7 +83,9 @@ pub struct MemoryId(pub String);
 impl MemoryId {
     /// Create a new `MemoryId` from any string-like value.
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        let id = id.into();
+        debug_assert!(!id.is_empty(), "MemoryId must not be empty");
+        Self(id)
     }
 
     /// Generate a random `MemoryId` backed by a UUID v4.
@@ -235,6 +239,12 @@ pub enum RecallPolicy {
     },
 }
 
+impl Default for RecallPolicy {
+    fn default() -> Self {
+        RecallPolicy::Importance
+    }
+}
+
 // ── Hybrid scoring helper ─────────────────────────────────────────────────────
 
 fn compute_hybrid_score(
@@ -260,6 +270,83 @@ pub enum EvictionPolicy {
     LowestImportance,
     /// Evict the oldest item (by insertion order / timestamp).
     Oldest,
+}
+
+// ── EpisodicStoreBuilder ──────────────────────────────────────────────────────
+
+/// Fluent builder for [`EpisodicStore`].
+///
+/// Allows combining any set of options — decay, recall policy, per-agent
+/// capacity, max age, and eviction policy — before creating the store.
+///
+/// # Example
+/// ```rust
+/// use llm_agent_runtime::memory::{EpisodicStore, EvictionPolicy, RecallPolicy, DecayPolicy};
+///
+/// let store = EpisodicStore::builder()
+///     .per_agent_capacity(50)
+///     .eviction_policy(EvictionPolicy::Oldest)
+///     .build();
+/// ```
+#[derive(Default)]
+pub struct EpisodicStoreBuilder {
+    decay: Option<DecayPolicy>,
+    recall_policy: Option<RecallPolicy>,
+    per_agent_capacity: Option<usize>,
+    max_age_hours: Option<f64>,
+    eviction_policy: Option<EvictionPolicy>,
+}
+
+impl EpisodicStoreBuilder {
+    /// Set the decay policy.
+    pub fn decay(mut self, policy: DecayPolicy) -> Self {
+        self.decay = Some(policy);
+        self
+    }
+
+    /// Set the recall policy.
+    pub fn recall_policy(mut self, policy: RecallPolicy) -> Self {
+        self.recall_policy = Some(policy);
+        self
+    }
+
+    /// Set the per-agent capacity. Panics if `capacity == 0`.
+    pub fn per_agent_capacity(mut self, capacity: usize) -> Self {
+        assert!(capacity > 0, "per_agent_capacity must be > 0");
+        self.per_agent_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the maximum memory age in hours. Returns `Err` if `max_age_hours <= 0`.
+    pub fn max_age_hours(mut self, hours: f64) -> Result<Self, crate::error::AgentRuntimeError> {
+        if hours <= 0.0 {
+            return Err(crate::error::AgentRuntimeError::Memory(
+                "max_age_hours must be positive".into(),
+            ));
+        }
+        self.max_age_hours = Some(hours);
+        Ok(self)
+    }
+
+    /// Set the eviction policy.
+    pub fn eviction_policy(mut self, policy: EvictionPolicy) -> Self {
+        self.eviction_policy = Some(policy);
+        self
+    }
+
+    /// Consume the builder and create an [`EpisodicStore`].
+    pub fn build(self) -> EpisodicStore {
+        EpisodicStore {
+            inner: Arc::new(Mutex::new(EpisodicInner {
+                items: HashMap::new(),
+                decay: self.decay,
+                recall_policy: self.recall_policy.unwrap_or(RecallPolicy::Importance),
+                per_agent_capacity: self.per_agent_capacity,
+                max_age_hours: self.max_age_hours,
+                eviction_policy: self.eviction_policy.unwrap_or_default(),
+            })),
+        }
+    }
 }
 
 // ── EpisodicStore ─────────────────────────────────────────────────────────────
@@ -304,6 +391,42 @@ impl EpisodicInner {
     }
 }
 
+/// Evict one item from `agent_items` if `len > cap`, according to `policy`.
+///
+/// The last element (the just-inserted item) is excluded from the
+/// `LowestImportance` scan so that newly added items are never evicted.
+fn evict_if_over_capacity(
+    agent_items: &mut Vec<MemoryItem>,
+    cap: usize,
+    policy: &EvictionPolicy,
+) {
+    if agent_items.len() <= cap {
+        return;
+    }
+    let pos = match policy {
+        EvictionPolicy::LowestImportance => {
+            let len = agent_items.len();
+            agent_items[..len - 1]
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    a.importance
+                        .partial_cmp(&b.importance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(pos, _)| pos)
+        }
+        EvictionPolicy::Oldest => agent_items
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, item)| item.timestamp)
+            .map(|(pos, _)| pos),
+    };
+    if let Some(pos) = pos {
+        agent_items.remove(pos);
+    }
+}
+
 impl EpisodicStore {
     /// Create a new unbounded episodic store without decay.
     pub fn new() -> Self {
@@ -317,6 +440,11 @@ impl EpisodicStore {
                 eviction_policy: EvictionPolicy::LowestImportance,
             })),
         }
+    }
+
+    /// Return a fluent builder to construct an `EpisodicStore` with any combination of options.
+    pub fn builder() -> EpisodicStoreBuilder {
+        EpisodicStoreBuilder::default()
     }
 
     /// Create a new episodic store with the given decay policy.
@@ -467,32 +595,7 @@ impl EpisodicStore {
         agent_items.push(item);
 
         if let Some(cap) = cap {
-            if agent_items.len() > cap {
-                let pos = match eviction_policy {
-                    // Exclude the last element (the just-pushed item) so the
-                    // newly added item is never evicted, as documented.
-                    EvictionPolicy::LowestImportance => {
-                        let len = agent_items.len();
-                        agent_items[..len - 1]
-                            .iter()
-                            .enumerate()
-                            .min_by(|(_, a), (_, b)| {
-                                a.importance
-                                    .partial_cmp(&b.importance)
-                                    .unwrap_or(std::cmp::Ordering::Equal)
-                            })
-                            .map(|(pos, _)| pos)
-                    }
-                    EvictionPolicy::Oldest => agent_items
-                        .iter()
-                        .enumerate()
-                        .min_by_key(|(_, item)| item.timestamp)
-                        .map(|(pos, _)| pos),
-                };
-                if let Some(pos) = pos {
-                    agent_items.remove(pos);
-                }
-            }
+            evict_if_over_capacity(agent_items, cap, &eviction_policy);
         }
         Ok(id)
     }
@@ -518,32 +621,7 @@ impl EpisodicStore {
         agent_items.push(item);
 
         if let Some(cap) = cap {
-            if agent_items.len() > cap {
-                let pos = match eviction_policy {
-                    // Exclude the last element (the just-pushed item) so the
-                    // newly added item is never evicted, as documented.
-                    EvictionPolicy::LowestImportance => {
-                        let len = agent_items.len();
-                        agent_items[..len - 1]
-                            .iter()
-                            .enumerate()
-                            .min_by(|(_, a), (_, b)| {
-                                a.importance
-                                    .partial_cmp(&b.importance)
-                                    .unwrap_or(std::cmp::Ordering::Equal)
-                            })
-                            .map(|(pos, _)| pos)
-                    }
-                    EvictionPolicy::Oldest => agent_items
-                        .iter()
-                        .enumerate()
-                        .min_by_key(|(_, item)| item.timestamp)
-                        .map(|(pos, _)| pos),
-                };
-                if let Some(pos) = pos {
-                    agent_items.remove(pos);
-                }
-            }
+            evict_if_over_capacity(agent_items, cap, &eviction_policy);
         }
         Ok(id)
     }
@@ -590,90 +668,60 @@ impl EpisodicStore {
             agent_items.retain(|i| i.timestamp >= cutoff);
         }
 
-        let mut items: Vec<MemoryItem> = agent_items.iter().cloned().collect();
-
-        // Partial-sort optimisation: when the caller only wants a small prefix
-        // of the ranked list (limit < items.len() / 2) we use
-        // `select_nth_unstable_by` to place the top-`limit` elements in the
-        // first `limit` positions in O(n) average time instead of the O(n log n)
-        // full sort.  We still need a final sort on the prefix so the returned
-        // slice is in descending-score order.
-        let use_partial_sort = limit > 0 && limit < items.len() / 2;
+        // Build a sorted index list (descending by score) without cloning all items first.
+        let mut indices: Vec<usize> = (0..agent_items.len()).collect();
 
         match recall_policy {
             RecallPolicy::Importance => {
-                if use_partial_sort {
-                    items.select_nth_unstable_by(limit - 1, |a, b| {
-                        b.importance
-                            .partial_cmp(&a.importance)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    items.truncate(limit);
-                    items.sort_by(|a, b| {
-                        b.importance
-                            .partial_cmp(&a.importance)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                } else {
-                    items.sort_by(|a, b| {
-                        b.importance
-                            .partial_cmp(&a.importance)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                }
+                indices.sort_by(|&a, &b| {
+                    agent_items[b]
+                        .importance
+                        .partial_cmp(&agent_items[a].importance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
             }
             RecallPolicy::Hybrid {
                 recency_weight,
                 frequency_weight,
             } => {
-                let max_recall = items
+                let max_recall = agent_items
                     .iter()
                     .map(|i| i.recall_count)
                     .max()
                     .unwrap_or(1)
                     .max(1);
                 let now = Utc::now();
-                if use_partial_sort {
-                    items.select_nth_unstable_by(limit - 1, |a, b| {
-                        let sa = compute_hybrid_score(a, recency_weight, frequency_weight, max_recall, now);
-                        let sb = compute_hybrid_score(b, recency_weight, frequency_weight, max_recall, now);
-                        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    items.truncate(limit);
-                    items.sort_by(|a, b| {
-                        let sa = compute_hybrid_score(a, recency_weight, frequency_weight, max_recall, now);
-                        let sb = compute_hybrid_score(b, recency_weight, frequency_weight, max_recall, now);
-                        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                } else {
-                    items.sort_by(|a, b| {
-                        let score_a =
-                            compute_hybrid_score(a, recency_weight, frequency_weight, max_recall, now);
-                        let score_b =
-                            compute_hybrid_score(b, recency_weight, frequency_weight, max_recall, now);
-                        score_b
-                            .partial_cmp(&score_a)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                }
+                indices.sort_by(|&a, &b| {
+                    let score_a = compute_hybrid_score(
+                        &agent_items[a],
+                        recency_weight,
+                        frequency_weight,
+                        max_recall,
+                        now,
+                    );
+                    let score_b = compute_hybrid_score(
+                        &agent_items[b],
+                        recency_weight,
+                        frequency_weight,
+                        max_recall,
+                        now,
+                    );
+                    score_b
+                        .partial_cmp(&score_a)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
             }
         }
 
-        items.truncate(limit);
+        indices.truncate(limit);
 
-        // Increment recall_count only for the items that survived truncation,
-        // updating the stored originals by matching on MemoryId.
-        let recalled_ids: std::collections::HashSet<&str> =
-            items.iter().map(|i| i.id.0.as_str()).collect();
-        for item in agent_items.iter_mut() {
-            if recalled_ids.contains(item.id.0.as_str()) {
-                item.recall_count += 1;
-            }
+        // Increment recall_count only for the surviving items.
+        for &idx in &indices {
+            agent_items[idx].recall_count += 1;
         }
-        // Reflect the incremented counts in the returned clones.
-        for item in items.iter_mut() {
-            item.recall_count += 1;
-        }
+
+        // Clone only the surviving items, with already-incremented counts.
+        let items: Vec<MemoryItem> = indices.iter().map(|&idx| agent_items[idx].clone()).collect();
 
         tracing::debug!("recalled {} items", items.len());
         Ok(items)

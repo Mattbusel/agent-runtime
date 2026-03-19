@@ -338,13 +338,14 @@ fn decay_output_clamped_to_zero_one() {
 
 #[test]
 fn hybrid_policy_with_decay_ranks_by_combined_score() {
-    // Decay half-life = 1 hour; recency_weight=0.5, frequency_weight=0.5
+    // Decay half-life = 1 hour; recency_weight=0.0, frequency_weight=10.0
+    // (pure frequency ranking, ignoring recency).
     let decay = DecayPolicy::exponential(1.0).unwrap();
     let store = EpisodicStore::with_decay_and_recall_policy(
         decay,
         RecallPolicy::Hybrid {
-            recency_weight: 0.5,
-            frequency_weight: 0.5,
+            recency_weight: 0.0,
+            frequency_weight: 10.0,
         },
     );
     let agent = AgentId::new("agent");
@@ -361,10 +362,9 @@ fn hybrid_policy_with_decay_ranks_by_combined_score() {
     store.add_episode(agent.clone(), "new_rare", 1.0).unwrap();
 
     let items = store.recall(&agent, 10).unwrap();
-    // With both weights equal the item with the higher combined score wins.
-    // "old_frequent" has recall_count=100 >> "new_rare" recall_count=0, so
-    // combined score for "old_frequent" should exceed "new_rare" even with
-    // partially decayed importance.
+    // With frequency_weight=10.0 and recency_weight=0.0, the frequency term
+    // dominates: old_frequent has recall_count=100 and new_rare has 0, so
+    // old_frequent's combined score is far higher.
     assert_eq!(
         items[0].content, "old_frequent",
         "old_frequent should rank first due to high recall count; got: {:?}",
