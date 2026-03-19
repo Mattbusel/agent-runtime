@@ -13,6 +13,7 @@
 //! This module is only compiled when the `persistence` feature is enabled.
 
 use crate::error::AgentRuntimeError;
+use crate::util::djb2;
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -75,10 +76,16 @@ impl FilePersistenceBackend {
     }
 
     /// Compute the file path for a given key.
+    ///
+    /// Uses a `<readable_prefix>-<djb2_hash>.bin` scheme to guarantee uniqueness
+    /// even when two keys sanitize to the same string (e.g. `"a/b"` and `"a_b"`).
+    /// The readable prefix aids manual inspection of the directory; the 16-digit
+    /// hex hash is the canonical disambiguator.
     fn path_for(&self, key: &str) -> PathBuf {
-        // Sanitize the key to remove path separators that could escape base_dir.
+        let hash = djb2(key);
         let sanitized = key.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-        self.base_dir.join(format!("{sanitized}.bin"))
+        self.base_dir
+            .join(format!("{sanitized}-{hash:016x}.bin"))
     }
 }
 
@@ -201,6 +208,28 @@ mod tests {
         backend.save("agent/session:1", b"data").await.unwrap();
         let loaded = backend.load("agent/session:1").await.unwrap();
         assert_eq!(loaded, Some(b"data".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_file_backend_collision_resistant_keys() {
+        // "a/b" and "a_b" both sanitize to "a_b" with naive replacement.
+        // The hash suffix must differentiate them.
+        let dir = std::env::temp_dir().join(format!("art_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let _guard = tempdir::Handle { path: dir.clone() };
+        let backend = FilePersistenceBackend::new(&dir);
+
+        backend.save("a/b", b"slash").await.unwrap();
+        backend.save("a_b", b"underscore").await.unwrap();
+
+        let loaded_slash = backend.load("a/b").await.unwrap();
+        let loaded_under = backend.load("a_b").await.unwrap();
+        assert_eq!(loaded_slash, Some(b"slash".to_vec()));
+        assert_eq!(loaded_under, Some(b"underscore".to_vec()));
+        assert_ne!(
+            loaded_slash, loaded_under,
+            "keys with the same sanitized form must not collide"
+        );
     }
 
     #[tokio::test]

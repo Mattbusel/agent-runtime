@@ -1,12 +1,12 @@
 //! Convenience re-exports for the most commonly used types.
 //!
 //! ```rust
-//! use agent_runtime::prelude::*;
+//! use llm_agent_runtime::prelude::*;
 //! ```
 
 pub use crate::error::AgentRuntimeError;
 
-#[cfg(all(feature = "memory", feature = "graph", feature = "orchestrator"))]
+#[cfg(feature = "memory")]
 pub use crate::runtime::{AgentRuntime, AgentRuntimeBuilder, AgentSession};
 
 #[cfg(feature = "memory")]

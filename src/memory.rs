@@ -10,38 +10,19 @@
 //! - Decaying: DecayPolicy reduces importance scores over time
 //! - Non-panicking: all operations return `Result`
 //! - Lock-poisoning resilient: a panicking thread does not permanently break a store
+//! - O(1) agent lookup: EpisodicStore indexes items per-agent for efficient recall
 //!
 //! ## NOT Responsible For
 //! - Cross-agent shared memory (see runtime.rs coordinator)
 //! - Persistence to disk or external store
 
 use crate::error::AgentRuntimeError;
+use crate::util::recover_lock;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
-
-// ── Lock-poisoning recovery ───────────────────────────────────────────────────
-
-/// Acquire a mutex guard, recovering from a poisoned mutex rather than
-/// propagating an error.  A panicking thread does not permanently break the
-/// store; we simply take ownership of the inner value and emit a warning.
-fn recover_lock<'a, T>(
-    result: std::sync::LockResult<std::sync::MutexGuard<'a, T>>,
-    ctx: &str,
-) -> std::sync::MutexGuard<'a, T>
-where
-    T: ?Sized,
-{
-    match result {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            tracing::warn!("mutex poisoned in {ctx}, recovering inner value");
-            poisoned.into_inner()
-        }
-    }
-}
 
 // ── Cosine similarity ─────────────────────────────────────────────────────────
 
@@ -235,7 +216,9 @@ fn compute_hybrid_score(
 /// ## Guarantees
 /// - Thread-safe via `Arc<Mutex<_>>`
 /// - Ordered: recall returns items in descending importance order
-/// - Bounded by optional capacity
+/// - Bounded by optional per-agent capacity
+/// - O(1) agent lookup via per-agent `HashMap` index
+/// - Automatic expiry via optional `max_age_hours`
 #[derive(Debug, Clone)]
 pub struct EpisodicStore {
     inner: Arc<Mutex<EpisodicInner>>,
@@ -243,11 +226,27 @@ pub struct EpisodicStore {
 
 #[derive(Debug)]
 struct EpisodicInner {
-    items: Vec<MemoryItem>,
+    /// Items stored per-agent for O(1) lookup. The key is the agent ID.
+    items: HashMap<AgentId, Vec<MemoryItem>>,
     decay: Option<DecayPolicy>,
     recall_policy: RecallPolicy,
     /// Maximum items stored per agent. Oldest (lowest-importance) items evicted when exceeded.
     per_agent_capacity: Option<usize>,
+    /// Maximum age in hours. Items older than this are purged on the next recall or add.
+    max_age_hours: Option<f64>,
+}
+
+impl EpisodicInner {
+    /// Purge items for `agent_id` that exceed `max_age_hours`, if configured.
+    fn purge_stale(&mut self, agent_id: &AgentId) {
+        if let Some(max_age_h) = self.max_age_hours {
+            let cutoff = Utc::now()
+                - chrono::Duration::seconds((max_age_h * 3600.0) as i64);
+            if let Some(agent_items) = self.items.get_mut(agent_id) {
+                agent_items.retain(|i| i.timestamp >= cutoff);
+            }
+        }
+    }
 }
 
 impl EpisodicStore {
@@ -255,10 +254,11 @@ impl EpisodicStore {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(EpisodicInner {
-                items: Vec::new(),
+                items: HashMap::new(),
                 decay: None,
                 recall_policy: RecallPolicy::Importance,
                 per_agent_capacity: None,
+                max_age_hours: None,
             })),
         }
     }
@@ -267,10 +267,11 @@ impl EpisodicStore {
     pub fn with_decay(policy: DecayPolicy) -> Self {
         Self {
             inner: Arc::new(Mutex::new(EpisodicInner {
-                items: Vec::new(),
+                items: HashMap::new(),
                 decay: Some(policy),
                 recall_policy: RecallPolicy::Importance,
                 per_agent_capacity: None,
+                max_age_hours: None,
             })),
         }
     }
@@ -279,10 +280,11 @@ impl EpisodicStore {
     pub fn with_recall_policy(policy: RecallPolicy) -> Self {
         Self {
             inner: Arc::new(Mutex::new(EpisodicInner {
-                items: Vec::new(),
+                items: HashMap::new(),
                 decay: None,
                 recall_policy: policy,
                 per_agent_capacity: None,
+                max_age_hours: None,
             })),
         }
     }
@@ -291,21 +293,69 @@ impl EpisodicStore {
     ///
     /// When an agent exceeds this capacity, the lowest-importance item for that
     /// agent is evicted.
+    ///
+    /// # Soft-limit semantics
+    ///
+    /// The capacity is a *soft* limit.  During each [`add_episode`] call the
+    /// new item is inserted first, and only then is the lowest-importance item
+    /// evicted if the count exceeds `capacity`.  This means the store
+    /// momentarily holds `capacity + 1` items per agent while eviction is in
+    /// progress.  The newly added item is **never** the one evicted regardless
+    /// of its importance score.
+    ///
+    /// Concurrent calls to `add_episode` may briefly exceed the cap by more
+    /// than one item before each call performs its own eviction sweep.
+    ///
+    /// [`add_episode`]: EpisodicStore::add_episode
     pub fn with_per_agent_capacity(capacity: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(EpisodicInner {
-                items: Vec::new(),
+                items: HashMap::new(),
                 decay: None,
                 recall_policy: RecallPolicy::Importance,
                 per_agent_capacity: Some(capacity),
+                max_age_hours: None,
             })),
         }
+    }
+
+    /// Create a new episodic store with an absolute age limit.
+    ///
+    /// Items older than `max_age_hours` are automatically purged on the next
+    /// `recall` or `add_episode` call for the owning agent.
+    ///
+    /// # Arguments
+    /// * `max_age_hours` — maximum memory age in hours; must be > 0
+    pub fn with_max_age(max_age_hours: f64) -> Result<Self, AgentRuntimeError> {
+        if max_age_hours <= 0.0 {
+            return Err(AgentRuntimeError::Memory(
+                "max_age_hours must be positive".into(),
+            ));
+        }
+        Ok(Self {
+            inner: Arc::new(Mutex::new(EpisodicInner {
+                items: HashMap::new(),
+                decay: None,
+                recall_policy: RecallPolicy::Importance,
+                per_agent_capacity: None,
+                max_age_hours: Some(max_age_hours),
+            })),
+        })
     }
 
     /// Record a new episode for the given agent.
     ///
     /// # Returns
     /// The `MemoryId` of the newly created memory item.
+    ///
+    /// # Capacity enforcement
+    ///
+    /// If the store was created with [`with_per_agent_capacity`], the item is
+    /// always inserted first.  If the agent's item count then exceeds the cap,
+    /// the single lowest-importance item for that agent is evicted.  See
+    /// [`with_per_agent_capacity`] for the full soft-limit semantics.
+    ///
+    /// [`with_per_agent_capacity`]: EpisodicStore::with_per_agent_capacity
     #[tracing::instrument(skip(self))]
     pub fn add_episode(
         &self,
@@ -316,19 +366,17 @@ impl EpisodicStore {
         let item = MemoryItem::new(agent_id.clone(), content, importance, Vec::new());
         let id = item.id.clone();
         let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::add_episode");
-        inner.items.push(item);
-        if let Some(cap) = inner.per_agent_capacity {
-            let agent_count = inner
-                .items
-                .iter()
-                .filter(|i| i.agent_id == agent_id)
-                .count();
-            if agent_count > cap {
-                if let Some(pos) = inner
-                    .items
+
+        inner.purge_stale(&agent_id);
+        let cap = inner.per_agent_capacity; // read before mutable borrow
+        let agent_items = inner.items.entry(agent_id).or_default();
+        agent_items.push(item);
+
+        if let Some(cap) = cap {
+            if agent_items.len() > cap {
+                if let Some(pos) = agent_items
                     .iter()
                     .enumerate()
-                    .filter(|(_, i)| i.agent_id == agent_id)
                     .min_by(|(_, a), (_, b)| {
                         a.importance
                             .partial_cmp(&b.importance)
@@ -336,7 +384,7 @@ impl EpisodicStore {
                     })
                     .map(|(pos, _)| pos)
                 {
-                    inner.items.remove(pos);
+                    agent_items.remove(pos);
                 }
             }
         }
@@ -356,19 +404,17 @@ impl EpisodicStore {
         item.timestamp = timestamp;
         let id = item.id.clone();
         let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::add_episode_at");
-        inner.items.push(item);
-        if let Some(cap) = inner.per_agent_capacity {
-            let agent_count = inner
-                .items
-                .iter()
-                .filter(|i| i.agent_id == agent_id)
-                .count();
-            if agent_count > cap {
-                if let Some(pos) = inner
-                    .items
+
+        inner.purge_stale(&agent_id);
+        let cap = inner.per_agent_capacity; // read before mutable borrow
+        let agent_items = inner.items.entry(agent_id).or_default();
+        agent_items.push(item);
+
+        if let Some(cap) = cap {
+            if agent_items.len() > cap {
+                if let Some(pos) = agent_items
                     .iter()
                     .enumerate()
-                    .filter(|(_, i)| i.agent_id == agent_id)
                     .min_by(|(_, a), (_, b)| {
                         a.importance
                             .partial_cmp(&b.importance)
@@ -376,7 +422,7 @@ impl EpisodicStore {
                     })
                     .map(|(pos, _)| pos)
                 {
-                    inner.items.remove(pos);
+                    agent_items.remove(pos);
                 }
             }
         }
@@ -385,9 +431,9 @@ impl EpisodicStore {
 
     /// Recall up to `limit` memories for the given agent.
     ///
-    /// Applies decay if configured, increments `recall_count` for each recalled
-    /// item in-place, then returns items sorted according to the configured
-    /// `RecallPolicy` (default: descending importance).
+    /// Applies decay if configured, purges stale items if `max_age` is set,
+    /// increments `recall_count` for each recalled item, then returns items
+    /// sorted according to the configured `RecallPolicy`.
     #[tracing::instrument(skip(self))]
     pub fn recall(
         &self,
@@ -396,37 +442,35 @@ impl EpisodicStore {
     ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
         let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::recall");
 
-        // Apply decay in-place
-        let decay_clone: Option<DecayPolicy> = inner.decay.clone();
-        if let Some(policy) = decay_clone {
-            for item in inner.items.iter_mut() {
+        // Clone policy values to avoid borrow conflicts.
+        let decay = inner.decay.clone();
+        let max_age = inner.max_age_hours;
+        let recall_policy = inner.recall_policy.clone();
+
+        let agent_items = inner.items.entry(agent_id.clone()).or_default();
+
+        // Apply decay in-place.
+        if let Some(ref policy) = decay {
+            for item in agent_items.iter_mut() {
                 policy.decay_item(item);
             }
         }
 
-        // Collect IDs of items belonging to this agent
-        let agent_ids_to_update: Vec<MemoryId> = inner
-            .items
-            .iter()
-            .filter(|i| &i.agent_id == agent_id)
-            .map(|i| i.id.clone())
-            .collect();
-
-        // Increment recall_count in-place for all matching items
-        for item in inner.items.iter_mut() {
-            if agent_ids_to_update.contains(&item.id) {
-                item.recall_count += 1;
-            }
+        // Purge stale items.
+        if let Some(max_age_h) = max_age {
+            let cutoff =
+                Utc::now() - chrono::Duration::seconds((max_age_h * 3600.0) as i64);
+            agent_items.retain(|i| i.timestamp >= cutoff);
         }
 
-        let mut items: Vec<MemoryItem> = inner
-            .items
-            .iter()
-            .filter(|i| &i.agent_id == agent_id)
-            .cloned()
-            .collect();
+        // Increment recall_count for all items belonging to this agent.
+        for item in agent_items.iter_mut() {
+            item.recall_count += 1;
+        }
 
-        match inner.recall_policy {
+        let mut items: Vec<MemoryItem> = agent_items.iter().cloned().collect();
+
+        match recall_policy {
             RecallPolicy::Importance => {
                 items.sort_by(|a, b| {
                     b.importance
@@ -465,7 +509,7 @@ impl EpisodicStore {
     /// Return the total number of stored episodes across all agents.
     pub fn len(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "EpisodicStore::len");
-        Ok(inner.items.len())
+        Ok(inner.items.values().map(|v| v.len()).sum())
     }
 
     /// Return `true` if no episodes have been stored.
@@ -483,9 +527,11 @@ impl EpisodicStore {
             self.inner.lock(),
             "EpisodicStore::bump_recall_count_by_content",
         );
-        for item in inner.items.iter_mut() {
-            if item.content == content {
-                item.recall_count = item.recall_count.saturating_add(amount);
+        for agent_items in inner.items.values_mut() {
+            for item in agent_items.iter_mut() {
+                if item.content == content {
+                    item.recall_count = item.recall_count.saturating_add(amount);
+                }
             }
         }
     }
@@ -545,6 +591,9 @@ impl SemanticStore {
     }
 
     /// Store a key-value pair with an embedding vector for similarity search.
+    ///
+    /// # Errors
+    /// Returns `Err(AgentRuntimeError::Memory)` if `embedding` is empty.
     #[tracing::instrument(skip(self))]
     pub fn store_with_embedding(
         &self,
@@ -553,7 +602,22 @@ impl SemanticStore {
         tags: Vec<String>,
         embedding: Vec<f32>,
     ) -> Result<(), AgentRuntimeError> {
+        if embedding.is_empty() {
+            return Err(AgentRuntimeError::Memory(
+                "embedding vector must not be empty".into(),
+            ));
+        }
         let mut inner = recover_lock(self.inner.lock(), "SemanticStore::store_with_embedding");
+        // Validate dimension consistency.
+        if let Some(existing) = inner.iter().find_map(|e| e.embedding.as_ref()) {
+            if existing.len() != embedding.len() {
+                return Err(AgentRuntimeError::Memory(format!(
+                    "embedding dimension mismatch: expected {}, got {}",
+                    existing.len(),
+                    embedding.len()
+                )));
+            }
+        }
         inner.push(SemanticEntry {
             key: key.into(),
             value: value.into(),
@@ -915,14 +979,11 @@ mod tests {
         let store = EpisodicStore::with_decay(policy);
         let agent = AgentId::new("a");
 
-        // Manually insert an old item by directly manipulating timestamps
-        {
-            let mut inner = store.inner.lock().unwrap();
-            let mut item = MemoryItem::new(agent.clone(), "old event", 1.0, vec![]);
-            // Set the timestamp to 1 hour ago
-            item.timestamp = Utc::now() - chrono::Duration::hours(1);
-            inner.items.push(item);
-        }
+        // Insert an old item by manipulating via add_episode_at.
+        let old_ts = Utc::now() - chrono::Duration::hours(1);
+        store
+            .add_episode_at(agent.clone(), "old event", 1.0, old_ts)
+            .unwrap();
 
         let items = store.recall(&agent, 10).unwrap();
         // With half_life=0.001h and age=1h, importance should be near 0
@@ -934,7 +995,51 @@ mod tests {
         );
     }
 
-    // ── Item 10: RecallPolicy / per-agent capacity tests ──────────────────────
+    // ── max_age eviction ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_max_age_rejects_zero() {
+        assert!(EpisodicStore::with_max_age(0.0).is_err());
+    }
+
+    #[test]
+    fn test_max_age_rejects_negative() {
+        assert!(EpisodicStore::with_max_age(-1.0).is_err());
+    }
+
+    #[test]
+    fn test_max_age_evicts_old_items_on_recall() {
+        // max_age = 0.001 hours (~3.6 seconds) — items 1 hour old should be evicted
+        let store = EpisodicStore::with_max_age(0.001).unwrap();
+        let agent = AgentId::new("a");
+
+        let old_ts = Utc::now() - chrono::Duration::hours(1);
+        store
+            .add_episode_at(agent.clone(), "old", 0.9, old_ts)
+            .unwrap();
+        store.add_episode(agent.clone(), "new", 0.5).unwrap();
+
+        let items = store.recall(&agent, 10).unwrap();
+        assert_eq!(items.len(), 1, "old item should be evicted by max_age");
+        assert_eq!(items[0].content, "new");
+    }
+
+    #[test]
+    fn test_max_age_evicts_old_items_on_add() {
+        let store = EpisodicStore::with_max_age(0.001).unwrap();
+        let agent = AgentId::new("a");
+
+        let old_ts = Utc::now() - chrono::Duration::hours(1);
+        store
+            .add_episode_at(agent.clone(), "old", 0.9, old_ts)
+            .unwrap();
+        // Adding a new item triggers stale purge.
+        store.add_episode(agent.clone(), "new", 0.5).unwrap();
+
+        assert_eq!(store.len().unwrap(), 1);
+    }
+
+    // ── RecallPolicy / per-agent capacity tests ───────────────────────────────
 
     #[test]
     fn test_recall_increments_recall_count() {
@@ -953,10 +1058,6 @@ mod tests {
 
     #[test]
     fn test_hybrid_recall_policy_prefers_recently_used() {
-        // "old_frequent": added 48 h ago with importance 0.5, recall_count bumped
-        // manually to simulate frequent use.
-        // "new_never": added just now with importance 0.5, never recalled.
-        // With a large frequency_weight the frequently-recalled item should rank higher.
         let store = EpisodicStore::with_recall_policy(RecallPolicy::Hybrid {
             recency_weight: 0.1,
             frequency_weight: 2.0,
@@ -969,15 +1070,8 @@ mod tests {
             .unwrap();
         store.add_episode(agent.clone(), "new_never", 0.5).unwrap();
 
-        // Simulate many prior recalls of "old_frequent" by manually bumping its count
-        {
-            let mut inner = store.inner.lock().unwrap();
-            for item in inner.items.iter_mut() {
-                if item.content == "old_frequent" {
-                    item.recall_count = 100;
-                }
-            }
-        }
+        // Simulate many prior recalls of "old_frequent".
+        store.bump_recall_count_by_content("old_frequent", 100);
 
         let items = store.recall(&agent, 10).unwrap();
         assert_eq!(items.len(), 2);
@@ -994,7 +1088,7 @@ mod tests {
 
         store.add_episode(agent.clone(), "mid", 0.5).unwrap();
         store.add_episode(agent.clone(), "high", 0.9).unwrap();
-        // Adding "low" (0.1) should trigger eviction of the lowest-importance item
+        // Adding "low" (0.1) should trigger eviction of the lowest-importance item.
         store.add_episode(agent.clone(), "low", 0.1).unwrap();
 
         assert_eq!(
@@ -1010,6 +1104,82 @@ mod tests {
             "the lowest-importance item should have been evicted; remaining: {:?}",
             contents
         );
+    }
+
+    // ── O(1) agent isolation ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_many_agents_do_not_see_each_others_memories() {
+        let store = EpisodicStore::new();
+        let n_agents = 20usize;
+        for i in 0..n_agents {
+            let agent = AgentId::new(format!("agent-{i}"));
+            for j in 0..5 {
+                store
+                    .add_episode(agent.clone(), format!("item-{i}-{j}"), 0.5)
+                    .unwrap();
+            }
+        }
+        // Each agent should only see its own 5 items.
+        for i in 0..n_agents {
+            let agent = AgentId::new(format!("agent-{i}"));
+            let items = store.recall(&agent, 100).unwrap();
+            assert_eq!(
+                items.len(),
+                5,
+                "agent {i} should see exactly 5 items, got {}",
+                items.len()
+            );
+            for item in &items {
+                assert!(
+                    item.content.starts_with(&format!("item-{i}-")),
+                    "agent {i} saw foreign item: {}",
+                    item.content
+                );
+            }
+        }
+    }
+
+    // ── Concurrency stress tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_concurrent_add_and_recall_are_consistent() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let store = Arc::new(EpisodicStore::new());
+        let agent = AgentId::new("concurrent-agent");
+        let n_threads = 8;
+        let items_per_thread = 25;
+
+        // Spawn writers.
+        let mut handles = Vec::new();
+        for t in 0..n_threads {
+            let s = Arc::clone(&store);
+            let a = agent.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..items_per_thread {
+                    s.add_episode(a.clone(), format!("t{t}-i{i}"), 0.5).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Spawn readers.
+        let mut read_handles = Vec::new();
+        for _ in 0..n_threads {
+            let s = Arc::clone(&store);
+            let a = agent.clone();
+            read_handles.push(thread::spawn(move || {
+                let items = s.recall(&a, 1000).unwrap();
+                assert!(items.len() <= n_threads * items_per_thread);
+            }));
+        }
+        for h in read_handles {
+            h.join().unwrap();
+        }
     }
 
     // ── SemanticStore ─────────────────────────────────────────────────────────
@@ -1060,13 +1230,32 @@ mod tests {
     }
 
     #[test]
+    fn test_semantic_store_empty_embedding_is_rejected() {
+        let store = SemanticStore::new();
+        let result = store.store_with_embedding("k", "v", vec![], vec![]);
+        assert!(result.is_err(), "empty embedding should be rejected");
+    }
+
+    #[test]
+    fn test_semantic_store_dimension_mismatch_is_rejected() {
+        let store = SemanticStore::new();
+        store
+            .store_with_embedding("k1", "v1", vec![], vec![1.0, 0.0])
+            .unwrap();
+        // Different dimension
+        let result = store.store_with_embedding("k2", "v2", vec![], vec![1.0, 0.0, 0.0]);
+        assert!(
+            result.is_err(),
+            "embedding dimension mismatch should be rejected"
+        );
+    }
+
+    #[test]
     fn test_semantic_store_retrieve_similar_returns_closest() {
         let store = SemanticStore::new();
-        // "close" is in the same direction as the query
         store
             .store_with_embedding("close", "close value", vec![], vec![1.0, 0.0, 0.0])
             .unwrap();
-        // "far" is orthogonal to the query
         store
             .store_with_embedding("far", "far value", vec![], vec![0.0, 1.0, 0.0])
             .unwrap();
@@ -1074,14 +1263,12 @@ mod tests {
         let query = vec![1.0, 0.0, 0.0];
         let results = store.retrieve_similar(&query, 2).unwrap();
         assert_eq!(results.len(), 2);
-        // The closest result should be "close"
         assert_eq!(results[0].0, "close");
         assert!(
             (results[0].2 - 1.0).abs() < 1e-5,
             "expected similarity ~1.0, got {}",
             results[0].2
         );
-        // The far result should have similarity 0.0
         assert!(
             (results[1].2).abs() < 1e-5,
             "expected similarity ~0.0, got {}",
@@ -1092,9 +1279,7 @@ mod tests {
     #[test]
     fn test_semantic_store_retrieve_similar_ignores_unembedded_entries() {
         let store = SemanticStore::new();
-        // This entry has no embedding — must not appear in similarity results
         store.store("no-emb", "no embedding value", vec![]).unwrap();
-        // This entry has an embedding
         store
             .store_with_embedding("with-emb", "with embedding value", vec![], vec![1.0, 0.0])
             .unwrap();
@@ -1107,7 +1292,6 @@ mod tests {
 
     #[test]
     fn test_cosine_similarity_orthogonal_vectors_return_zero() {
-        // Exercise cosine_similarity through retrieve_similar with orthogonal vectors
         let store = SemanticStore::new();
         store
             .store_with_embedding("a", "va", vec![], vec![1.0, 0.0])
@@ -1116,7 +1300,6 @@ mod tests {
             .store_with_embedding("b", "vb", vec![], vec![0.0, 1.0])
             .unwrap();
 
-        // query is along [1, 0]; "b" is orthogonal → similarity should be 0
         let query = vec![1.0, 0.0];
         let results = store.retrieve_similar(&query, 2).unwrap();
         assert_eq!(results.len(), 2);

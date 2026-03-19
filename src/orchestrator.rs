@@ -25,29 +25,6 @@ use std::time::{Duration, Instant};
 /// Maximum delay between retries — caps exponential growth.
 pub const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 
-// ── Lock recovery helpers ──────────────────────────────────────────────────────
-
-/// Recover from a poisoned mutex by extracting the inner value.
-///
-/// Instead of propagating a lock-poison error, this logs a warning and
-/// returns the inner guard so the caller can continue operating.
-#[allow(dead_code)]
-fn recover_lock<'a, T>(
-    result: std::sync::LockResult<std::sync::MutexGuard<'a, T>>,
-    ctx: &str,
-) -> std::sync::MutexGuard<'a, T>
-where
-    T: ?Sized,
-{
-    match result {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            tracing::warn!("mutex poisoned in {ctx}, recovering inner value");
-            poisoned.into_inner()
-        }
-    }
-}
-
 /// Acquire a lock, recovering from poisoning and logging slow acquisitions.
 ///
 /// Times the lock acquisition; if it exceeds 5 ms a warning is emitted so

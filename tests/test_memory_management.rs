@@ -2,9 +2,8 @@
 //! and the full spectrum of memory subsystem behaviors.
 
 use llm_agent_runtime::memory::{
-    AgentId, DecayPolicy, EpisodicStore, MemoryItem, RecallPolicy, SemanticStore, WorkingMemory,
+    AgentId, DecayPolicy, EpisodicStore, RecallPolicy, SemanticStore, WorkingMemory,
 };
-use llm_agent_runtime::AgentRuntimeError;
 use std::sync::Arc;
 
 // ── WorkingMemory: eviction under capacity ────────────────────────────────────

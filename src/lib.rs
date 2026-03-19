@@ -64,6 +64,8 @@
 
 // ── Public modules ─────────────────────────────────────────────────────────
 
+pub mod util;
+
 pub mod error;
 pub mod prelude;
 
@@ -79,7 +81,7 @@ pub mod orchestrator;
 pub mod agent;
 pub mod metrics;
 
-#[cfg(all(feature = "memory", feature = "graph", feature = "orchestrator"))]
+#[cfg(feature = "memory")]
 pub mod runtime;
 
 #[cfg(feature = "persistence")]
@@ -92,7 +94,7 @@ pub mod providers;
 
 pub use error::AgentRuntimeError;
 
-#[cfg(all(feature = "memory", feature = "graph", feature = "orchestrator"))]
+#[cfg(feature = "memory")]
 pub use runtime::{AgentRuntime, AgentRuntimeBuilder, AgentSession};
 
 // Re-export the most fundamental types unconditionally so users don't need
@@ -107,7 +109,7 @@ pub use graph::{Entity, EntityId, GraphStore, Relationship};
 #[cfg(feature = "orchestrator")]
 pub use orchestrator::{CircuitBreaker, Pipeline, RetryPolicy};
 
-pub use agent::{AgentConfig, ReActLoop, ReActStep, ToolSpec};
+pub use agent::{AgentConfig, ReActLoop, ReActStep, ToolSpec, ToolValidator};
 
 #[cfg(feature = "persistence")]
 pub use persistence::{FilePersistenceBackend, PersistenceBackend};

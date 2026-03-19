@@ -18,15 +18,19 @@
 
 use crate::agent::{AgentConfig, ReActLoop, ReActStep, ToolSpec};
 use crate::error::AgentRuntimeError;
-use crate::graph::GraphStore;
 use crate::memory::{AgentId, EpisodicStore, WorkingMemory};
 use crate::metrics::RuntimeMetrics;
-use crate::orchestrator::BackpressureGuard;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
+
+#[cfg(feature = "graph")]
+use crate::graph::GraphStore;
+
+#[cfg(feature = "orchestrator")]
+use crate::orchestrator::BackpressureGuard;
 
 // ── Typestate markers ─────────────────────────────────────────────────────────
 
@@ -52,6 +56,13 @@ pub struct AgentSession {
     pub graph_lookups: usize,
     /// Wall-clock duration of the session in milliseconds.
     pub duration_ms: u64,
+    /// Non-fatal errors encountered while saving per-step checkpoints.
+    ///
+    /// Populated only when a persistence backend is configured.  A non-empty
+    /// list means some step snapshots may be missing from storage, but the
+    /// session itself completed successfully.
+    #[serde(default)]
+    pub checkpoint_errors: Vec<String>,
 }
 
 impl AgentSession {
@@ -127,10 +138,13 @@ impl AgentSession {
 ///     .with_agent_config(cfg)                // → AgentRuntimeBuilder<HasConfig>
 ///     .build();                              // → AgentRuntime (infallible)
 /// ```
+/// Builder for [`AgentRuntime`].
 pub struct AgentRuntimeBuilder<S = NeedsConfig> {
     memory: Option<EpisodicStore>,
     working: Option<WorkingMemory>,
+    #[cfg(feature = "graph")]
     graph: Option<GraphStore>,
+    #[cfg(feature = "orchestrator")]
     backpressure: Option<BackpressureGuard>,
     agent_config: Option<AgentConfig>,
     tools: Vec<Arc<ToolSpec>>,
@@ -142,24 +156,27 @@ pub struct AgentRuntimeBuilder<S = NeedsConfig> {
 
 impl std::fmt::Debug for AgentRuntimeBuilder<NeedsConfig> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AgentRuntimeBuilder<NeedsConfig>")
-            .field("memory", &self.memory.is_some())
-            .field("working", &self.working.is_some())
-            .field("graph", &self.graph.is_some())
-            .field("backpressure", &self.backpressure.is_some())
-            .field("tools", &self.tools.len())
-            .finish()
+        let mut s = f.debug_struct("AgentRuntimeBuilder<NeedsConfig>");
+        s.field("memory", &self.memory.is_some())
+            .field("working", &self.working.is_some());
+        #[cfg(feature = "graph")]
+        s.field("graph", &self.graph.is_some());
+        #[cfg(feature = "orchestrator")]
+        s.field("backpressure", &self.backpressure.is_some());
+        s.field("tools", &self.tools.len()).finish()
     }
 }
 
 impl std::fmt::Debug for AgentRuntimeBuilder<HasConfig> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AgentRuntimeBuilder<HasConfig>")
-            .field("memory", &self.memory.is_some())
-            .field("working", &self.working.is_some())
-            .field("graph", &self.graph.is_some())
-            .field("backpressure", &self.backpressure.is_some())
-            .field("agent_config", &self.agent_config.is_some())
+        let mut s = f.debug_struct("AgentRuntimeBuilder<HasConfig>");
+        s.field("memory", &self.memory.is_some())
+            .field("working", &self.working.is_some());
+        #[cfg(feature = "graph")]
+        s.field("graph", &self.graph.is_some());
+        #[cfg(feature = "orchestrator")]
+        s.field("backpressure", &self.backpressure.is_some());
+        s.field("agent_config", &self.agent_config.is_some())
             .field("tools", &self.tools.len())
             .finish()
     }
@@ -170,7 +187,9 @@ impl Default for AgentRuntimeBuilder<NeedsConfig> {
         Self {
             memory: None,
             working: None,
+            #[cfg(feature = "graph")]
             graph: None,
+            #[cfg(feature = "orchestrator")]
             backpressure: None,
             agent_config: None,
             tools: Vec::new(),
@@ -197,12 +216,14 @@ impl<S> AgentRuntimeBuilder<S> {
     }
 
     /// Attach a graph store.
+    #[cfg(feature = "graph")]
     pub fn with_graph(mut self, graph: GraphStore) -> Self {
         self.graph = Some(graph);
         self
     }
 
     /// Attach a backpressure guard.
+    #[cfg(feature = "orchestrator")]
     pub fn with_backpressure(mut self, guard: BackpressureGuard) -> Self {
         self.backpressure = Some(guard);
         self
@@ -242,11 +263,17 @@ impl AgentRuntimeBuilder<NeedsConfig> {
     ///
     /// After this call the builder transitions to `AgentRuntimeBuilder<HasConfig>`,
     /// making `build()` available.
+    /// Set the agent loop configuration.
+    ///
+    /// After this call the builder transitions to `AgentRuntimeBuilder<HasConfig>`,
+    /// making `build()` available.
     pub fn with_agent_config(self, config: AgentConfig) -> AgentRuntimeBuilder<HasConfig> {
         AgentRuntimeBuilder {
             memory: self.memory,
             working: self.working,
+            #[cfg(feature = "graph")]
             graph: self.graph,
+            #[cfg(feature = "orchestrator")]
             backpressure: self.backpressure,
             agent_config: Some(config),
             tools: self.tools,
@@ -272,7 +299,9 @@ impl AgentRuntimeBuilder<HasConfig> {
         AgentRuntime {
             memory: self.memory,
             working: self.working,
+            #[cfg(feature = "graph")]
             graph: self.graph,
+            #[cfg(feature = "orchestrator")]
             backpressure: self.backpressure,
             agent_config,
             tools: self.tools,
@@ -289,7 +318,9 @@ impl AgentRuntimeBuilder<HasConfig> {
 pub struct AgentRuntime {
     memory: Option<EpisodicStore>,
     working: Option<WorkingMemory>,
+    #[cfg(feature = "graph")]
     graph: Option<GraphStore>,
+    #[cfg(feature = "orchestrator")]
     backpressure: Option<BackpressureGuard>,
     agent_config: AgentConfig,
     tools: Vec<Arc<ToolSpec>>,
@@ -302,10 +333,12 @@ impl std::fmt::Debug for AgentRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("AgentRuntime");
         s.field("memory", &self.memory.is_some())
-            .field("working", &self.working.is_some())
-            .field("graph", &self.graph.is_some())
-            .field("backpressure", &self.backpressure.is_some())
-            .field("tools", &self.tools.len());
+            .field("working", &self.working.is_some());
+        #[cfg(feature = "graph")]
+        s.field("graph", &self.graph.is_some());
+        #[cfg(feature = "orchestrator")]
+        s.field("backpressure", &self.backpressure.is_some());
+        s.field("tools", &self.tools.len());
         #[cfg(feature = "persistence")]
         s.field("checkpoint_backend", &self.checkpoint_backend.is_some());
         s.finish()
@@ -350,25 +383,28 @@ impl AgentRuntime {
         self.metrics.active_sessions.fetch_add(1, Ordering::Relaxed);
 
         // Acquire backpressure slot before any work.
-        let backpressure_result = if let Some(ref guard) = self.backpressure {
-            guard.try_acquire()
-        } else {
-            Ok(())
-        };
-
-        if let Err(e) = backpressure_result {
-            tracing::warn!(agent_id = %agent_id, error = %e, "backpressure shed: rejecting session");
-            self.metrics
-                .backpressure_shed_count
-                .fetch_add(1, Ordering::Relaxed);
-            self.metrics.active_sessions.fetch_sub(1, Ordering::Relaxed);
-            return Err(e);
+        #[cfg(feature = "orchestrator")]
+        {
+            let backpressure_result = if let Some(ref guard) = self.backpressure {
+                guard.try_acquire()
+            } else {
+                Ok(())
+            };
+            if let Err(e) = backpressure_result {
+                tracing::warn!(agent_id = %agent_id, error = %e, "backpressure shed: rejecting session");
+                self.metrics
+                    .backpressure_shed_count
+                    .fetch_add(1, Ordering::Relaxed);
+                self.metrics.active_sessions.fetch_sub(1, Ordering::Relaxed);
+                return Err(e);
+            }
         }
 
         tracing::info!(agent_id = %agent_id, "agent session starting");
         let outcome = self.run_agent_inner(agent_id.clone(), prompt, infer).await;
 
         // Always release backpressure — success or error.
+        #[cfg(feature = "orchestrator")]
         if let Some(ref guard) = self.backpressure {
             let _ = guard.release();
         }
@@ -485,6 +521,7 @@ impl AgentRuntime {
         };
 
         // Count graph entities as "lookups" for session metadata.
+        #[cfg(feature = "graph")]
         if let Some(ref graph) = self.graph {
             graph_lookups = graph.entity_count()?;
             tracing::debug!("graph has {} entities", graph_lookups);
@@ -495,7 +532,16 @@ impl AgentRuntime {
         // handler closure without moving ownership out of self.tools.
         // Required fields and the per-tool circuit breaker are preserved so
         // that validation and fast-fail behaviour work correctly at run time.
-        let mut react_loop = ReActLoop::new(self.agent_config.clone());
+        let mut react_loop = ReActLoop::new(self.agent_config.clone())
+            .with_metrics(Arc::clone(&self.metrics));
+
+        // Item 11 — wire per-step loop checkpointing.
+        #[cfg(feature = "persistence")]
+        if let Some(ref backend) = self.checkpoint_backend {
+            react_loop = react_loop
+                .with_step_checkpoint(Arc::clone(backend), session_id.clone());
+        }
+
         for tool in &self.tools {
             let tool_arc = Arc::clone(tool);
             let required_fields = tool_arc.required_fields.clone();
@@ -527,54 +573,69 @@ impl AgentRuntime {
         let steps = react_loop.run(&enriched_prompt, infer).await?;
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        let session = AgentSession {
-            session_id: session_id.clone(),
-            agent_id,
-            steps,
-            memory_hits,
-            graph_lookups,
-            duration_ms,
-        };
+        // Item 6 — collect per-step checkpoint errors; surfaced in AgentSession.
+        #[cfg(feature = "persistence")]
+        let mut ckpt_errors: Vec<String> = Vec::new();
 
         // Save final checkpoint if a backend is configured.
         #[cfg(feature = "persistence")]
         if let Some(ref backend) = self.checkpoint_backend {
             tracing::info!(session_id = %session_id, "saving session checkpoint");
-            session.save_checkpoint(backend.as_ref()).await?;
 
-            // Save incremental per-step checkpoints.
-            for i in 1..=session.steps.len() {
+            // Build a temporary session without errors to save as the base checkpoint.
+            let tmp = AgentSession {
+                session_id: session_id.clone(),
+                agent_id: agent_id.clone(),
+                steps: steps.clone(),
+                memory_hits,
+                graph_lookups,
+                duration_ms,
+                checkpoint_errors: vec![],
+            };
+            tmp.save_checkpoint(backend.as_ref()).await?;
+
+            // Save incremental per-step consolidated snapshots.
+            for i in 1..=steps.len() {
                 let partial = AgentSession {
                     session_id: session_id.clone(),
-                    agent_id: session.agent_id.clone(),
-                    steps: session.steps[..i].to_vec(),
-                    memory_hits: session.memory_hits,
-                    graph_lookups: session.graph_lookups,
-                    duration_ms: session.duration_ms,
+                    agent_id: agent_id.clone(),
+                    steps: steps[..i].to_vec(),
+                    memory_hits,
+                    graph_lookups,
+                    duration_ms,
+                    checkpoint_errors: vec![],
                 };
                 let key = format!("session:{session_id}:step:{i}");
                 match serde_json::to_vec(&partial) {
                     Ok(bytes) => {
                         if let Err(e) = backend.save(&key, &bytes).await {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                step = i,
-                                error = %e,
-                                "failed to save step checkpoint"
-                            );
+                            let msg = format!("session:{session_id} step:{i} save: {e}");
+                            tracing::warn!("{}", msg);
+                            ckpt_errors.push(msg);
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            step = i,
-                            error = %e,
-                            "failed to serialize step checkpoint"
-                        );
+                        let msg =
+                            format!("session:{session_id} step:{i} serialise: {e}");
+                        tracing::warn!("{}", msg);
+                        ckpt_errors.push(msg);
                     }
                 }
             }
         }
+
+        let session = AgentSession {
+            session_id,
+            agent_id,
+            steps,
+            memory_hits,
+            graph_lookups,
+            duration_ms,
+            #[cfg(feature = "persistence")]
+            checkpoint_errors: ckpt_errors,
+            #[cfg(not(feature = "persistence"))]
+            checkpoint_errors: vec![],
+        };
 
         Ok(session)
     }
@@ -585,6 +646,7 @@ impl AgentRuntime {
     }
 
     /// Return a reference to the graph store, if configured.
+    #[cfg(feature = "graph")]
     pub fn graph(&self) -> Option<&GraphStore> {
         self.graph.as_ref()
     }
@@ -592,6 +654,36 @@ impl AgentRuntime {
     /// Return a reference to the working memory, if configured.
     pub fn working_memory(&self) -> Option<&WorkingMemory> {
         self.working.as_ref()
+    }
+
+    /// Gracefully shut down the runtime.
+    ///
+    /// Logs a structured shutdown event with the final metrics snapshot.
+    /// If the `persistence` feature is enabled and a checkpoint backend is
+    /// configured, writes a sentinel key so operators can confirm clean shutdown.
+    ///
+    /// After calling `shutdown`, the runtime should not be used again.
+    pub async fn shutdown(&self) {
+        tracing::info!("AgentRuntime shutting down");
+        tracing::info!(
+            active_sessions = self.metrics.active_sessions(),
+            total_sessions = self.metrics.total_sessions(),
+            total_steps = self.metrics.total_steps(),
+            total_tool_calls = self.metrics.total_tool_calls(),
+            failed_tool_calls = self.metrics.failed_tool_calls(),
+            "final metrics snapshot on shutdown"
+        );
+
+        #[cfg(feature = "persistence")]
+        if let Some(ref backend) = self.checkpoint_backend {
+            let ts = chrono::Utc::now().to_rfc3339();
+            match backend.save("runtime:shutdown", ts.as_bytes()).await {
+                Ok(()) => tracing::debug!("shutdown sentinel saved"),
+                Err(e) => tracing::warn!(error = %e, "failed to save shutdown sentinel"),
+            }
+        }
+
+        tracing::info!("AgentRuntime shutdown complete");
     }
 }
 
@@ -837,16 +929,19 @@ mod tests {
                     thought: "t".into(),
                     action: "a".into(),
                     observation: "o".into(),
+                    step_duration_ms: 0,
                 },
                 ReActStep {
                     thought: "t2".into(),
                     action: "FINAL_ANSWER".into(),
                     observation: "done".into(),
+                    step_duration_ms: 0,
                 },
             ],
             memory_hits: 0,
             graph_lookups: 0,
             duration_ms: 10,
+            checkpoint_errors: vec![],
         };
         assert_eq!(session.step_count(), 2);
     }

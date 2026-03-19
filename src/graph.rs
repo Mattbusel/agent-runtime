@@ -14,31 +14,11 @@
 //! - Graph sharding / distributed graphs
 
 use crate::error::AgentRuntimeError;
+use crate::util::recover_lock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
-
-// ── Lock recovery helper ───────────────────────────────────────────────────────
-
-/// Recover from a poisoned mutex by logging a warning and returning the inner
-/// value. This is safe because we never leave shared data in a partially-written
-/// state across an await or panic boundary in this module.
-fn recover_lock<'a, T>(
-    result: std::sync::LockResult<std::sync::MutexGuard<'a, T>>,
-    ctx: &str,
-) -> std::sync::MutexGuard<'a, T>
-where
-    T: ?Sized,
-{
-    match result {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            tracing::warn!("mutex poisoned in {ctx}, recovering inner value");
-            poisoned.into_inner()
-        }
-    }
-}
 
 // ── OrdF32 newtype ─────────────────────────────────────────────────────────────
 
@@ -201,6 +181,8 @@ pub struct GraphStore {
 struct GraphInner {
     entities: HashMap<EntityId, Entity>,
     relationships: Vec<Relationship>,
+    /// Cached result of cycle detection. Invalidated on any mutation.
+    cycle_cache: Option<bool>,
 }
 
 impl GraphStore {
@@ -210,6 +192,7 @@ impl GraphStore {
             inner: Arc::new(Mutex::new(GraphInner {
                 entities: HashMap::new(),
                 relationships: Vec::new(),
+                cycle_cache: None,
             })),
         }
     }
@@ -219,6 +202,7 @@ impl GraphStore {
     /// If an entity with the same ID already exists, it is replaced.
     pub fn add_entity(&self, entity: Entity) -> Result<(), AgentRuntimeError> {
         let mut inner = recover_lock(self.inner.lock(), "add_entity");
+        inner.cycle_cache = None;
         inner.entities.insert(entity.id.clone(), entity);
         Ok(())
     }
@@ -270,6 +254,7 @@ impl GraphStore {
             ));
         }
 
+        inner.cycle_cache = None;
         inner.relationships.push(rel);
         Ok(())
     }
@@ -284,6 +269,7 @@ impl GraphStore {
                 id.0
             )));
         }
+        inner.cycle_cache = None;
         inner.relationships.retain(|r| &r.from != id && &r.to != id);
         Ok(())
     }
@@ -397,30 +383,30 @@ impl GraphStore {
             return Ok(Some(vec![from.clone()]));
         }
 
+        // Item 5 — predecessor-map BFS; O(1) per enqueue instead of O(path_len).
         let mut visited: HashSet<EntityId> = HashSet::new();
-        let mut queue: VecDeque<Vec<EntityId>> = VecDeque::new();
+        let mut prev: HashMap<EntityId, EntityId> = HashMap::new();
+        let mut queue: VecDeque<EntityId> = VecDeque::new();
 
         visited.insert(from.clone());
-        queue.push_back(vec![from.clone()]);
+        queue.push_back(from.clone());
 
-        while let Some(path) = queue.pop_front() {
-            let current = match path.last() {
-                Some(c) => c.clone(),
-                None => continue,
-            };
-
-            let neighbours: Vec<EntityId> = Self::neighbours(&inner.relationships, &current);
-
-            for neighbour in neighbours {
+        while let Some(current) = queue.pop_front() {
+            for neighbour in Self::neighbours(&inner.relationships, &current) {
                 if &neighbour == to {
-                    let mut full_path = path.clone();
-                    full_path.push(neighbour);
-                    return Ok(Some(full_path));
+                    // Reconstruct path by following prev back from current.
+                    let mut path = vec![neighbour, current.clone()];
+                    let mut node = current;
+                    while let Some(p) = prev.get(&node) {
+                        path.push(p.clone());
+                        node = p.clone();
+                    }
+                    path.reverse();
+                    return Ok(Some(path));
                 }
                 if visited.insert(neighbour.clone()) {
-                    let mut new_path = path.clone();
-                    new_path.push(neighbour.clone());
-                    queue.push_back(new_path);
+                    prev.insert(neighbour.clone(), current.clone());
+                    queue.push_back(neighbour);
                 }
             }
         }
@@ -517,15 +503,45 @@ impl GraphStore {
         Ok(None)
     }
 
-    /// Compute the transitive closure: all entities reachable from `start`.
+    /// BFS that builds a `HashSet` directly (including `start`).
+    ///
+    /// Operates on a pre-locked `GraphInner` to avoid acquiring the mutex twice
+    /// and to skip the intermediate `Vec` allocation that `bfs()` produces.
+    fn bfs_into_set(inner: &GraphInner, start: &EntityId) -> HashSet<EntityId> {
+        let mut visited: HashSet<EntityId> = HashSet::new();
+        let mut queue: VecDeque<EntityId> = VecDeque::new();
+        visited.insert(start.clone());
+        queue.push_back(start.clone());
+        while let Some(current) = queue.pop_front() {
+            for neighbour in Self::neighbours(&inner.relationships, &current) {
+                if visited.insert(neighbour.clone()) {
+                    queue.push_back(neighbour);
+                }
+            }
+        }
+        visited
+    }
+
+    /// Compute the transitive closure: all entities reachable from `start`
+    /// (including `start` itself).
+    ///
+    /// Uses a single lock acquisition and builds the result as a `HashSet`
+    /// directly, avoiding the intermediate `Vec` that would otherwise be
+    /// produced by delegating to [`bfs`].
+    ///
+    /// [`bfs`]: GraphStore::bfs
     pub fn transitive_closure(
         &self,
         start: &EntityId,
     ) -> Result<HashSet<EntityId>, AgentRuntimeError> {
-        let reachable = self.bfs(start)?;
-        let mut set: HashSet<EntityId> = reachable.into_iter().collect();
-        set.insert(start.clone());
-        Ok(set)
+        let inner = recover_lock(self.inner.lock(), "transitive_closure");
+        if !inner.entities.contains_key(start) {
+            return Err(AgentRuntimeError::Graph(format!(
+                "start entity '{}' not found",
+                start.0
+            )));
+        }
+        Ok(Self::bfs_into_set(&inner, start))
     }
 
     /// Return the number of entities in the graph.
@@ -628,8 +644,13 @@ impl GraphStore {
             while let Some(w) = stack.pop() {
                 let delta_w = *delta.get(&w).unwrap_or(&0.0);
                 let sigma_w = *sigma.get(&w).unwrap_or(&1.0);
-                for v in predecessors.get(&w).cloned().unwrap_or_default() {
-                    let sigma_v = *sigma.get(&v).unwrap_or(&1.0);
+                // Item 5 — iterate predecessors by reference to avoid cloning the Vec.
+                for v in predecessors
+                    .get(&w)
+                    .map(|ps| ps.as_slice())
+                    .unwrap_or_default()
+                {
+                    let sigma_v = *sigma.get(v).unwrap_or(&1.0);
                     let contribution = (sigma_v / sigma_w) * (1.0 + delta_w);
                     *delta.entry(v.clone()).or_insert(0.0) += contribution;
                 }
@@ -719,6 +740,70 @@ impl GraphStore {
         }
 
         Ok(labels)
+    }
+
+    /// Detect whether the directed graph contains any cycles.
+    ///
+    /// Uses iterative DFS with a three-color marking scheme.  The result is
+    /// cached until the next mutation (`add_entity`, `add_relationship`, or
+    /// `remove_entity`).
+    ///
+    /// # Returns
+    /// - `Ok(true)` — at least one cycle exists
+    /// - `Ok(false)` — the graph is acyclic (a DAG)
+    pub fn detect_cycles(&self) -> Result<bool, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "detect_cycles");
+
+        if let Some(cached) = inner.cycle_cache {
+            return Ok(cached);
+        }
+
+        // Iterative DFS with three-color marking: 0=white, 1=gray, 2=black.
+        let mut color: HashMap<&EntityId, u8> =
+            inner.entities.keys().map(|id| (id, 0u8)).collect();
+
+        let has_cycle = 'outer: {
+            for start in inner.entities.keys() {
+                if *color.get(start).unwrap_or(&0) != 0 {
+                    continue;
+                }
+
+                // Stack holds (node_id, iterator position for adjacency).
+                let mut stack: Vec<(&EntityId, usize)> = vec![(start, 0)];
+                *color.entry(start).or_insert(0) = 1;
+
+                while let Some((node, idx)) = stack.last_mut() {
+                    // Collect neighbors on first visit.
+                    let neighbors: Vec<&EntityId> = inner
+                        .relationships
+                        .iter()
+                        .filter(|r| &r.from == *node)
+                        .map(|r| &r.to)
+                        .collect();
+
+                    if *idx < neighbors.len() {
+                        let next = neighbors[*idx];
+                        *idx += 1;
+                        match color.get(next).copied().unwrap_or(0) {
+                            1 => break 'outer true, // back edge → cycle
+                            0 => {
+                                *color.entry(next).or_insert(0) = 1;
+                                stack.push((next, 0));
+                            }
+                            _ => {} // already fully processed
+                        }
+                    } else {
+                        // All neighbors processed; color black.
+                        *color.entry(*node).or_insert(0) = 2;
+                        stack.pop();
+                    }
+                }
+            }
+            false
+        };
+
+        inner.cycle_cache = Some(has_cycle);
+        Ok(has_cycle)
     }
 
     /// Extract a subgraph containing only the specified entities and the
@@ -1241,5 +1326,76 @@ mod tests {
             .unwrap();
         assert!(path.is_some());
         assert_eq!(path.unwrap().len(), 3);
+    }
+
+    // ── detect_cycles ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_cycles_dag_returns_false() {
+        let g = make_graph();
+        add(&g, "a");
+        add(&g, "b");
+        add(&g, "c");
+        link(&g, "a", "b");
+        link(&g, "b", "c");
+        assert_eq!(g.detect_cycles().unwrap(), false);
+    }
+
+    #[test]
+    fn test_detect_cycles_self_loop_returns_true() {
+        let g = make_graph();
+        add(&g, "a");
+        // Use a different kind to avoid duplicate-relationship rejection.
+        g.add_relationship(Relationship::new("a", "a", "SELF", 1.0))
+            .unwrap();
+        assert_eq!(g.detect_cycles().unwrap(), true);
+    }
+
+    #[test]
+    fn test_detect_cycles_simple_cycle_returns_true() {
+        let g = make_graph();
+        add(&g, "a");
+        add(&g, "b");
+        link(&g, "a", "b");
+        g.add_relationship(Relationship::new("b", "a", "BACK", 1.0))
+            .unwrap();
+        assert_eq!(g.detect_cycles().unwrap(), true);
+    }
+
+    #[test]
+    fn test_detect_cycles_empty_graph_returns_false() {
+        let g = make_graph();
+        assert_eq!(g.detect_cycles().unwrap(), false);
+    }
+
+    #[test]
+    fn test_detect_cycles_result_is_cached() {
+        let g = make_graph();
+        add(&g, "x");
+        add(&g, "y");
+        link(&g, "x", "y");
+        // First call.
+        let r1 = g.detect_cycles().unwrap();
+        // Second call should return the cached value.
+        let r2 = g.detect_cycles().unwrap();
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn test_detect_cycles_cache_invalidated_on_mutation() {
+        let g = make_graph();
+        add(&g, "a");
+        add(&g, "b");
+        link(&g, "a", "b");
+        assert_eq!(g.detect_cycles().unwrap(), false);
+
+        // Add a back edge to create a cycle — cache must be invalidated.
+        g.add_relationship(Relationship::new("b", "a", "BACK", 1.0))
+            .unwrap();
+        assert_eq!(
+            g.detect_cycles().unwrap(),
+            true,
+            "cache should be invalidated after adding a back edge"
+        );
     }
 }

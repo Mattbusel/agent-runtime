@@ -67,6 +67,8 @@ pub trait LlmProvider: Send + Sync {
 pub struct AnthropicProvider {
     api_key: String,
     client: reqwest::Client,
+    /// Semaphore bounding concurrent SSE background tasks (item 10).
+    stream_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 #[cfg(feature = "anthropic")]
@@ -74,12 +76,29 @@ impl AnthropicProvider {
     const API_URL: &'static str = "https://api.anthropic.com/v1/messages";
     const API_VERSION: &'static str = "2023-06-01";
     const MAX_TOKENS: u32 = 1024;
+    /// Default maximum number of concurrent streaming tasks.
+    const DEFAULT_STREAM_CONCURRENCY: usize = 32;
 
     /// Create a new Anthropic provider with the given API key.
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
             client: reqwest::Client::new(),
+            stream_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                Self::DEFAULT_STREAM_CONCURRENCY,
+            )),
+        }
+    }
+
+    /// Create a provider with a custom limit on concurrent streaming tasks.
+    ///
+    /// Useful when many agents share a single provider and you want to cap
+    /// the number of simultaneous SSE parse tasks.
+    pub fn with_max_concurrent_streams(api_key: impl Into<String>, max: usize) -> Self {
+        Self {
+            api_key: api_key.into(),
+            client: reqwest::Client::new(),
+            stream_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(max)),
         }
     }
 }
@@ -165,12 +184,32 @@ impl LlmProvider for AnthropicProvider {
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, AgentRuntimeError>>(32);
 
-        // Parse SSE in a background task
+        // Item 10 — acquire a semaphore permit before spawning to bound concurrency.
+        let permit = std::sync::Arc::clone(&self.stream_semaphore)
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                AgentRuntimeError::Provider("Anthropic stream semaphore closed".into())
+            })?;
+
+        // Parse SSE in a background task.
         tokio::spawn(async move {
-            // Collect all bytes and parse SSE events from the full body
+            let _permit = permit; // released when this task finishes
             match response.bytes().await {
                 Ok(bytes) => {
-                    let text = String::from_utf8_lossy(&bytes);
+                    // Item 7 — strict UTF-8; propagate errors rather than silently
+                    // replacing invalid sequences with the replacement character.
+                    let text = match String::from_utf8(bytes.to_vec()) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            let _ = tx
+                                .send(Err(AgentRuntimeError::Provider(format!(
+                                    "Anthropic stream response is not valid UTF-8: {e}"
+                                ))))
+                                .await;
+                            return;
+                        }
+                    };
                     for line in text.lines() {
                         if let Some(data) = line.strip_prefix("data: ") {
                             if data == "[DONE]" {
@@ -220,11 +259,15 @@ pub struct OpenAiProvider {
     api_key: String,
     base_url: String,
     client: reqwest::Client,
+    /// Semaphore bounding concurrent SSE background tasks (item 10).
+    stream_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 #[cfg(feature = "openai")]
 impl OpenAiProvider {
     const DEFAULT_BASE_URL: &'static str = "https://api.openai.com/v1";
+    /// Default maximum number of concurrent streaming tasks.
+    const DEFAULT_STREAM_CONCURRENCY: usize = 32;
 
     /// Create a new OpenAI provider with the default base URL.
     pub fn new(api_key: impl Into<String>) -> Self {
@@ -232,6 +275,9 @@ impl OpenAiProvider {
             api_key: api_key.into(),
             base_url: Self::DEFAULT_BASE_URL.to_owned(),
             client: reqwest::Client::new(),
+            stream_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                Self::DEFAULT_STREAM_CONCURRENCY,
+            )),
         }
     }
 
@@ -241,6 +287,23 @@ impl OpenAiProvider {
             api_key: api_key.into(),
             base_url: base_url.into(),
             client: reqwest::Client::new(),
+            stream_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                Self::DEFAULT_STREAM_CONCURRENCY,
+            )),
+        }
+    }
+
+    /// Create a provider with a custom limit on concurrent streaming tasks.
+    pub fn with_max_concurrent_streams(
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+        max: usize,
+    ) -> Self {
+        Self {
+            api_key: api_key.into(),
+            base_url: base_url.into(),
+            client: reqwest::Client::new(),
+            stream_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(max)),
         }
     }
 }
@@ -326,10 +389,30 @@ impl LlmProvider for OpenAiProvider {
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, AgentRuntimeError>>(32);
 
+        // Item 10 — bound concurrent tasks via semaphore.
+        let permit = std::sync::Arc::clone(&self.stream_semaphore)
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                AgentRuntimeError::Provider("OpenAI stream semaphore closed".into())
+            })?;
+
         tokio::spawn(async move {
+            let _permit = permit;
             match response.bytes().await {
                 Ok(bytes) => {
-                    let text = String::from_utf8_lossy(&bytes);
+                    // Item 7 — strict UTF-8 decoding.
+                    let text = match String::from_utf8(bytes.to_vec()) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            let _ = tx
+                                .send(Err(AgentRuntimeError::Provider(format!(
+                                    "OpenAI stream response is not valid UTF-8: {e}"
+                                ))))
+                                .await;
+                            return;
+                        }
+                    };
                     for line in text.lines() {
                         if let Some(data) = line.strip_prefix("data: ") {
                             if data == "[DONE]" {

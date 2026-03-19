@@ -15,13 +15,12 @@
 //! - Streaming partial responses
 
 use crate::error::AgentRuntimeError;
+use crate::metrics::RuntimeMetrics;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-
-#[cfg(feature = "orchestrator")]
 use std::sync::Arc;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -77,6 +76,12 @@ pub struct ReActStep {
     pub action: String,
     /// The result of the action.
     pub observation: String,
+    /// Wall-clock duration of this individual step in milliseconds.
+    /// Covers the time from the start of the inference call to the end of the
+    /// tool invocation (or FINAL_ANSWER detection).  Zero for steps that were
+    /// constructed outside the loop (e.g., in tests).
+    #[serde(default)]
+    pub step_duration_ms: u64,
 }
 
 /// Configuration for the ReAct agent loop.
@@ -94,6 +99,10 @@ pub struct AgentConfig {
     /// Maximum approximate token budget for injected memories.
     /// Uses ~4 chars/token heuristic. None means no limit.
     pub max_memory_tokens: Option<usize>,
+    /// Optional wall-clock timeout for the entire loop.
+    /// If the loop runs longer than this duration, it returns
+    /// `Err(AgentRuntimeError::AgentLoop("loop timeout ..."))`.
+    pub loop_timeout: Option<std::time::Duration>,
 }
 
 impl AgentConfig {
@@ -105,6 +114,7 @@ impl AgentConfig {
             system_prompt: "You are a helpful AI agent.".into(),
             max_memory_recalls: 3,
             max_memory_tokens: None,
+            loop_timeout: None,
         }
     }
 
@@ -125,6 +135,15 @@ impl AgentConfig {
         self.max_memory_tokens = Some(n);
         self
     }
+
+    /// Set a wall-clock timeout for the entire ReAct loop.
+    ///
+    /// If the loop has not reached `FINAL_ANSWER` within this duration,
+    /// [`ReActLoop::run`] returns `Err(AgentRuntimeError::AgentLoop(...))`.
+    pub fn with_loop_timeout(mut self, d: std::time::Duration) -> Self {
+        self.loop_timeout = Some(d);
+        self
+    }
 }
 
 // ── ToolSpec ──────────────────────────────────────────────────────────────────
@@ -140,6 +159,9 @@ pub struct ToolSpec {
     /// Field names that must be present in the JSON args object.
     /// Empty means no validation is performed.
     pub required_fields: Vec<String>,
+    /// Custom argument validators run after `required_fields` and before the handler.
+    /// All validators must pass; the first failure short-circuits execution.
+    pub validators: Vec<Box<dyn ToolValidator>>,
     /// Optional per-tool circuit breaker.
     #[cfg(feature = "orchestrator")]
     pub circuit_breaker: Option<Arc<crate::orchestrator::CircuitBreaker>>,
@@ -173,6 +195,7 @@ impl ToolSpec {
                 Box::pin(async move { result })
             }),
             required_fields: Vec::new(),
+            validators: Vec::new(),
             #[cfg(feature = "orchestrator")]
             circuit_breaker: None,
         }
@@ -189,6 +212,7 @@ impl ToolSpec {
             description: description.into(),
             handler: Box::new(handler),
             required_fields: Vec::new(),
+            validators: Vec::new(),
             #[cfg(feature = "orchestrator")]
             circuit_breaker: None,
         }
@@ -197,6 +221,15 @@ impl ToolSpec {
     /// Set the required fields that must be present in the JSON args object.
     pub fn with_required_fields(mut self, fields: Vec<String>) -> Self {
         self.required_fields = fields;
+        self
+    }
+
+    /// Attach custom argument validators.
+    ///
+    /// Validators run after `required_fields` checks and before the handler.
+    /// The first failing validator short-circuits execution.
+    pub fn with_validators(mut self, validators: Vec<Box<dyn ToolValidator>>) -> Self {
+        self.validators = validators;
         self
     }
 
@@ -267,7 +300,12 @@ impl ToolRegistry {
             }
         }
 
-        // Item 7 — per-tool circuit breaker check
+        // Custom validators.
+        for validator in &spec.validators {
+            validator.validate(&args)?;
+        }
+
+        // Per-tool circuit breaker check.
         #[cfg(feature = "orchestrator")]
         if let Some(ref cb) = spec.circuit_breaker {
             use crate::orchestrator::CircuitState;
@@ -322,14 +360,31 @@ pub fn parse_react_step(text: &str) -> Result<ReActStep, AgentRuntimeError> {
         thought,
         action,
         observation: String::new(),
+        step_duration_ms: 0,
     })
 }
 
 /// The ReAct agent loop.
-#[derive(Debug)]
 pub struct ReActLoop {
     config: AgentConfig,
     registry: ToolRegistry,
+    /// Optional metrics sink; increments `total_tool_calls` / `failed_tool_calls`.
+    metrics: Option<Arc<RuntimeMetrics>>,
+    /// Optional persistence backend for per-step checkpointing during the loop.
+    #[cfg(feature = "persistence")]
+    checkpoint_backend: Option<(Arc<dyn crate::persistence::PersistenceBackend>, String)>,
+}
+
+impl std::fmt::Debug for ReActLoop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("ReActLoop");
+        s.field("config", &self.config)
+            .field("registry", &self.registry)
+            .field("has_metrics", &self.metrics.is_some());
+        #[cfg(feature = "persistence")]
+        s.field("has_checkpoint_backend", &self.checkpoint_backend.is_some());
+        s.finish()
+    }
 }
 
 impl ReActLoop {
@@ -338,7 +393,34 @@ impl ReActLoop {
         Self {
             config,
             registry: ToolRegistry::new(),
+            metrics: None,
+            #[cfg(feature = "persistence")]
+            checkpoint_backend: None,
         }
+    }
+
+    /// Attach a shared `RuntimeMetrics` instance.
+    ///
+    /// When set, the loop increments `total_tool_calls` on every tool dispatch
+    /// and `failed_tool_calls` whenever a tool returns an error observation.
+    pub fn with_metrics(mut self, metrics: Arc<RuntimeMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Attach a persistence backend for per-step loop checkpointing.
+    ///
+    /// After each completed step the current `Vec<ReActStep>` is serialised and
+    /// saved under the key `"loop:<session_id>:step:<n>"`.  Checkpoint errors
+    /// are logged but never abort the loop.
+    #[cfg(feature = "persistence")]
+    pub fn with_step_checkpoint(
+        mut self,
+        backend: Arc<dyn crate::persistence::PersistenceBackend>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        self.checkpoint_backend = Some((backend, session_id.into()));
+        self
     }
 
     /// Register a tool that the agent loop can invoke.
@@ -369,7 +451,28 @@ impl ReActLoop {
         let mut steps: Vec<ReActStep> = Vec::new();
         let mut context = format!("{}\n\nUser: {}\n", self.config.system_prompt, prompt);
 
+        // Pre-compute optional deadline once so that each iteration is O(1).
+        let deadline = self
+            .config
+            .loop_timeout
+            .map(|d| std::time::Instant::now() + d);
+
         for iteration in 0..self.config.max_iterations {
+            // Wall-clock timeout check.
+            if let Some(dl) = deadline {
+                if std::time::Instant::now() >= dl {
+                    let ms = self
+                        .config
+                        .loop_timeout
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    return Err(AgentRuntimeError::AgentLoop(format!(
+                        "loop timeout after {ms} ms"
+                    )));
+                }
+            }
+
+            let step_start = std::time::Instant::now();
             let response = infer(context.clone()).await;
             let mut step = parse_react_step(&response)?;
 
@@ -382,12 +485,14 @@ impl ReActLoop {
 
             if step.action.to_ascii_uppercase().starts_with("FINAL_ANSWER") {
                 step.observation = step.action.clone();
+                step.step_duration_ms = step_start.elapsed().as_millis() as u64;
                 steps.push(step);
                 tracing::info!(step = iteration, "FINAL_ANSWER reached");
                 return Ok(steps);
             }
 
-            let (tool_name, args) = parse_tool_call(&step.action);
+            // Item 3 — propagate parse errors rather than silently falling back.
+            let (tool_name, args) = parse_tool_call(&step.action)?;
 
             tracing::debug!(
                 step = iteration,
@@ -395,10 +500,19 @@ impl ReActLoop {
                 "dispatching tool call"
             );
 
-            // Item 9 — structured error categorization in observation
+            // Count every tool dispatch (global + per-tool).
+            if let Some(ref m) = self.metrics {
+                m.record_tool_call(&tool_name);
+            }
+
+            // Structured error categorization in observation.
             let observation = match self.registry.call(&tool_name, args).await {
                 Ok(result) => serde_json::json!({ "ok": true, "data": result }).to_string(),
                 Err(e) => {
+                    // Count failed tool calls (global + per-tool).
+                    if let Some(ref m) = self.metrics {
+                        m.record_tool_failure(&tool_name);
+                    }
                     let kind = match &e {
                         AgentRuntimeError::AgentLoop(msg) if msg.contains("not found") => {
                             "not_found"
@@ -413,11 +527,37 @@ impl ReActLoop {
             };
 
             step.observation = observation.clone();
+            step.step_duration_ms = step_start.elapsed().as_millis() as u64;
             context.push_str(&format!(
                 "\nThought: {}\nAction: {}\nObservation: {}\n",
                 step.thought, step.action, observation
             ));
             steps.push(step);
+
+            // Item 11 — per-step loop checkpoint (behind feature flag).
+            #[cfg(feature = "persistence")]
+            if let Some((ref backend, ref session_id)) = self.checkpoint_backend {
+                let step_idx = steps.len();
+                let key = format!("loop:{session_id}:step:{step_idx}");
+                match serde_json::to_vec(&steps) {
+                    Ok(bytes) => {
+                        if let Err(e) = backend.save(&key, &bytes).await {
+                            tracing::warn!(
+                                key = %key,
+                                error = %e,
+                                "loop step checkpoint save failed"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            step = step_idx,
+                            error = %e,
+                            "loop step checkpoint serialisation failed"
+                        );
+                    }
+                }
+            }
         }
 
         let err = AgentRuntimeError::AgentLoop(format!(
@@ -430,15 +570,98 @@ impl ReActLoop {
         );
         Err(err)
     }
+
+    /// Execute the ReAct loop using a streaming inference function.
+    ///
+    /// Identical to [`run`] except the inference closure returns a
+    /// `tokio::sync::mpsc::Receiver` that streams token chunks.  All chunks
+    /// are collected into a single `String` before each iteration's response
+    /// is parsed.  Stream errors result in an empty partial response (the
+    /// erroring chunk is silently dropped and a warning is logged).
+    ///
+    /// [`run`]: ReActLoop::run
+    #[tracing::instrument(skip(infer_stream))]
+    pub async fn run_streaming<F, Fut>(
+        &self,
+        prompt: &str,
+        mut infer_stream: F,
+    ) -> Result<Vec<ReActStep>, AgentRuntimeError>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: Future<
+            Output = tokio::sync::mpsc::Receiver<Result<String, AgentRuntimeError>>,
+        >,
+    {
+        self.run(prompt, move |ctx| {
+            let rx_fut = infer_stream(ctx);
+            async move {
+                let mut rx = rx_fut.await;
+                let mut out = String::new();
+                while let Some(chunk) = rx.recv().await {
+                    match chunk {
+                        Ok(s) => out.push_str(&s),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "streaming chunk error; skipping");
+                        }
+                    }
+                }
+                out
+            }
+        })
+        .await
+    }
+}
+
+/// Declarative argument validator for a `ToolSpec`.
+///
+/// Implement this trait to enforce custom argument constraints (type ranges,
+/// string patterns, etc.) before the handler is invoked.
+///
+/// # Example
+/// ```no_run
+/// use llm_agent_runtime::agent::ToolValidator;
+/// use llm_agent_runtime::AgentRuntimeError;
+/// use serde_json::Value;
+///
+/// struct NonEmptyQuery;
+/// impl ToolValidator for NonEmptyQuery {
+///     fn validate(&self, args: &Value) -> Result<(), AgentRuntimeError> {
+///         let q = args.get("q").and_then(|v| v.as_str()).unwrap_or("");
+///         if q.is_empty() {
+///             return Err(AgentRuntimeError::AgentLoop("q must not be empty".into()));
+///         }
+///         Ok(())
+///     }
+/// }
+/// ```
+pub trait ToolValidator: Send + Sync {
+    /// Validate `args` before the tool handler is invoked.
+    ///
+    /// Return `Ok(())` if the arguments are valid, or
+    /// `Err(AgentRuntimeError::AgentLoop(...))` with a human-readable message.
+    fn validate(&self, args: &Value) -> Result<(), AgentRuntimeError>;
 }
 
 /// Split `"tool_name {json}"` into `(tool_name, Value)`.
-fn parse_tool_call(action: &str) -> (String, Value) {
+///
+/// Returns `Err(AgentRuntimeError::AgentLoop)` when:
+/// - the tool name is empty
+/// - the argument portion is non-empty but not valid JSON
+fn parse_tool_call(action: &str) -> Result<(String, Value), AgentRuntimeError> {
     let mut parts = action.splitn(2, ' ');
     let name = parts.next().unwrap_or("").to_owned();
+    if name.is_empty() {
+        return Err(AgentRuntimeError::AgentLoop(
+            "tool call has an empty tool name".into(),
+        ));
+    }
     let args_str = parts.next().unwrap_or("{}");
-    let args: Value = serde_json::from_str(args_str).unwrap_or(Value::String(args_str.to_owned()));
-    (name, args)
+    let args: Value = serde_json::from_str(args_str).map_err(|e| {
+        AgentRuntimeError::AgentLoop(format!(
+            "invalid JSON args for tool call '{name}': {e} (raw: {args_str})"
+        ))
+    })?;
+    Ok((name, args))
 }
 
 /// Agent-specific errors, mirrors `wasm-agent::AgentError`.
@@ -674,7 +897,83 @@ mod tests {
         assert!(obs.contains("\"kind\":\"not_found\""), "observation: {obs}");
     }
 
-    // Item 7 — Circuit breaker test (only compiled when feature is active)
+    // ── step_duration_ms ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_step_duration_ms_is_set() {
+        let config = AgentConfig::new(5, "test-model");
+        let loop_ = ReActLoop::new(config);
+
+        let steps = loop_
+            .run("time it", |_ctx| async {
+                "Thought: done\nAction: FINAL_ANSWER ok".to_string()
+            })
+            .await
+            .unwrap();
+
+        // step_duration_ms may be 0 on very fast systems but must be a valid u64.
+        let _ = steps[0].step_duration_ms; // just verify the field exists and is accessible
+    }
+
+    // ── ToolValidator ─────────────────────────────────────────────────────────
+
+    struct RequirePositiveN;
+    impl ToolValidator for RequirePositiveN {
+        fn validate(&self, args: &Value) -> Result<(), AgentRuntimeError> {
+            let n = args.get("n").and_then(|v| v.as_i64()).unwrap_or(0);
+            if n <= 0 {
+                return Err(AgentRuntimeError::AgentLoop(
+                    "n must be a positive integer".into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_validator_blocks_invalid_args() {
+        let mut registry = ToolRegistry::new();
+        registry.register(
+            ToolSpec::new("calc", "compute", |args| serde_json::json!({"n": args}))
+                .with_validators(vec![Box::new(RequirePositiveN)]),
+        );
+
+        // n = -1 should be rejected by the validator.
+        let result = registry
+            .call("calc", serde_json::json!({"n": -1}))
+            .await;
+        assert!(result.is_err(), "validator should reject n=-1");
+        assert!(result.unwrap_err().to_string().contains("positive integer"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_validator_passes_valid_args() {
+        let mut registry = ToolRegistry::new();
+        registry.register(
+            ToolSpec::new("calc", "compute", |_| serde_json::json!(42))
+                .with_validators(vec![Box::new(RequirePositiveN)]),
+        );
+
+        let result = registry
+            .call("calc", serde_json::json!({"n": 5}))
+            .await;
+        assert!(result.is_ok(), "validator should accept n=5");
+    }
+
+    // ── Empty tool name ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_empty_tool_name_is_rejected() {
+        // parse_tool_call("") → error because name is empty
+        let result = parse_tool_call("");
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("empty tool name"),
+            "expected 'empty tool name' error"
+        );
+    }
+
+    // ── Circuit breaker test (only compiled when feature is active) ────────────
 
     #[cfg(feature = "orchestrator")]
     #[tokio::test]

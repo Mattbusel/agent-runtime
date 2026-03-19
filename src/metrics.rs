@@ -1,13 +1,16 @@
 //! # Module: Metrics
 //!
 //! Runtime observability counters for `AgentRuntime`.
-//! All counters use atomics for lock-free, thread-safe increment/read.
+//! All global counters use atomics for lock-free, thread-safe increment/read.
+//! Per-tool counters use a `Mutex<HashMap>` to avoid requiring a concurrent
+//! map dependency.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Shared runtime metrics. Clone the `Arc` to share across threads.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RuntimeMetrics {
     /// Number of agent sessions currently in progress.
     pub active_sessions: AtomicUsize,
@@ -15,7 +18,7 @@ pub struct RuntimeMetrics {
     pub total_sessions: AtomicU64,
     /// Total number of ReAct steps executed across all sessions.
     pub total_steps: AtomicU64,
-    /// Total number of tool calls dispatched.
+    /// Total number of tool calls dispatched (across all tool names).
     pub total_tool_calls: AtomicU64,
     /// Total number of tool calls that returned an error observation.
     pub failed_tool_calls: AtomicU64,
@@ -23,6 +26,26 @@ pub struct RuntimeMetrics {
     pub backpressure_shed_count: AtomicU64,
     /// Total number of memory recall operations.
     pub memory_recall_count: AtomicU64,
+    /// Per-tool call counts: `tool_name → total_calls`.
+    per_tool_calls: Mutex<HashMap<String, u64>>,
+    /// Per-tool failure counts: `tool_name → failed_calls`.
+    per_tool_failures: Mutex<HashMap<String, u64>>,
+}
+
+impl Default for RuntimeMetrics {
+    fn default() -> Self {
+        Self {
+            active_sessions: AtomicUsize::new(0),
+            total_sessions: AtomicU64::new(0),
+            total_steps: AtomicU64::new(0),
+            total_tool_calls: AtomicU64::new(0),
+            failed_tool_calls: AtomicU64::new(0),
+            backpressure_shed_count: AtomicU64::new(0),
+            memory_recall_count: AtomicU64::new(0),
+            per_tool_calls: Mutex::new(HashMap::new()),
+            per_tool_failures: Mutex::new(HashMap::new()),
+        }
+    }
 }
 
 impl RuntimeMetrics {
@@ -66,6 +89,42 @@ impl RuntimeMetrics {
         self.memory_recall_count.load(Ordering::Relaxed)
     }
 
+    /// Increment the call counter for `tool_name` by 1.
+    ///
+    /// Called automatically by the agent loop when `with_metrics` is configured.
+    pub fn record_tool_call(&self, tool_name: &str) {
+        self.total_tool_calls.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut map) = self.per_tool_calls.lock() {
+            *map.entry(tool_name.to_owned()).or_insert(0) += 1;
+        }
+    }
+
+    /// Increment the failure counter for `tool_name` by 1.
+    ///
+    /// Called automatically by the agent loop when a tool returns an error.
+    pub fn record_tool_failure(&self, tool_name: &str) {
+        self.failed_tool_calls.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut map) = self.per_tool_failures.lock() {
+            *map.entry(tool_name.to_owned()).or_insert(0) += 1;
+        }
+    }
+
+    /// Return a snapshot of per-tool call counts as a `HashMap<tool_name, count>`.
+    pub fn per_tool_calls_snapshot(&self) -> HashMap<String, u64> {
+        self.per_tool_calls
+            .lock()
+            .map(|m| m.clone())
+            .unwrap_or_default()
+    }
+
+    /// Return a snapshot of per-tool failure counts as a `HashMap<tool_name, count>`.
+    pub fn per_tool_failures_snapshot(&self) -> HashMap<String, u64> {
+        self.per_tool_failures
+            .lock()
+            .map(|m| m.clone())
+            .unwrap_or_default()
+    }
+
     /// Reset all counters to zero.
     ///
     /// Intended for testing. In production, counters are monotonically increasing.
@@ -77,13 +136,24 @@ impl RuntimeMetrics {
         self.failed_tool_calls.store(0, Ordering::Relaxed);
         self.backpressure_shed_count.store(0, Ordering::Relaxed);
         self.memory_recall_count.store(0, Ordering::Relaxed);
+        if let Ok(mut m) = self.per_tool_calls.lock() {
+            m.clear();
+        }
+        if let Ok(mut m) = self.per_tool_failures.lock() {
+            m.clear();
+        }
     }
 
-    /// Capture a snapshot of all counters as plain integers.
+    /// Capture a snapshot of global counters as plain integers.
     ///
     /// Returns `(active_sessions, total_sessions, total_steps,
     ///           total_tool_calls, failed_tool_calls,
     ///           backpressure_shed_count, memory_recall_count)`.
+    /// For per-tool breakdowns use [`per_tool_calls_snapshot`] and
+    /// [`per_tool_failures_snapshot`].
+    ///
+    /// [`per_tool_calls_snapshot`]: RuntimeMetrics::per_tool_calls_snapshot
+    /// [`per_tool_failures_snapshot`]: RuntimeMetrics::per_tool_failures_snapshot
     pub fn to_snapshot(&self) -> (usize, u64, u64, u64, u64, u64, u64) {
         (
             self.active_sessions.load(Ordering::Relaxed),
@@ -225,5 +295,48 @@ mod tests {
         let m2 = Arc::clone(&m);
         m.total_sessions.fetch_add(1, Ordering::Relaxed);
         assert_eq!(m2.total_sessions(), 1);
+    }
+
+    // ── Per-tool metrics ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_record_tool_call_increments_global_and_per_tool() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        m.record_tool_call("search");
+        m.record_tool_call("lookup");
+        assert_eq!(m.total_tool_calls(), 3);
+        let snap = m.per_tool_calls_snapshot();
+        assert_eq!(snap.get("search").copied(), Some(2));
+        assert_eq!(snap.get("lookup").copied(), Some(1));
+    }
+
+    #[test]
+    fn test_record_tool_failure_increments_global_and_per_tool() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_failure("search");
+        m.record_tool_failure("lookup");
+        m.record_tool_failure("search");
+        assert_eq!(m.failed_tool_calls(), 3);
+        let snap = m.per_tool_failures_snapshot();
+        assert_eq!(snap.get("search").copied(), Some(2));
+        assert_eq!(snap.get("lookup").copied(), Some(1));
+    }
+
+    #[test]
+    fn test_reset_clears_per_tool_counters() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("foo");
+        m.record_tool_failure("foo");
+        m.reset();
+        assert!(m.per_tool_calls_snapshot().is_empty());
+        assert!(m.per_tool_failures_snapshot().is_empty());
+    }
+
+    #[test]
+    fn test_per_tool_snapshot_is_independent_for_unknown_tools() {
+        let m = RuntimeMetrics::new();
+        let snap = m.per_tool_calls_snapshot();
+        assert!(snap.is_empty());
     }
 }
