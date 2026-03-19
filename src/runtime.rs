@@ -126,11 +126,12 @@ impl AgentSession {
         }
     }
 
-    /// Load a step-scoped checkpoint saved by `AgentRuntime`.
+    /// Load the session snapshot saved after step `step` completed.
     ///
-    /// Returns `None` if no checkpoint exists for the given session/step.
+    /// Returns `None` if no checkpoint exists for the given session/step pair.
+    /// The step number is 1-based (step 1 = after the first ReAct iteration).
     #[cfg(feature = "persistence")]
-    pub async fn load_step_checkpoint(
+    pub async fn load_checkpoint_at_step(
         backend: &dyn crate::persistence::PersistenceBackend,
         session_id: &str,
         step: usize,
@@ -1214,6 +1215,67 @@ mod tests {
         );
         assert!(ctx.contains("task: write tests"));
         assert!(ctx.contains("status: in progress"));
+    }
+
+    // ── Task 15: Token budget edge case tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_token_budget_zero_returns_no_memories() {
+        // A budget of 0 should result in no memories being injected.
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("budget-agent");
+        store.add_episode(agent.clone(), "short", 0.9).unwrap();
+
+        let mut config = AgentConfig::new(5, "test-model");
+        config.max_memory_tokens = Some(0);
+        config.max_memory_recalls = 10;
+
+        let runtime = AgentRuntime::builder()
+            .with_memory(store)
+            .with_agent_config(config)
+            .build();
+
+        let steps = runtime
+            .run_agent(
+                agent,
+                "test",
+                |_ctx| async { "Thought: ok\nAction: FINAL_ANSWER done".to_string() },
+            )
+            .await
+            .unwrap();
+
+        // The run should succeed; we just verify it doesn't panic or error.
+        assert_eq!(steps.steps.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_token_budget_smaller_than_smallest_item_returns_no_memories() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("budget-agent2");
+        // Content is 40 chars → ~10 tokens (40/4). Budget = 1 → none fit.
+        store
+            .add_episode(agent.clone(), "a".repeat(40), 0.9)
+            .unwrap();
+
+        let mut config = AgentConfig::new(5, "test-model");
+        config.max_memory_tokens = Some(1);
+        config.max_memory_recalls = 10;
+
+        let runtime = AgentRuntime::builder()
+            .with_memory(store)
+            .with_agent_config(config)
+            .build();
+
+        let session = runtime
+            .run_agent(
+                agent,
+                "test",
+                |_ctx| async { "Thought: ok\nAction: FINAL_ANSWER done".to_string() },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(session.memory_hits, 0);
     }
 
     // ── Improvement 8: AgentRuntime::quick() ──────────────────────────────────

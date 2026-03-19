@@ -86,11 +86,25 @@ name = "streaming_inference"
 name = "graph_query_agent"
 required-features = ["graph"]
 
+[[example]]
+name = "orchestrator_composition"
+required-features = ["orchestrator"]
+
+[[bench]]
+name = "memory"
+harness = false
+
+[[bench]]
+name = "agent"
+harness = false
+
 [dev-dependencies]
 # tokio-test: async test utilities
 tokio-test = "0.4"
 # tracing-subscriber: test logging setup
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# criterion: benchmarking framework
+criterion = { version = "0.5", features = ["html_reports"] }
 
 # ── Release profile (production) ────────────────────────────────────────────────
 [profile.release]
