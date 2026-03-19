@@ -199,18 +199,6 @@ impl RuntimeMetrics {
         self.memory_recall_count.load(Ordering::Relaxed)
     }
 
-    /// Record the latency of a completed ReAct step in milliseconds.
-    ///
-    /// Called automatically by the agent loop on each completed step.
-    /// The value is currently accumulated into `total_steps` counters; future
-    /// releases may expose min/max/avg breakdowns via [`MetricsSnapshot`].
-    pub fn record_step_latency(&self, _ms: u64) {
-        // Latency histogram storage is a future enhancement.
-        // This method is a no-op placeholder that keeps the call sites compiling
-        // and allows for zero-overhead instrumentation now.
-        self.total_steps.fetch_add(0, Ordering::Relaxed);
-    }
-
     /// Increment the call counter for `tool_name` by 1.
     ///
     /// Called automatically by the agent loop when `with_metrics` is configured.
@@ -267,6 +255,11 @@ impl RuntimeMetrics {
         }
     }
 
+    /// Record a step latency sample.
+    pub fn record_step_latency(&self, ms: u64) {
+        self.step_latency.record(ms);
+    }
+
     /// Reset all counters to zero.
     ///
     /// Intended for testing. In production, counters are monotonically increasing.
@@ -283,6 +276,11 @@ impl RuntimeMetrics {
         }
         if let Ok(mut m) = self.per_tool_failures.lock() {
             m.clear();
+        }
+        self.step_latency.total_count.store(0, Ordering::Relaxed);
+        self.step_latency.total_sum_ms.store(0, Ordering::Relaxed);
+        for b in &self.step_latency.buckets {
+            b.store(0, Ordering::Relaxed);
         }
     }
 
@@ -480,6 +478,35 @@ mod tests {
         let m = RuntimeMetrics::new();
         let snap = m.per_tool_calls_snapshot();
         assert!(snap.is_empty());
+    }
+
+    // ── LatencyHistogram ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_latency_histogram_records_sample() {
+        let h = LatencyHistogram::default();
+        h.record(10);
+        assert_eq!(h.count(), 1);
+    }
+
+    #[test]
+    fn test_latency_histogram_mean_ms() {
+        let h = LatencyHistogram::default();
+        h.record(10);
+        h.record(20);
+        assert!((h.mean_ms() - 15.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_latency_histogram_buckets_correct_bucket() {
+        let h = LatencyHistogram::default();
+        h.record(3); // falls in ≤5ms bucket (index 1)
+        let buckets = h.buckets();
+        // bucket at index 1 is ≤5ms
+        assert_eq!(buckets[1].1, 1, "3ms should land in ≤5ms bucket");
+        // other buckets should be zero
+        assert_eq!(buckets[0].1, 0);
+        assert_eq!(buckets[2].1, 0);
     }
 
     // ── MetricsSnapshot ───────────────────────────────────────────────────────

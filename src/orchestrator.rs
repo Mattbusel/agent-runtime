@@ -41,39 +41,13 @@
 //! ```
 
 use crate::error::AgentRuntimeError;
+use crate::util::timed_lock;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Maximum delay between retries — caps exponential growth.
 pub const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
-
-/// Acquire a lock, recovering from poisoning and logging slow acquisitions.
-///
-/// Times the lock acquisition; if it exceeds 5 ms a warning is emitted so
-/// contention hot-spots can be identified in production logs.
-fn timed_lock<'a, T>(mutex: &'a Mutex<T>, ctx: &str) -> std::sync::MutexGuard<'a, T>
-where
-    T: ?Sized,
-{
-    let start = std::time::Instant::now();
-    let result = mutex.lock();
-    let elapsed = start.elapsed();
-    if elapsed > std::time::Duration::from_millis(5) {
-        tracing::warn!(
-            duration_ms = elapsed.as_millis(),
-            ctx = ctx,
-            "slow mutex acquisition"
-        );
-    }
-    match result {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            tracing::warn!("mutex poisoned in {ctx}, recovering inner value");
-            poisoned.into_inner()
-        }
-    }
-}
 
 // ── RetryPolicy ───────────────────────────────────────────────────────────────
 
@@ -598,6 +572,15 @@ impl BackpressureGuard {
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────
 
+/// Result of executing a pipeline, including per-stage timing.
+#[derive(Debug)]
+pub struct PipelineResult {
+    /// Final output value after all stages.
+    pub output: String,
+    /// Per-stage timing: (stage_index, duration_ms).
+    pub stage_timings: Vec<(usize, u64)>,
+}
+
 /// A single named stage in the pipeline.
 pub struct Stage {
     /// Human-readable name used in log output and error messages.
@@ -654,6 +637,26 @@ impl Pipeline {
             })?;
         }
         Ok(current)
+    }
+
+    /// Execute the pipeline with per-stage timing.
+    pub fn execute_timed(&self, input: String) -> Result<PipelineResult, AgentRuntimeError> {
+        let mut current = input;
+        let mut stage_timings = Vec::new();
+        for (idx, stage) in self.stages.iter().enumerate() {
+            let start = std::time::Instant::now();
+            tracing::debug!(stage = %stage.name, "running timed pipeline stage");
+            current = (stage.handler)(current).map_err(|e| {
+                tracing::error!(stage = %stage.name, error = %e, "timed pipeline stage failed");
+                e
+            })?;
+            let duration_ms = start.elapsed().as_millis() as u64;
+            stage_timings.push((idx, duration_ms));
+        }
+        Ok(PipelineResult {
+            output: current,
+            stage_timings,
+        })
     }
 
     /// Return the number of stages in the pipeline.
@@ -938,6 +941,18 @@ mod tests {
             .add_stage("s1", |s| Ok(s))
             .add_stage("s2", |s| Ok(s));
         assert_eq!(p.stage_count(), 2);
+    }
+
+    #[test]
+    fn test_pipeline_execute_timed_captures_stage_durations() {
+        let p = Pipeline::new()
+            .add_stage("s1", |s| Ok(format!("{s}1")))
+            .add_stage("s2", |s| Ok(format!("{s}2")));
+        let result = p.execute_timed("x".to_string()).unwrap();
+        assert_eq!(result.output, "x12");
+        assert_eq!(result.stage_timings.len(), 2);
+        assert_eq!(result.stage_timings[0].0, 0);
+        assert_eq!(result.stage_timings[1].0, 1);
     }
 
     // ── Item 13: BackpressureGuard soft limit ──────────────────────────────────
