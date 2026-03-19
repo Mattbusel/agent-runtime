@@ -806,6 +806,100 @@ impl GraphStore {
         Ok(has_cycle)
     }
 
+    /// BFS limited by maximum depth and maximum node count.
+    ///
+    /// Returns the subset of nodes visited within those limits (including start).
+    pub fn bfs_bounded(
+        &self,
+        start: &str,
+        max_depth: usize,
+        max_nodes: usize,
+    ) -> Result<Vec<EntityId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "bfs_bounded");
+        let start_id = EntityId::new(start);
+        if !inner.entities.contains_key(&start_id) {
+            return Err(AgentRuntimeError::Graph(format!(
+                "start entity '{start}' not found"
+            )));
+        }
+
+        let mut visited: std::collections::HashMap<EntityId, usize> = std::collections::HashMap::new();
+        let mut queue: VecDeque<(EntityId, usize)> = VecDeque::new();
+        let mut result: Vec<EntityId> = Vec::new();
+
+        visited.insert(start_id.clone(), 0);
+        queue.push_back((start_id.clone(), 0));
+        result.push(start_id);
+
+        while let Some((current, depth)) = queue.pop_front() {
+            if result.len() >= max_nodes {
+                break;
+            }
+            if depth >= max_depth {
+                continue;
+            }
+            for neighbour in Self::neighbours(&inner.relationships, &current) {
+                if !visited.contains_key(&neighbour) {
+                    let new_depth = depth + 1;
+                    visited.insert(neighbour.clone(), new_depth);
+                    result.push(neighbour.clone());
+                    if result.len() >= max_nodes {
+                        break;
+                    }
+                    queue.push_back((neighbour, new_depth));
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// DFS limited by maximum depth and maximum node count.
+    ///
+    /// Returns the subset of nodes visited within those limits (including start).
+    pub fn dfs_bounded(
+        &self,
+        start: &str,
+        max_depth: usize,
+        max_nodes: usize,
+    ) -> Result<Vec<EntityId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "dfs_bounded");
+        let start_id = EntityId::new(start);
+        if !inner.entities.contains_key(&start_id) {
+            return Err(AgentRuntimeError::Graph(format!(
+                "start entity '{start}' not found"
+            )));
+        }
+
+        let mut visited: HashSet<EntityId> = HashSet::new();
+        let mut stack: Vec<(EntityId, usize)> = Vec::new();
+        let mut result: Vec<EntityId> = Vec::new();
+
+        visited.insert(start_id.clone());
+        stack.push((start_id.clone(), 0));
+        result.push(start_id);
+
+        while let Some((current, depth)) = stack.pop() {
+            if result.len() >= max_nodes {
+                break;
+            }
+            if depth >= max_depth {
+                continue;
+            }
+            for neighbour in Self::neighbours(&inner.relationships, &current) {
+                if visited.insert(neighbour.clone()) {
+                    result.push(neighbour.clone());
+                    if result.len() >= max_nodes {
+                        break;
+                    }
+                    stack.push((neighbour, depth + 1));
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
     /// Extract a subgraph containing only the specified entities and the
     /// relationships between them.
     pub fn subgraph(&self, node_ids: &[EntityId]) -> Result<GraphStore, AgentRuntimeError> {
@@ -1397,5 +1491,43 @@ mod tests {
             true,
             "cache should be invalidated after adding a back edge"
         );
+    }
+
+    // ── bfs_bounded / dfs_bounded ─────────────────────────────────────────────
+
+    #[test]
+    fn test_bfs_bounded_respects_max_depth() {
+        // Chain: a -> b -> c -> d
+        let g = make_graph();
+        add(&g, "a");
+        add(&g, "b");
+        add(&g, "c");
+        add(&g, "d");
+        link(&g, "a", "b");
+        link(&g, "b", "c");
+        link(&g, "c", "d");
+
+        // max_depth=1 should only visit a and b (depth 0 and 1)
+        let visited = g.bfs_bounded("a", 1, 100).unwrap();
+        assert!(visited.contains(&EntityId::new("a")));
+        assert!(visited.contains(&EntityId::new("b")));
+        assert!(!visited.contains(&EntityId::new("c")), "c is at depth 2, should not be visited");
+    }
+
+    #[test]
+    fn test_dfs_bounded_respects_max_nodes() {
+        // Chain: a -> b -> c -> d
+        let g = make_graph();
+        add(&g, "a");
+        add(&g, "b");
+        add(&g, "c");
+        add(&g, "d");
+        link(&g, "a", "b");
+        link(&g, "b", "c");
+        link(&g, "c", "d");
+
+        // max_nodes=2 means only 2 nodes total
+        let visited = g.dfs_bounded("a", 100, 2).unwrap();
+        assert_eq!(visited.len(), 2, "should stop at 2 nodes");
     }
 }

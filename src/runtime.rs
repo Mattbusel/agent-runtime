@@ -363,6 +363,13 @@ impl AgentRuntime {
         AgentRuntimeBuilder::new()
     }
 
+    /// Construct a minimal `AgentRuntime` in one call with sensible defaults.
+    pub fn quick(max_iterations: usize, model: impl Into<String>) -> Self {
+        AgentRuntime::builder()
+            .with_agent_config(AgentConfig::new(max_iterations, model))
+            .build()
+    }
+
     /// Return a shared reference to the runtime metrics.
     pub fn metrics(&self) -> Arc<RuntimeMetrics> {
         Arc::clone(&self.metrics)
@@ -1183,5 +1190,20 @@ mod tests {
         );
         assert!(ctx.contains("task: write tests"));
         assert!(ctx.contains("status: in progress"));
+    }
+
+    // ── Improvement 8: AgentRuntime::quick() ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_agent_runtime_quick_runs_agent() {
+        let runtime = AgentRuntime::quick(5, "test-model");
+        let agent = AgentId::new("quick-agent");
+        let session = runtime
+            .run_agent(agent, "hello", |_ctx| async {
+                "Thought: done\nAction: FINAL_ANSWER ok".to_string()
+            })
+            .await
+            .unwrap();
+        assert_eq!(session.step_count(), 1);
     }
 }

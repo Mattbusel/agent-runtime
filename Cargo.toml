@@ -74,6 +74,10 @@ required-features = ["orchestrator"]
 name = "working_memory_evolution"
 required-features = ["memory"]
 
+[[example]]
+name = "multi_turn_chat"
+required-features = ["memory"]
+
 [dev-dependencies]
 # tokio-test: async test utilities
 tokio-test = "0.4"

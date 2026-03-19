@@ -36,6 +36,24 @@ pub trait PersistenceBackend: Send + Sync {
 
     /// Delete the entry for the given key. No-op if the key does not exist.
     async fn delete(&self, key: &str) -> Result<(), AgentRuntimeError>;
+
+    /// Save multiple key-value pairs. Default impl calls `save` for each.
+    async fn batch_save(&self, items: &[(&str, &[u8])]) -> Result<(), AgentRuntimeError> {
+        for (key, value) in items {
+            self.save(key, value).await?;
+        }
+        Ok(())
+    }
+
+    /// Load multiple keys. Returns a vec of `Option<Vec<u8>>` in the same order.
+    /// Default impl calls `load` for each.
+    async fn batch_load(&self, keys: &[&str]) -> Result<Vec<Option<Vec<u8>>>, AgentRuntimeError> {
+        let mut results = Vec::with_capacity(keys.len());
+        for key in keys {
+            results.push(self.load(key).await?);
+        }
+        Ok(results)
+    }
 }
 
 // ── FilePersistenceBackend ────────────────────────────────────────────────────
@@ -230,6 +248,27 @@ mod tests {
             loaded_slash, loaded_under,
             "keys with the same sanitized form must not collide"
         );
+    }
+
+    #[tokio::test]
+    async fn test_batch_save_and_load() {
+        let dir = std::env::temp_dir().join(format!("art_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let _guard = tempdir::Handle { path: dir.clone() };
+        let backend = FilePersistenceBackend::new(&dir);
+
+        let data: Vec<(&str, Vec<u8>)> = vec![
+            ("batch-key-1", b"value1".to_vec()),
+            ("batch-key-2", b"value2".to_vec()),
+        ];
+        let refs: Vec<(&str, &[u8])> = data.iter().map(|(k, v)| (*k, v.as_slice())).collect();
+        backend.batch_save(&refs).await.unwrap();
+
+        let keys = vec!["batch-key-1", "batch-key-2", "batch-key-missing"];
+        let results = backend.batch_load(&keys).await.unwrap();
+        assert_eq!(results[0], Some(b"value1".to_vec()));
+        assert_eq!(results[1], Some(b"value2".to_vec()));
+        assert_eq!(results[2], None);
     }
 
     #[tokio::test]

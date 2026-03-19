@@ -24,8 +24,17 @@ pub use crate::orchestrator::{
 };
 
 pub use crate::agent::{
-    parse_react_step, AgentConfig, AgentError, Message, ReActLoop, ReActStep, Role, ToolRegistry,
-    ToolSpec,
+    parse_react_step, AgentConfig, AgentError, AsyncToolFuture, AsyncToolResultFuture, Message,
+    ReActLoop, ReActStep, Role, ToolRegistry, ToolSpec, ToolValidator,
 };
+
+#[cfg(feature = "memory")]
+pub use crate::memory::RecallPolicy;
+
+#[cfg(feature = "orchestrator")]
+pub use crate::orchestrator::{PipelineResult, Stage};
+
+#[cfg(feature = "persistence")]
+pub use crate::persistence::{FilePersistenceBackend, PersistenceBackend};
 
 pub use crate::metrics::{MetricsSnapshot, RuntimeMetrics};
