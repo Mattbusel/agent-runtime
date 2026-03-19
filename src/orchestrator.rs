@@ -76,6 +76,11 @@ impl RetryPolicy {
                 "max_attempts must be >= 1".into(),
             ));
         }
+        if base_ms == 0 {
+            return Err(AgentRuntimeError::Orchestration(
+                "base_ms must be >= 1 to avoid zero-delay busy-loop retries".into(),
+            ));
+        }
         Ok(Self {
             max_attempts,
             base_delay: Duration::from_millis(base_ms),
@@ -507,6 +512,16 @@ impl Deduplicator {
         inner
             .cache
             .insert(key.to_owned(), (result.into(), Instant::now()));
+        Ok(())
+    }
+
+    /// Remove a key from in-flight tracking without caching a result.
+    ///
+    /// Call this when an in-flight operation fails so that subsequent callers
+    /// are not permanently blocked by a stuck `InProgress` entry for the full TTL.
+    pub fn fail(&self, key: &str) -> Result<(), AgentRuntimeError> {
+        let mut inner = timed_lock(&self.inner, "Deduplicator::fail");
+        inner.in_flight.remove(key);
         Ok(())
     }
 }

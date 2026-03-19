@@ -438,10 +438,8 @@ impl AgentRuntime {
         F: FnMut(String) -> Fut,
         Fut: std::future::Future<Output = String>,
     {
-        self.metrics.total_sessions.fetch_add(1, Ordering::Relaxed);
-        self.metrics.active_sessions.fetch_add(1, Ordering::Relaxed);
-
-        // Acquire backpressure slot before any work.
+        // Acquire backpressure slot before counting the session — shed requests
+        // must not inflate total_sessions or active_sessions.
         #[cfg(feature = "orchestrator")]
         {
             let backpressure_result = if let Some(ref guard) = self.backpressure {
@@ -454,10 +452,12 @@ impl AgentRuntime {
                 self.metrics
                     .backpressure_shed_count
                     .fetch_add(1, Ordering::Relaxed);
-                self.metrics.active_sessions.fetch_sub(1, Ordering::Relaxed);
                 return Err(e);
             }
         }
+
+        self.metrics.total_sessions.fetch_add(1, Ordering::Relaxed);
+        self.metrics.active_sessions.fetch_add(1, Ordering::Relaxed);
 
         tracing::info!(agent_id = %agent_id, "agent session starting");
         let outcome = self.run_agent_inner(agent_id.clone(), prompt, infer).await;
@@ -468,7 +468,13 @@ impl AgentRuntime {
             let _ = guard.release();
         }
 
-        self.metrics.active_sessions.fetch_sub(1, Ordering::Relaxed);
+        // Saturating decrement — guards against underflow to usize::MAX if
+        // active_sessions is somehow already 0 (e.g. double-decrement bug).
+        let _ = self.metrics.active_sessions.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |v| Some(v.saturating_sub(1)),
+        );
 
         match &outcome {
             Ok(session) => {

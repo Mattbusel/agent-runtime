@@ -416,11 +416,14 @@ fn evict_if_over_capacity(
                 })
                 .map(|(pos, _)| pos)
         }
-        EvictionPolicy::Oldest => agent_items
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, item)| item.timestamp)
-            .map(|(pos, _)| pos),
+        EvictionPolicy::Oldest => {
+            let len = agent_items.len();
+            agent_items[..len - 1]
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, item)| item.timestamp)
+                .map(|(pos, _)| pos)
+        }
     };
     if let Some(pos) = pos {
         agent_items.remove(pos);
