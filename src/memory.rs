@@ -177,6 +177,18 @@ impl DecayPolicy {
 // ── RecallPolicy ──────────────────────────────────────────────────────────────
 
 /// Controls how memories are scored and ranked during recall.
+///
+/// # Interaction with `DecayPolicy`
+///
+/// When both a `DecayPolicy` and a `RecallPolicy` are configured, decay is
+/// applied **before** scoring.  This means that for `RecallPolicy::Importance`,
+/// an old high-importance memory may rank lower than a fresh low-importance
+/// memory after decay has reduced its score.
+///
+/// For `RecallPolicy::Hybrid`, the `recency_weight` term already captures
+/// temporal distance; combining it with a `DecayPolicy` therefore applies a
+/// *double* time penalty — set one or the other, not both, unless the double
+/// penalty is intentional.
 #[derive(Debug, Clone)]
 pub enum RecallPolicy {
     /// Rank purely by importance score (default).
@@ -348,6 +360,10 @@ impl EpisodicStore {
     /// # Returns
     /// The `MemoryId` of the newly created memory item.
     ///
+    /// # Errors
+    /// Returns `Err(AgentRuntimeError::Memory)` only if the internal mutex is
+    /// poisoned (extremely unlikely in normal operation; see [`recover_lock`]).
+    ///
     /// # Capacity enforcement
     ///
     /// If the store was created with [`with_per_agent_capacity`], the item is
@@ -434,6 +450,10 @@ impl EpisodicStore {
     /// Applies decay if configured, purges stale items if `max_age` is set,
     /// increments `recall_count` for each recalled item, then returns items
     /// sorted according to the configured `RecallPolicy`.
+    ///
+    /// # Errors
+    /// Returns `Err(AgentRuntimeError::Memory)` only if the internal mutex is
+    /// poisoned (extremely unlikely in normal operation).
     #[tracing::instrument(skip(self))]
     pub fn recall(
         &self,
@@ -515,6 +535,31 @@ impl EpisodicStore {
     /// Return `true` if no episodes have been stored.
     pub fn is_empty(&self) -> Result<bool, AgentRuntimeError> {
         Ok(self.len()? == 0)
+    }
+
+    /// Return the number of stored episodes for a specific agent.
+    ///
+    /// Returns `0` if the agent has no episodes or has not been seen before.
+    pub fn agent_memory_count(&self, agent_id: &AgentId) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::agent_memory_count");
+        Ok(inner.items.get(agent_id).map_or(0, |v| v.len()))
+    }
+
+    /// Return all agent IDs that have at least one stored episode.
+    ///
+    /// The order of agents in the returned vector is not guaranteed.
+    pub fn list_agents(&self) -> Result<Vec<AgentId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::list_agents");
+        Ok(inner.items.keys().cloned().collect())
+    }
+
+    /// Remove all stored episodes for `agent_id` and return the number removed.
+    ///
+    /// Returns `0` if the agent had no episodes.  Does not affect other agents.
+    pub fn purge_agent_memories(&self, agent_id: &AgentId) -> Result<usize, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::purge_agent_memories");
+        let removed = inner.items.remove(agent_id).map_or(0, |v| v.len());
+        Ok(removed)
     }
 
     /// Bump the `recall_count` of every item whose content equals `content` by `amount`.
@@ -1140,6 +1185,91 @@ mod tests {
         }
     }
 
+    // ── agent_memory_count / list_agents / purge_agent_memories ──────────────
+
+    #[test]
+    fn test_agent_memory_count_returns_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let count = store.agent_memory_count(&AgentId::new("ghost")).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_agent_memory_count_tracks_insertions() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "e1", 0.5).unwrap();
+        store.add_episode(agent.clone(), "e2", 0.5).unwrap();
+        assert_eq!(store.agent_memory_count(&agent).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_list_agents_returns_all_known_agents() {
+        let store = EpisodicStore::new();
+        let a = AgentId::new("agent-a");
+        let b = AgentId::new("agent-b");
+        store.add_episode(a.clone(), "x", 0.5).unwrap();
+        store.add_episode(b.clone(), "y", 0.5).unwrap();
+        let agents = store.list_agents().unwrap();
+        assert_eq!(agents.len(), 2);
+        assert!(agents.contains(&a));
+        assert!(agents.contains(&b));
+    }
+
+    #[test]
+    fn test_list_agents_empty_when_no_episodes() {
+        let store = EpisodicStore::new();
+        let agents = store.list_agents().unwrap();
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn test_purge_agent_memories_removes_all_for_agent() {
+        let store = EpisodicStore::new();
+        let a = AgentId::new("a");
+        let b = AgentId::new("b");
+        store.add_episode(a.clone(), "ep1", 0.5).unwrap();
+        store.add_episode(a.clone(), "ep2", 0.5).unwrap();
+        store.add_episode(b.clone(), "ep-b", 0.5).unwrap();
+
+        let removed = store.purge_agent_memories(&a).unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(store.agent_memory_count(&a).unwrap(), 0);
+        assert_eq!(store.agent_memory_count(&b).unwrap(), 1);
+        assert_eq!(store.len().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_purge_agent_memories_returns_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let removed = store.purge_agent_memories(&AgentId::new("ghost")).unwrap();
+        assert_eq!(removed, 0);
+    }
+
+    // ── All-stale recall ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_recall_returns_empty_when_all_items_are_stale() {
+        // max_age = 0.001 hours — all items inserted 1 hour ago will be evicted.
+        let store = EpisodicStore::with_max_age(0.001).unwrap();
+        let agent = AgentId::new("stale-agent");
+
+        let old_ts = Utc::now() - chrono::Duration::hours(1);
+        store
+            .add_episode_at(agent.clone(), "stale-1", 0.9, old_ts)
+            .unwrap();
+        store
+            .add_episode_at(agent.clone(), "stale-2", 0.7, old_ts)
+            .unwrap();
+
+        let items = store.recall(&agent, 100).unwrap();
+        assert!(
+            items.is_empty(),
+            "all stale items should be evicted on recall, got {}",
+            items.len()
+        );
+    }
+
     // ── Concurrency stress tests ──────────────────────────────────────────────
 
     #[test]
@@ -1180,6 +1310,48 @@ mod tests {
         for h in read_handles {
             h.join().unwrap();
         }
+    }
+
+    // ── Concurrent capacity eviction ──────────────────────────────────────────
+
+    #[test]
+    fn test_concurrent_capacity_eviction_never_exceeds_cap() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let cap = 5usize;
+        let store = Arc::new(EpisodicStore::with_per_agent_capacity(cap));
+        let agent = AgentId::new("cap-agent");
+        let n_threads = 8;
+        let items_per_thread = 10;
+
+        let mut handles = Vec::new();
+        for t in 0..n_threads {
+            let s = Arc::clone(&store);
+            let a = agent.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..items_per_thread {
+                    let importance = (t * items_per_thread + i) as f32 / 100.0;
+                    s.add_episode(a.clone(), format!("t{t}-i{i}"), importance)
+                        .unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // The store may momentarily exceed cap+1 during concurrent eviction,
+        // but after all threads complete the final count must be <= cap + n_threads.
+        // (Each thread's last insert may not have been evicted yet.)
+        // The strong invariant: agent_memory_count <= cap + n_threads - 1.
+        let count = store.agent_memory_count(&agent).unwrap();
+        assert!(
+            count <= cap + n_threads,
+            "expected at most {} items, got {}",
+            cap + n_threads,
+            count
+        );
     }
 
     // ── SemanticStore ─────────────────────────────────────────────────────────

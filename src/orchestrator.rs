@@ -6,16 +6,39 @@
 //!
 //! ## Guarantees
 //! - Thread-safe: all types wrap state in `Arc<Mutex<_>>` or atomics
-//! - Circuit breaker opens after `threshold` failures within `window` calls
-//! - RetryPolicy delays grow exponentially and are capped at `MAX_RETRY_DELAY`
+//! - Circuit breaker opens after `threshold` consecutive failures
+//! - RetryPolicy delays grow exponentially and are capped at [`MAX_RETRY_DELAY`]
 //! - Deduplicator is deterministic and non-blocking
-//! - BackpressureGuard never exceeds declared capacity
+//! - BackpressureGuard never exceeds declared hard capacity
 //! - Non-panicking: all operations return `Result`
 //!
 //! ## NOT Responsible For
 //! - Cross-node circuit breakers (single-process only, unless a distributed backend is provided)
 //! - Persistent deduplication (in-memory, bounded TTL)
 //! - Distributed backpressure
+//!
+//! ## Composing the Primitives
+//!
+//! The four primitives are designed to be layered. A typical production setup:
+//!
+//! ```text
+//! request
+//!   │
+//!   ▼
+//! BackpressureGuard  ← shed if too many in-flight requests
+//!   │
+//!   ▼
+//! Deduplicator       ← return cached result for duplicate keys
+//!   │
+//!   ▼
+//! CircuitBreaker     ← fast-fail if the downstream is unhealthy
+//!   │
+//!   ▼
+//! RetryPolicy        ← retry transient failures with exponential backoff
+//!   │
+//!   ▼
+//! Pipeline           ← transform request/response through named stages
+//! ```
 
 use crate::error::AgentRuntimeError;
 use std::collections::HashMap;
@@ -284,10 +307,12 @@ impl CircuitBreaker {
 
     /// Attempt to call `f`, respecting the circuit breaker state.
     ///
-    /// # Returns
-    /// - `Ok(T)` — if `f` succeeds (resets failure count)
-    /// - `Err(AgentRuntimeError::CircuitOpen)` — if the breaker is open
-    /// - `Err(...)` — if `f` fails (may open the breaker)
+    /// # Errors
+    /// - `AgentRuntimeError::CircuitOpen` — the breaker is in the `Open` state
+    ///   and the recovery window has not yet elapsed
+    /// - `AgentRuntimeError::Orchestration` — `f` returned an error; the error
+    ///   message is the `Display` of the inner error. This call may open the
+    ///   breaker if it pushes the consecutive failure count above `threshold`.
     #[tracing::instrument(skip(self, f))]
     pub fn call<T, E, F>(&self, f: F) -> Result<T, AgentRuntimeError>
     where

@@ -110,6 +110,7 @@ pub use graph::{Entity, EntityId, GraphStore, Relationship};
 pub use orchestrator::{CircuitBreaker, Pipeline, RetryPolicy};
 
 pub use agent::{AgentConfig, ReActLoop, ReActStep, ToolSpec, ToolValidator};
+pub use metrics::MetricsSnapshot;
 
 #[cfg(feature = "persistence")]
 pub use persistence::{FilePersistenceBackend, PersistenceBackend};

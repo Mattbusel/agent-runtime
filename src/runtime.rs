@@ -235,6 +235,18 @@ impl<S> AgentRuntimeBuilder<S> {
         self
     }
 
+    /// Register multiple tools at once.
+    ///
+    /// Equivalent to calling [`register_tool`] for each spec.
+    ///
+    /// [`register_tool`]: AgentRuntimeBuilder::register_tool
+    pub fn register_tools(mut self, specs: impl IntoIterator<Item = ToolSpec>) -> Self {
+        for spec in specs {
+            self.tools.push(Arc::new(spec));
+        }
+        self
+    }
+
     /// Attach a shared `RuntimeMetrics` instance.
     pub fn with_metrics(mut self, metrics: Arc<RuntimeMetrics>) -> Self {
         self.metrics = metrics;

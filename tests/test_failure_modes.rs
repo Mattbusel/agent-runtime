@@ -338,11 +338,14 @@ mod persistence_failure_tests {
             .await
             .unwrap();
 
-        // 1 final session save + 2 step saves (step:1, step:2).
+        // Saves: 1 loop-level checkpoint (tool call step) + 1 final session +
+        // 2 incremental session-step snapshots (step:1, step:2) = 4 total.
+        // The FINAL_ANSWER step does not produce a loop checkpoint because the
+        // loop returns early before the checkpoint code runs.
         assert_eq!(
             backend.save_count(),
-            3,
-            "expected 3 save calls (1 session + 2 steps)"
+            4,
+            "expected 4 save calls (1 loop step + 1 session + 2 session steps)"
         );
     }
 }

@@ -37,3 +37,12 @@ jobs:
       - run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # ── MSRV check (Minimum Supported Rust Version = 1.85) ─────────────────────
+  msrv:
+    name: cargo check (MSRV 1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - run: cargo check --all-features

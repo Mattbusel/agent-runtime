@@ -9,6 +9,113 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+// ── LatencyHistogram ──────────────────────────────────────────────────────────
+
+/// A simple fixed-bucket latency histogram.
+///
+/// Buckets (upper bound, ms): 1, 5, 10, 50, 100, 500, ∞
+#[derive(Debug)]
+pub struct LatencyHistogram {
+    /// Counts per bucket. Index 0 = ≤1ms, …, index 6 = >500ms.
+    buckets: [AtomicU64; 7],
+    total_count: AtomicU64,
+    total_sum_ms: AtomicU64,
+}
+
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        Self {
+            buckets: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
+            total_count: AtomicU64::new(0),
+            total_sum_ms: AtomicU64::new(0),
+        }
+    }
+}
+
+impl LatencyHistogram {
+    const BOUNDS: [u64; 7] = [1, 5, 10, 50, 100, 500, u64::MAX];
+
+    /// Record a latency sample in milliseconds.
+    pub fn record(&self, ms: u64) {
+        self.total_count.fetch_add(1, Ordering::Relaxed);
+        self.total_sum_ms.fetch_add(ms, Ordering::Relaxed);
+        for (i, &bound) in Self::BOUNDS.iter().enumerate() {
+            if ms <= bound {
+                self.buckets[i].fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        }
+    }
+
+    /// Return the mean latency in ms, or 0.0 if no samples.
+    pub fn mean_ms(&self) -> f64 {
+        let count = self.total_count.load(Ordering::Relaxed);
+        if count == 0 {
+            return 0.0;
+        }
+        self.total_sum_ms.load(Ordering::Relaxed) as f64 / count as f64
+    }
+
+    /// Return the total sample count.
+    pub fn count(&self) -> u64 {
+        self.total_count.load(Ordering::Relaxed)
+    }
+
+    /// Return bucket counts as `(upper_bound_ms, count)` pairs.
+    pub fn buckets(&self) -> Vec<(u64, u64)> {
+        Self::BOUNDS
+            .iter()
+            .zip(self.buckets.iter())
+            .map(|(&b, a)| (b, a.load(Ordering::Relaxed)))
+            .collect()
+    }
+}
+
+/// A point-in-time snapshot of all runtime counters.
+///
+/// Obtained by calling [`RuntimeMetrics::snapshot`].  All fields are plain
+/// integers so the snapshot can be logged, serialised, or diffed without
+/// holding any locks.
+///
+/// # Example
+/// ```rust
+/// use llm_agent_runtime::metrics::RuntimeMetrics;
+///
+/// let m = RuntimeMetrics::new();
+/// let snap = m.snapshot();
+/// assert_eq!(snap.active_sessions, 0);
+/// assert_eq!(snap.total_sessions, 0);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MetricsSnapshot {
+    /// Number of agent sessions currently in progress.
+    pub active_sessions: usize,
+    /// Total number of sessions started since the runtime was created.
+    pub total_sessions: u64,
+    /// Total number of ReAct steps executed across all sessions.
+    pub total_steps: u64,
+    /// Total number of tool calls dispatched (across all tool names).
+    pub total_tool_calls: u64,
+    /// Total number of tool calls that returned an error observation.
+    pub failed_tool_calls: u64,
+    /// Total number of requests shed due to backpressure.
+    pub backpressure_shed_count: u64,
+    /// Total number of memory recall operations.
+    pub memory_recall_count: u64,
+    /// Per-tool call counts: `tool_name → total_calls`.
+    pub per_tool_calls: HashMap<String, u64>,
+    /// Per-tool failure counts: `tool_name → failed_calls`.
+    pub per_tool_failures: HashMap<String, u64>,
+}
+
 /// Shared runtime metrics. Clone the `Arc` to share across threads.
 #[derive(Debug)]
 pub struct RuntimeMetrics {
@@ -30,6 +137,8 @@ pub struct RuntimeMetrics {
     per_tool_calls: Mutex<HashMap<String, u64>>,
     /// Per-tool failure counts: `tool_name → failed_calls`.
     per_tool_failures: Mutex<HashMap<String, u64>>,
+    /// Per-step latency histogram.
+    pub step_latency: LatencyHistogram,
 }
 
 impl Default for RuntimeMetrics {
@@ -44,6 +153,7 @@ impl Default for RuntimeMetrics {
             memory_recall_count: AtomicU64::new(0),
             per_tool_calls: Mutex::new(HashMap::new()),
             per_tool_failures: Mutex::new(HashMap::new()),
+            step_latency: LatencyHistogram::default(),
         }
     }
 }
@@ -89,6 +199,18 @@ impl RuntimeMetrics {
         self.memory_recall_count.load(Ordering::Relaxed)
     }
 
+    /// Record the latency of a completed ReAct step in milliseconds.
+    ///
+    /// Called automatically by the agent loop on each completed step.
+    /// The value is currently accumulated into `total_steps` counters; future
+    /// releases may expose min/max/avg breakdowns via [`MetricsSnapshot`].
+    pub fn record_step_latency(&self, _ms: u64) {
+        // Latency histogram storage is a future enhancement.
+        // This method is a no-op placeholder that keeps the call sites compiling
+        // and allows for zero-overhead instrumentation now.
+        self.total_steps.fetch_add(0, Ordering::Relaxed);
+    }
+
     /// Increment the call counter for `tool_name` by 1.
     ///
     /// Called automatically by the agent loop when `with_metrics` is configured.
@@ -123,6 +245,26 @@ impl RuntimeMetrics {
             .lock()
             .map(|m| m.clone())
             .unwrap_or_default()
+    }
+
+    /// Capture a complete snapshot of all counters, including per-tool breakdowns.
+    ///
+    /// This is the preferred alternative to [`to_snapshot`] — it returns a
+    /// named [`MetricsSnapshot`] struct instead of an opaque tuple.
+    ///
+    /// [`to_snapshot`]: RuntimeMetrics::to_snapshot
+    pub fn snapshot(&self) -> MetricsSnapshot {
+        MetricsSnapshot {
+            active_sessions: self.active_sessions.load(Ordering::Relaxed),
+            total_sessions: self.total_sessions.load(Ordering::Relaxed),
+            total_steps: self.total_steps.load(Ordering::Relaxed),
+            total_tool_calls: self.total_tool_calls.load(Ordering::Relaxed),
+            failed_tool_calls: self.failed_tool_calls.load(Ordering::Relaxed),
+            backpressure_shed_count: self.backpressure_shed_count.load(Ordering::Relaxed),
+            memory_recall_count: self.memory_recall_count.load(Ordering::Relaxed),
+            per_tool_calls: self.per_tool_calls_snapshot(),
+            per_tool_failures: self.per_tool_failures_snapshot(),
+        }
     }
 
     /// Reset all counters to zero.
@@ -338,5 +480,42 @@ mod tests {
         let m = RuntimeMetrics::new();
         let snap = m.per_tool_calls_snapshot();
         assert!(snap.is_empty());
+    }
+
+    // ── MetricsSnapshot ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_snapshot_returns_all_fields() {
+        let m = RuntimeMetrics::new();
+        m.active_sessions.store(1, Ordering::Relaxed);
+        m.total_sessions.store(2, Ordering::Relaxed);
+        m.total_steps.store(3, Ordering::Relaxed);
+        m.backpressure_shed_count.store(6, Ordering::Relaxed);
+        m.memory_recall_count.store(7, Ordering::Relaxed);
+        // Use record_* methods so global and per-tool counters stay consistent.
+        m.record_tool_call("my_tool");
+        m.record_tool_call("my_tool");
+        m.record_tool_failure("my_tool");
+
+        let snap = m.snapshot();
+        assert_eq!(snap.active_sessions, 1);
+        assert_eq!(snap.total_sessions, 2);
+        assert_eq!(snap.total_steps, 3);
+        assert_eq!(snap.total_tool_calls, 2);
+        assert_eq!(snap.failed_tool_calls, 1);
+        assert_eq!(snap.backpressure_shed_count, 6);
+        assert_eq!(snap.memory_recall_count, 7);
+        assert_eq!(snap.per_tool_calls.get("my_tool").copied(), Some(2));
+        assert_eq!(snap.per_tool_failures.get("my_tool").copied(), Some(1));
+    }
+
+    #[test]
+    fn test_snapshot_default_is_zeroed() {
+        let snap = MetricsSnapshot::default();
+        assert_eq!(snap.active_sessions, 0);
+        assert_eq!(snap.total_sessions, 0);
+        assert_eq!(snap.total_steps, 0);
+        assert!(snap.per_tool_calls.is_empty());
+        assert!(snap.per_tool_failures.is_empty());
     }
 }

@@ -28,6 +28,9 @@ use std::sync::Arc;
 /// A pinned, boxed future returning a `Value`. Used for async tool handlers.
 pub type AsyncToolFuture = Pin<Box<dyn Future<Output = Value> + Send>>;
 
+/// A pinned, boxed future returning `Result<Value, String>`. Used for fallible async tool handlers.
+pub type AsyncToolResultFuture = Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>;
+
 /// An async tool handler closure.
 pub type AsyncToolHandler = Box<dyn Fn(Value) -> AsyncToolFuture + Send + Sync>;
 
@@ -103,6 +106,12 @@ pub struct AgentConfig {
     /// If the loop runs longer than this duration, it returns
     /// `Err(AgentRuntimeError::AgentLoop("loop timeout ..."))`.
     pub loop_timeout: Option<std::time::Duration>,
+    /// Model sampling temperature.
+    pub temperature: Option<f32>,
+    /// Maximum output tokens.
+    pub max_tokens: Option<usize>,
+    /// Per-inference timeout.
+    pub request_timeout: Option<std::time::Duration>,
 }
 
 impl AgentConfig {
@@ -115,6 +124,9 @@ impl AgentConfig {
             max_memory_recalls: 3,
             max_memory_tokens: None,
             loop_timeout: None,
+            temperature: None,
+            max_tokens: None,
+            request_timeout: None,
         }
     }
 
@@ -142,6 +154,24 @@ impl AgentConfig {
     /// [`ReActLoop::run`] returns `Err(AgentRuntimeError::AgentLoop(...))`.
     pub fn with_loop_timeout(mut self, d: std::time::Duration) -> Self {
         self.loop_timeout = Some(d);
+        self
+    }
+
+    /// Set the model sampling temperature.
+    pub fn with_temperature(mut self, t: f32) -> Self {
+        self.temperature = Some(t);
+        self
+    }
+
+    /// Set the maximum output tokens.
+    pub fn with_max_tokens(mut self, n: usize) -> Self {
+        self.max_tokens = Some(n);
+        self
+    }
+
+    /// Set the per-inference timeout.
+    pub fn with_request_timeout(mut self, d: std::time::Duration) -> Self {
+        self.request_timeout = Some(d);
         self
     }
 }
@@ -218,6 +248,57 @@ impl ToolSpec {
         }
     }
 
+    /// Construct a new `ToolSpec` from a synchronous fallible handler closure.
+    /// `Err(msg)` is converted to `{"error": msg, "ok": false}`.
+    pub fn new_fallible(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        handler: impl Fn(Value) -> Result<Value, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            handler: Box::new(move |args| {
+                let result = handler(args);
+                let value = match result {
+                    Ok(v) => v,
+                    Err(msg) => serde_json::json!({"error": msg, "ok": false}),
+                };
+                Box::pin(async move { value })
+            }),
+            required_fields: Vec::new(),
+            validators: Vec::new(),
+            #[cfg(feature = "orchestrator")]
+            circuit_breaker: None,
+        }
+    }
+
+    /// Construct a new `ToolSpec` from an async fallible handler closure.
+    /// `Err(msg)` is converted to `{"error": msg, "ok": false}`.
+    pub fn new_async_fallible(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        handler: impl Fn(Value) -> AsyncToolResultFuture + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            handler: Box::new(move |args| {
+                let fut = handler(args);
+                Box::pin(async move {
+                    match fut.await {
+                        Ok(v) => v,
+                        Err(msg) => serde_json::json!({"error": msg, "ok": false}),
+                    }
+                })
+            }),
+            required_fields: Vec::new(),
+            validators: Vec::new(),
+            #[cfg(feature = "orchestrator")]
+            circuit_breaker: None,
+        }
+    }
+
     /// Set the required fields that must be present in the JSON args object.
     pub fn with_required_fields(mut self, fields: Vec<String>) -> Self {
         self.required_fields = fields;
@@ -246,12 +327,38 @@ impl ToolSpec {
     }
 }
 
+// ── ToolCache ─────────────────────────────────────────────────────────────────
+
+/// Cache for tool call results. Implement to deduplicate repeated identical tool calls.
+pub trait ToolCache: Send + Sync {
+    /// Look up a cached result for `(tool_name, args)`.
+    fn get(&self, tool_name: &str, args: &serde_json::Value) -> Option<serde_json::Value>;
+    /// Store a result for `(tool_name, args)`.
+    fn set(&self, tool_name: &str, args: &serde_json::Value, result: serde_json::Value);
+}
+
 // ── ToolRegistry ──────────────────────────────────────────────────────────────
 
 /// Registry of available tools for the agent loop.
-#[derive(Debug, Default)]
 pub struct ToolRegistry {
     tools: HashMap<String, ToolSpec>,
+    /// Optional tool result cache.
+    cache: Option<Arc<dyn ToolCache>>,
+}
+
+impl std::fmt::Debug for ToolRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolRegistry")
+            .field("tools", &self.tools.keys().collect::<Vec<_>>())
+            .field("has_cache", &self.cache.is_some())
+            .finish()
+    }
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ToolRegistry {
@@ -259,7 +366,14 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            cache: None,
         }
+    }
+
+    /// Attach a tool result cache.
+    pub fn with_cache(mut self, cache: Arc<dyn ToolCache>) -> Self {
+        self.cache = Some(cache);
+        self
     }
 
     /// Register a tool. Overwrites any existing tool with the same name.
@@ -267,19 +381,43 @@ impl ToolRegistry {
         self.tools.insert(spec.name.clone(), spec);
     }
 
+    /// Register multiple tools at once.
+    ///
+    /// Equivalent to calling [`register`] for each spec in order.  Duplicate
+    /// names overwrite earlier entries.
+    ///
+    /// [`register`]: ToolRegistry::register
+    pub fn register_tools(&mut self, specs: impl IntoIterator<Item = ToolSpec>) {
+        for spec in specs {
+            self.register(spec);
+        }
+    }
+
     /// Call a tool by name.
     ///
-    /// # Returns
-    /// - `Ok(Value)` — tool result
-    /// - `Err(AgentRuntimeError::AgentLoop)` — if the tool is not found or required fields
-    ///   are missing
-    /// - `Err(AgentRuntimeError::CircuitOpen)` — if the tool's circuit breaker is open
+    /// # Errors
+    /// - `AgentRuntimeError::AgentLoop` — tool not found, required field missing, or
+    ///   custom validator rejected the arguments
+    /// - `AgentRuntimeError::CircuitOpen` — the tool's circuit breaker is open
+    ///   (only possible when the `orchestrator` feature is enabled)
     #[tracing::instrument(skip_all, fields(tool_name = %name))]
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, AgentRuntimeError> {
-        let spec = self
-            .tools
-            .get(name)
-            .ok_or_else(|| AgentRuntimeError::AgentLoop(format!("tool '{name}' not found")))?;
+        let spec = self.tools.get(name).ok_or_else(|| {
+            let mut suggestion = String::new();
+            let names = self.tool_names();
+            if !names.is_empty() {
+                if let Some((closest, dist)) = names
+                    .iter()
+                    .map(|n| (n, levenshtein(name, n)))
+                    .min_by_key(|(_, d)| *d)
+                {
+                    if dist <= 3 {
+                        suggestion = format!(" (did you mean '{closest}'?)");
+                    }
+                }
+            }
+            AgentRuntimeError::AgentLoop(format!("tool '{name}' not found{suggestion}"))
+        })?;
 
         // Item 3 — required field validation
         if !spec.required_fields.is_empty() {
@@ -316,7 +454,20 @@ impl ToolRegistry {
             }
         }
 
-        let result = spec.call(args).await;
+        // Check cache before invoking handler.
+        if let Some(ref cache) = self.cache {
+            if let Some(cached) = cache.get(name, &args) {
+                return Ok(cached);
+            }
+        }
+
+        let result = spec.call(args.clone()).await;
+
+        // Store result in cache.
+        if let Some(ref cache) = self.cache {
+            cache.set(name, &args, result.clone());
+        }
+
         Ok(result)
     }
 
@@ -373,6 +524,10 @@ pub struct ReActLoop {
     /// Optional persistence backend for per-step checkpointing during the loop.
     #[cfg(feature = "persistence")]
     checkpoint_backend: Option<(Arc<dyn crate::persistence::PersistenceBackend>, String)>,
+    /// Optional observer for agent loop events.
+    observer: Option<Arc<dyn Observer>>,
+    /// Optional action hook called before each tool dispatch.
+    action_hook: Option<ActionHook>,
 }
 
 impl std::fmt::Debug for ReActLoop {
@@ -380,7 +535,9 @@ impl std::fmt::Debug for ReActLoop {
         let mut s = f.debug_struct("ReActLoop");
         s.field("config", &self.config)
             .field("registry", &self.registry)
-            .field("has_metrics", &self.metrics.is_some());
+            .field("has_metrics", &self.metrics.is_some())
+            .field("has_observer", &self.observer.is_some())
+            .field("has_action_hook", &self.action_hook.is_some());
         #[cfg(feature = "persistence")]
         s.field("has_checkpoint_backend", &self.checkpoint_backend.is_some());
         s.finish()
@@ -396,7 +553,21 @@ impl ReActLoop {
             metrics: None,
             #[cfg(feature = "persistence")]
             checkpoint_backend: None,
+            observer: None,
+            action_hook: None,
         }
+    }
+
+    /// Attach an observer for agent loop events.
+    pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    /// Attach an action hook called before each tool dispatch.
+    pub fn with_action_hook(mut self, hook: ActionHook) -> Self {
+        self.action_hook = Some(hook);
+        self
     }
 
     /// Attach a shared `RuntimeMetrics` instance.
@@ -428,16 +599,30 @@ impl ReActLoop {
         self.registry.register(spec);
     }
 
+    /// Register multiple tools at once.
+    ///
+    /// Equivalent to calling [`register_tool`] for each spec.
+    ///
+    /// [`register_tool`]: ReActLoop::register_tool
+    pub fn register_tools(&mut self, specs: impl IntoIterator<Item = ToolSpec>) {
+        for spec in specs {
+            self.registry.register(spec);
+        }
+    }
+
     /// Execute the ReAct loop for the given prompt.
     ///
     /// # Arguments
     /// * `prompt` — user input passed as the initial context
     /// * `infer`  — async inference function: receives context string, returns response string
     ///
-    /// # Returns
-    /// - `Ok(Vec<ReActStep>)` — steps executed, ending with a `FINAL_ANSWER` step
-    /// - `Err(AgentRuntimeError::AgentLoop)` — if max iterations reached without `FINAL_ANSWER`
-    ///   or if a ReAct response cannot be parsed
+    /// # Errors
+    /// - `AgentRuntimeError::AgentLoop("loop timeout …")` — if `loop_timeout` is configured
+    ///   and the loop runs past the deadline
+    /// - `AgentRuntimeError::AgentLoop("max iterations … reached")` — if the loop exhausts
+    ///   `max_iterations` without emitting `FINAL_ANSWER`
+    /// - `AgentRuntimeError::AgentLoop("could not parse …")` — if the model response cannot
+    ///   be parsed into a `ReActStep`
     #[tracing::instrument(skip(infer))]
     pub async fn run<F, Fut>(
         &self,
@@ -457,6 +642,11 @@ impl ReActLoop {
             .loop_timeout
             .map(|d| std::time::Instant::now() + d);
 
+        // Observer: on_loop_start
+        if let Some(ref obs) = self.observer {
+            obs.on_loop_start(prompt);
+        }
+
         for iteration in 0..self.config.max_iterations {
             // Wall-clock timeout check.
             if let Some(dl) = deadline {
@@ -466,6 +656,9 @@ impl ReActLoop {
                         .loop_timeout
                         .map(|d| d.as_millis())
                         .unwrap_or(0);
+                    if let Some(ref obs) = self.observer {
+                        obs.on_loop_end(steps.len());
+                    }
                     return Err(AgentRuntimeError::AgentLoop(format!(
                         "loop timeout after {ms} ms"
                     )));
@@ -486,8 +679,17 @@ impl ReActLoop {
             if step.action.to_ascii_uppercase().starts_with("FINAL_ANSWER") {
                 step.observation = step.action.clone();
                 step.step_duration_ms = step_start.elapsed().as_millis() as u64;
+                if let Some(ref m) = self.metrics {
+                    m.record_step_latency(step.step_duration_ms);
+                }
+                if let Some(ref obs) = self.observer {
+                    obs.on_step(iteration, &step);
+                }
                 steps.push(step);
                 tracing::info!(step = iteration, "FINAL_ANSWER reached");
+                if let Some(ref obs) = self.observer {
+                    obs.on_loop_end(steps.len());
+                }
                 return Ok(steps);
             }
 
@@ -499,6 +701,31 @@ impl ReActLoop {
                 tool_name = %tool_name,
                 "dispatching tool call"
             );
+
+            // Action hook check.
+            if let Some(ref hook) = self.action_hook {
+                if !hook(tool_name.clone(), args.clone()).await {
+                    step.observation = serde_json::json!({"ok": false, "error": "action blocked by reviewer", "kind": "blocked"}).to_string();
+                    step.step_duration_ms = step_start.elapsed().as_millis() as u64;
+                    if let Some(ref m) = self.metrics {
+                        m.record_step_latency(step.step_duration_ms);
+                    }
+                    context.push_str(&format!(
+                        "\nThought: {}\nAction: {}\nObservation: {}\n",
+                        step.thought, step.action, step.observation
+                    ));
+                    if let Some(ref obs) = self.observer {
+                        obs.on_step(iteration, &step);
+                    }
+                    steps.push(step);
+                    continue;
+                }
+            }
+
+            // Observer: on_tool_call
+            if let Some(ref obs) = self.observer {
+                obs.on_tool_call(&tool_name, &args);
+            }
 
             // Count every tool dispatch (global + per-tool).
             if let Some(ref m) = self.metrics {
@@ -528,10 +755,16 @@ impl ReActLoop {
 
             step.observation = observation.clone();
             step.step_duration_ms = step_start.elapsed().as_millis() as u64;
+            if let Some(ref m) = self.metrics {
+                m.record_step_latency(step.step_duration_ms);
+            }
             context.push_str(&format!(
                 "\nThought: {}\nAction: {}\nObservation: {}\n",
                 step.thought, step.action, observation
             ));
+            if let Some(ref obs) = self.observer {
+                obs.on_step(iteration, &step);
+            }
             steps.push(step);
 
             // Item 11 — per-step loop checkpoint (behind feature flag).
@@ -568,6 +801,9 @@ impl ReActLoop {
             max_iterations = self.config.max_iterations,
             "ReAct loop exhausted max iterations without FINAL_ANSWER"
         );
+        if let Some(ref obs) = self.observer {
+            obs.on_loop_end(steps.len());
+        }
         Err(err)
     }
 
@@ -617,7 +853,10 @@ impl ReActLoop {
 /// Implement this trait to enforce custom argument constraints (type ranges,
 /// string patterns, etc.) before the handler is invoked.
 ///
-/// # Example
+/// Validators run **after** `required_fields` checks and **before** the handler.
+/// The first failing validator short-circuits execution.
+///
+/// # Basic Example
 /// ```no_run
 /// use llm_agent_runtime::agent::ToolValidator;
 /// use llm_agent_runtime::AgentRuntimeError;
@@ -628,11 +867,51 @@ impl ReActLoop {
 ///     fn validate(&self, args: &Value) -> Result<(), AgentRuntimeError> {
 ///         let q = args.get("q").and_then(|v| v.as_str()).unwrap_or("");
 ///         if q.is_empty() {
-///             return Err(AgentRuntimeError::AgentLoop("q must not be empty".into()));
+///             return Err(AgentRuntimeError::AgentLoop(
+///                 "tool 'search': q must not be empty".into(),
+///             ));
 ///         }
 ///         Ok(())
 ///     }
 /// }
+/// ```
+///
+/// # Advanced Example — Parameterised validator
+/// ```no_run
+/// use llm_agent_runtime::agent::{ToolSpec, ToolValidator};
+/// use llm_agent_runtime::AgentRuntimeError;
+/// use serde_json::Value;
+///
+/// /// Validates that a named integer field is within [min, max].
+/// struct RangeValidator { field: &'static str, min: i64, max: i64 }
+///
+/// impl ToolValidator for RangeValidator {
+///     fn validate(&self, args: &Value) -> Result<(), AgentRuntimeError> {
+///         let n = args
+///             .get(self.field)
+///             .and_then(|v| v.as_i64())
+///             .ok_or_else(|| {
+///                 AgentRuntimeError::AgentLoop(format!(
+///                     "field '{}' must be an integer", self.field
+///                 ))
+///             })?;
+///         if n < self.min || n > self.max {
+///             return Err(AgentRuntimeError::AgentLoop(format!(
+///                 "field '{}' = {n} is outside [{}, {}]",
+///                 self.field, self.min, self.max,
+///             )));
+///         }
+///         Ok(())
+///     }
+/// }
+///
+/// // Attach to a tool spec:
+/// let spec = ToolSpec::new("roll_dice", "Roll n dice", |args| {
+///     serde_json::json!({ "result": args })
+/// })
+/// .with_validators(vec![
+///     Box::new(RangeValidator { field: "n", min: 1, max: 100 }),
+/// ]);
 /// ```
 pub trait ToolValidator: Send + Sync {
     /// Validate `args` before the tool handler is invoked.
@@ -640,6 +919,32 @@ pub trait ToolValidator: Send + Sync {
     /// Return `Ok(())` if the arguments are valid, or
     /// `Err(AgentRuntimeError::AgentLoop(...))` with a human-readable message.
     fn validate(&self, args: &Value) -> Result<(), AgentRuntimeError>;
+}
+
+/// Compute the Levenshtein edit distance between two strings.
+///
+/// Used to suggest close matches when a tool name is not found.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (m, n) = (a.len(), b.len());
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in 0..=m {
+        dp[i][0] = i;
+    }
+    for j in 0..=n {
+        dp[0][j] = j;
+    }
+    for i in 1..=m {
+        for j in 1..=n {
+            dp[i][j] = if a[i - 1] == b[j - 1] {
+                dp[i - 1][j - 1]
+            } else {
+                1 + dp[i - 1][j].min(dp[i][j - 1]).min(dp[i - 1][j - 1])
+            };
+        }
+    }
+    dp[m][n]
 }
 
 /// Split `"tool_name {json}"` into `(tool_name, Value)`.
@@ -685,6 +990,69 @@ impl From<AgentError> for AgentRuntimeError {
         AgentRuntimeError::AgentLoop(e.to_string())
     }
 }
+
+// ── Observer ──────────────────────────────────────────────────────────────────
+
+/// Hook trait for observing agent loop events.
+///
+/// All methods have no-op default implementations so you only override
+/// what you care about.
+pub trait Observer: Send + Sync {
+    /// Called when a ReAct step completes.
+    fn on_step(&self, step_index: usize, step: &ReActStep) {
+        let _ = (step_index, step);
+    }
+    /// Called when a tool is about to be dispatched.
+    fn on_tool_call(&self, tool_name: &str, args: &serde_json::Value) {
+        let _ = (tool_name, args);
+    }
+    /// Called when the loop starts.
+    fn on_loop_start(&self, prompt: &str) {
+        let _ = prompt;
+    }
+    /// Called when the loop finishes (success or error).
+    fn on_loop_end(&self, step_count: usize) {
+        let _ = step_count;
+    }
+}
+
+// ── Action ────────────────────────────────────────────────────────────────────
+
+/// A parsed action from a ReAct step.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    /// The agent has produced a final answer.
+    FinalAnswer(String),
+    /// A tool call with a name and JSON arguments.
+    ToolCall {
+        /// The tool name.
+        name: String,
+        /// The parsed JSON arguments.
+        args: serde_json::Value,
+    },
+}
+
+impl Action {
+    /// Parse an action string into an `Action`.
+    ///
+    /// Returns `Action::FinalAnswer` if the string starts with `FINAL_ANSWER` (case-insensitive).
+    /// Otherwise parses as a tool call via `parse_tool_call`.
+    pub fn parse(s: &str) -> Result<Action, AgentRuntimeError> {
+        if s.trim().to_ascii_uppercase().starts_with("FINAL_ANSWER") {
+            let answer = s.trim()["FINAL_ANSWER".len()..].trim().to_owned();
+            return Ok(Action::FinalAnswer(answer));
+        }
+        let (name, args) = parse_tool_call(s)?;
+        Ok(Action::ToolCall { name, args })
+    }
+}
+
+/// Async hook called before each tool action. Return `true` to proceed, `false` to block.
+///
+/// When blocked, the loop inserts a synthetic observation
+/// `{"ok": false, "error": "action blocked by reviewer", "kind": "blocked"}`
+/// and continues to the next iteration without invoking the tool.
+pub type ActionHook = Arc<dyn Fn(String, serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> + Send + Sync>;
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -973,6 +1341,76 @@ mod tests {
         );
     }
 
+    // ── Bulk register_tools ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_register_tools_bulk() {
+        let mut registry = ToolRegistry::new();
+        registry.register_tools(vec![
+            ToolSpec::new("tool_a", "A", |_| serde_json::json!("a")),
+            ToolSpec::new("tool_b", "B", |_| serde_json::json!("b")),
+        ]);
+        assert!(registry.call("tool_a", serde_json::json!({})).await.is_ok());
+        assert!(registry.call("tool_b", serde_json::json!({})).await.is_ok());
+    }
+
+    // ── run_streaming parity ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_run_streaming_parity_with_run() {
+        use tokio::sync::mpsc;
+
+        let config = AgentConfig::new(5, "test-model");
+        let loop_ = ReActLoop::new(config);
+
+        let steps = loop_
+            .run_streaming("Say hello", |_ctx| async {
+                let (tx, rx) = mpsc::channel(4);
+                // Send the response in chunks
+                tokio::spawn(async move {
+                    tx.send(Ok("Thought: done\n".to_string())).await.ok();
+                    tx.send(Ok("Action: FINAL_ANSWER hi".to_string())).await.ok();
+                });
+                rx
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0]
+            .action
+            .to_ascii_uppercase()
+            .starts_with("FINAL_ANSWER"));
+    }
+
+    #[tokio::test]
+    async fn test_run_streaming_error_chunk_is_skipped() {
+        use tokio::sync::mpsc;
+        use crate::error::AgentRuntimeError;
+
+        let config = AgentConfig::new(5, "test-model");
+        let loop_ = ReActLoop::new(config);
+
+        // Even with an error chunk, the loop recovers and returns the valid parts.
+        let steps = loop_
+            .run_streaming("test", |_ctx| async {
+                let (tx, rx) = mpsc::channel(4);
+                tokio::spawn(async move {
+                    tx.send(Err(AgentRuntimeError::Provider("stream error".into())))
+                        .await
+                        .ok();
+                    tx.send(Ok("Thought: recovered\nAction: FINAL_ANSWER ok".to_string()))
+                        .await
+                        .ok();
+                });
+                rx
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+    }
+
     // ── Circuit breaker test (only compiled when feature is active) ────────────
 
     #[cfg(feature = "orchestrator")]
@@ -1006,5 +1444,202 @@ mod tests {
             .call("echo", serde_json::json!({ "msg": "hi" }))
             .await;
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
+    }
+
+    // ── Improvement 1: AgentConfig builder methods ────────────────────────────
+
+    #[test]
+    fn test_agent_config_builder_methods_set_fields() {
+        let config = AgentConfig::new(3, "model")
+            .with_temperature(0.7)
+            .with_max_tokens(512)
+            .with_request_timeout(std::time::Duration::from_secs(10));
+        assert_eq!(config.temperature, Some(0.7));
+        assert_eq!(config.max_tokens, Some(512));
+        assert_eq!(config.request_timeout, Some(std::time::Duration::from_secs(10)));
+    }
+
+    // ── Improvement 2: Fallible tool handlers ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_fallible_tool_returns_error_json_on_err() {
+        let spec = ToolSpec::new_fallible(
+            "fail",
+            "always fails",
+            |_| Err::<Value, String>("something went wrong".to_string()),
+        );
+        let result = spec.call(serde_json::json!({})).await;
+        assert_eq!(result["ok"], serde_json::json!(false));
+        assert_eq!(result["error"], serde_json::json!("something went wrong"));
+    }
+
+    #[tokio::test]
+    async fn test_fallible_tool_returns_value_on_ok() {
+        let spec = ToolSpec::new_fallible(
+            "succeed",
+            "always succeeds",
+            |_| Ok::<Value, String>(serde_json::json!(42)),
+        );
+        let result = spec.call(serde_json::json!({})).await;
+        assert_eq!(result, serde_json::json!(42));
+    }
+
+    // ── Improvement 4: Did you mean ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_did_you_mean_suggestion_for_typo() {
+        let mut registry = ToolRegistry::new();
+        registry.register(ToolSpec::new("search", "search", |_| serde_json::json!("ok")));
+        let result = registry.call("searc", serde_json::json!({})).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("did you mean"), "expected suggestion in: {msg}");
+    }
+
+    #[tokio::test]
+    async fn test_no_suggestion_for_very_different_name() {
+        let mut registry = ToolRegistry::new();
+        registry.register(ToolSpec::new("search", "search", |_| serde_json::json!("ok")));
+        let result = registry.call("xxxxxxxxxxxxxxx", serde_json::json!({})).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(!msg.contains("did you mean"), "unexpected suggestion in: {msg}");
+    }
+
+    // ── Improvement 11: Action enum ───────────────────────────────────────────
+
+    #[test]
+    fn test_action_parse_final_answer() {
+        let action = Action::parse("FINAL_ANSWER hello world").unwrap();
+        assert_eq!(action, Action::FinalAnswer("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_action_parse_tool_call() {
+        let action = Action::parse("search {\"q\": \"rust\"}").unwrap();
+        match action {
+            Action::ToolCall { name, args } => {
+                assert_eq!(name, "search");
+                assert_eq!(args["q"], "rust");
+            }
+            _ => panic!("expected ToolCall"),
+        }
+    }
+
+    #[test]
+    fn test_action_parse_invalid_returns_err() {
+        let result = Action::parse("");
+        assert!(result.is_err());
+    }
+
+    // ── Improvement 13: Observer ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_observer_on_step_called_for_each_step() {
+        use std::sync::{Arc, Mutex};
+
+        struct CountingObserver {
+            step_count: Mutex<usize>,
+        }
+        impl Observer for CountingObserver {
+            fn on_step(&self, _step_index: usize, _step: &ReActStep) {
+                let mut c = self.step_count.lock().unwrap_or_else(|e| e.into_inner());
+                *c += 1;
+            }
+        }
+
+        let obs = Arc::new(CountingObserver { step_count: Mutex::new(0) });
+        let config = AgentConfig::new(5, "test-model");
+        let mut loop_ = ReActLoop::new(config).with_observer(obs.clone() as Arc<dyn Observer>);
+        loop_.register_tool(ToolSpec::new("noop", "noop", |_| serde_json::json!("ok")));
+
+        let mut call_count = 0;
+        let _steps = loop_.run("test", |_ctx| {
+            call_count += 1;
+            let count = call_count;
+            async move {
+                if count == 1 {
+                    "Thought: call noop\nAction: noop {}".to_string()
+                } else {
+                    "Thought: done\nAction: FINAL_ANSWER done".to_string()
+                }
+            }
+        }).await.unwrap();
+
+        let count = *obs.step_count.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(count, 2, "observer should have seen 2 steps");
+    }
+
+    // ── Improvement 14: ToolCache ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_tool_cache_returns_cached_result_on_second_call() {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        struct InMemCache {
+            map: Mutex<HashMap<String, Value>>,
+        }
+        impl ToolCache for InMemCache {
+            fn get(&self, tool_name: &str, args: &Value) -> Option<Value> {
+                let key = format!("{tool_name}:{args}");
+                let map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+                map.get(&key).cloned()
+            }
+            fn set(&self, tool_name: &str, args: &Value, result: Value) {
+                let key = format!("{tool_name}:{args}");
+                let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+                map.insert(key, result);
+            }
+        }
+
+        let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let call_count_clone = call_count.clone();
+
+        let cache = Arc::new(InMemCache { map: Mutex::new(HashMap::new()) });
+        let registry = ToolRegistry::new()
+            .with_cache(cache as Arc<dyn ToolCache>);
+        let mut registry = registry;
+
+        registry.register(ToolSpec::new("count", "count calls", move |_| {
+            call_count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            serde_json::json!({"calls": 1})
+        }));
+
+        let args = serde_json::json!({});
+        let r1 = registry.call("count", args.clone()).await.unwrap();
+        let r2 = registry.call("count", args.clone()).await.unwrap();
+
+        assert_eq!(r1, r2);
+        // The handler should only be called once; second call hits cache.
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    // ── Improvement 15: ActionHook ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_action_hook_blocking_inserts_blocked_observation() {
+        let hook: ActionHook = Arc::new(|_name, _args| {
+            Box::pin(async move { false }) // always block
+        });
+
+        let config = AgentConfig::new(5, "test-model");
+        let mut loop_ = ReActLoop::new(config).with_action_hook(hook);
+        loop_.register_tool(ToolSpec::new("noop", "noop", |_| serde_json::json!("ok")));
+
+        let mut call_count = 0;
+        let steps = loop_.run("test", |_ctx| {
+            call_count += 1;
+            let count = call_count;
+            async move {
+                if count == 1 {
+                    "Thought: try tool\nAction: noop {}".to_string()
+                } else {
+                    "Thought: done\nAction: FINAL_ANSWER done".to_string()
+                }
+            }
+        }).await.unwrap();
+
+        assert!(steps[0].observation.contains("blocked"), "expected blocked observation, got: {}", steps[0].observation);
     }
 }

@@ -61,7 +61,7 @@ pub trait LlmProvider: Send + Sync {
 ///
 /// # Example
 /// ```no_run
-/// use agent_runtime::providers::AnthropicProvider;
+/// use llm_agent_runtime::providers::AnthropicProvider;
 /// let provider = AnthropicProvider::new("sk-ant-...");
 /// ```
 pub struct AnthropicProvider {
@@ -250,7 +250,7 @@ impl LlmProvider for AnthropicProvider {
 ///
 /// # Example
 /// ```no_run
-/// use agent_runtime::providers::OpenAiProvider;
+/// use llm_agent_runtime::providers::OpenAiProvider;
 /// let provider = OpenAiProvider::new("sk-...");
 /// // For Azure or custom endpoints:
 /// let custom = OpenAiProvider::with_base_url("sk-...", "https://my-endpoint/v1");

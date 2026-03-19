@@ -27,3 +27,5 @@ pub use crate::agent::{
     parse_react_step, AgentConfig, AgentError, Message, ReActLoop, ReActStep, Role, ToolRegistry,
     ToolSpec,
 };
+
+pub use crate::metrics::{MetricsSnapshot, RuntimeMetrics};

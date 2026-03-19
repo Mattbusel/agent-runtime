@@ -5,8 +5,8 @@ edition = "2021"
 rust-version = "1.85"
 authors = ["Matt Busel <mattbusel@users.noreply.github.com>"]
 description = "Unified Tokio agent runtime -- orchestration, memory, knowledge graph, and ReAct loop in one crate"
-keywords = ["tokio", "agent", "llm", "memory", "runtime"]
-categories = ["asynchronous", "concurrency"]
+keywords = ["tokio", "agent", "llm", "memory", "graph"]
+categories = ["asynchronous", "concurrency", "data-structures"]
 license = "MIT"
 repository = "https://github.com/Mattbusel/agent-runtime"
 homepage = "https://github.com/Mattbusel/agent-runtime"
@@ -61,6 +61,18 @@ redis = { version = "0.26", features = ["tokio-comp"], optional = true }
 [[example]]
 name = "custom_persistence"
 required-features = ["persistence", "memory"]
+
+[[example]]
+name = "multi_agent"
+required-features = ["memory"]
+
+[[example]]
+name = "resilient_tool"
+required-features = ["orchestrator"]
+
+[[example]]
+name = "working_memory_evolution"
+required-features = ["memory"]
 
 [dev-dependencies]
 # tokio-test: async test utilities

@@ -63,6 +63,17 @@ pub enum AgentRuntimeError {
     /// A persistence operation failed.
     #[error("Persistence error: {0}")]
     Persistence(String),
+
+    /// A tool argument validation failed.
+    #[error("Validation failed for field '{field}': [{code}] {message}")]
+    Validation {
+        /// The argument field that failed validation.
+        field: String,
+        /// A short machine-readable code (e.g. "out_of_range", "pattern_mismatch").
+        code: String,
+        /// Human-readable description of the failure.
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -138,5 +149,18 @@ mod tests {
         let e = AgentRuntimeError::Memory("test".into());
         let debug = format!("{:?}", e);
         assert!(debug.contains("Memory"));
+    }
+
+    #[test]
+    fn test_validation_error_display() {
+        let e = AgentRuntimeError::Validation {
+            field: "n".into(),
+            code: "out_of_range".into(),
+            message: "n must be between 1 and 100".into(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "Validation failed for field 'n': [out_of_range] n must be between 1 and 100"
+        );
     }
 }
