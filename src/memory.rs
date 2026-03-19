@@ -55,6 +55,17 @@ impl AgentId {
     pub fn random() -> Self {
         Self(Uuid::new_v4().to_string())
     }
+
+    /// Return the inner ID string as a `&str`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for AgentId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for AgentId {
@@ -76,6 +87,12 @@ impl MemoryId {
     /// Generate a random `MemoryId` backed by a UUID v4.
     pub fn random() -> Self {
         Self(Uuid::new_v4().to_string())
+    }
+}
+
+impl AsRef<str> for MemoryId {
+    fn as_ref(&self) -> &str {
+        &self.0
     }
 }
 
@@ -189,6 +206,18 @@ impl DecayPolicy {
 /// temporal distance; combining it with a `DecayPolicy` therefore applies a
 /// *double* time penalty — set one or the other, not both, unless the double
 /// penalty is intentional.
+///
+/// ## Score Calculation Example
+///
+/// Given two memories, each with `importance = 0.5`:
+/// - Memory A: `recall_count = 0`, inserted 1 hour ago
+/// - Memory B: `recall_count = 10`, inserted 10 hours ago
+///
+/// With `recency_weight = 1.0` and `frequency_weight = 0.1`:
+/// - Score A = `0.5 + 1.0 × 1.0 + 0.1 × 0` = `1.5` (recency wins)
+/// - Score B = `0.5 + 1.0 × (−10.0) + 0.1 × 10` = `−8.5` (old → ranked lower)
+///
+/// Note: the recency term uses negative hours-since-creation so older items score lower.
 #[derive(Debug, Clone)]
 pub enum RecallPolicy {
     /// Rank purely by importance score (default).
@@ -297,6 +326,20 @@ impl EpisodicStore {
                 items: HashMap::new(),
                 decay: Some(policy),
                 recall_policy: RecallPolicy::Importance,
+                per_agent_capacity: None,
+                max_age_hours: None,
+                eviction_policy: EvictionPolicy::LowestImportance,
+            })),
+        }
+    }
+
+    /// Create a new episodic store with both a decay policy and a recall policy.
+    pub fn with_decay_and_recall_policy(decay: DecayPolicy, recall: RecallPolicy) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(EpisodicInner {
+                items: HashMap::new(),
+                decay: Some(decay),
+                recall_policy: recall,
                 per_agent_capacity: None,
                 max_age_hours: None,
                 eviction_policy: EvictionPolicy::LowestImportance,
@@ -549,13 +592,35 @@ impl EpisodicStore {
 
         let mut items: Vec<MemoryItem> = agent_items.iter().cloned().collect();
 
+        // Partial-sort optimisation: when the caller only wants a small prefix
+        // of the ranked list (limit < items.len() / 2) we use
+        // `select_nth_unstable_by` to place the top-`limit` elements in the
+        // first `limit` positions in O(n) average time instead of the O(n log n)
+        // full sort.  We still need a final sort on the prefix so the returned
+        // slice is in descending-score order.
+        let use_partial_sort = limit > 0 && limit < items.len() / 2;
+
         match recall_policy {
             RecallPolicy::Importance => {
-                items.sort_by(|a, b| {
-                    b.importance
-                        .partial_cmp(&a.importance)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                if use_partial_sort {
+                    items.select_nth_unstable_by(limit - 1, |a, b| {
+                        b.importance
+                            .partial_cmp(&a.importance)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    items.truncate(limit);
+                    items.sort_by(|a, b| {
+                        b.importance
+                            .partial_cmp(&a.importance)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                } else {
+                    items.sort_by(|a, b| {
+                        b.importance
+                            .partial_cmp(&a.importance)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                }
             }
             RecallPolicy::Hybrid {
                 recency_weight,
@@ -568,15 +633,29 @@ impl EpisodicStore {
                     .unwrap_or(1)
                     .max(1);
                 let now = Utc::now();
-                items.sort_by(|a, b| {
-                    let score_a =
-                        compute_hybrid_score(a, recency_weight, frequency_weight, max_recall, now);
-                    let score_b =
-                        compute_hybrid_score(b, recency_weight, frequency_weight, max_recall, now);
-                    score_b
-                        .partial_cmp(&score_a)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                if use_partial_sort {
+                    items.select_nth_unstable_by(limit - 1, |a, b| {
+                        let sa = compute_hybrid_score(a, recency_weight, frequency_weight, max_recall, now);
+                        let sb = compute_hybrid_score(b, recency_weight, frequency_weight, max_recall, now);
+                        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    items.truncate(limit);
+                    items.sort_by(|a, b| {
+                        let sa = compute_hybrid_score(a, recency_weight, frequency_weight, max_recall, now);
+                        let sb = compute_hybrid_score(b, recency_weight, frequency_weight, max_recall, now);
+                        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                } else {
+                    items.sort_by(|a, b| {
+                        let score_a =
+                            compute_hybrid_score(a, recency_weight, frequency_weight, max_recall, now);
+                        let score_b =
+                            compute_hybrid_score(b, recency_weight, frequency_weight, max_recall, now);
+                        score_b
+                            .partial_cmp(&score_a)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                }
             }
         }
 
@@ -634,6 +713,32 @@ impl EpisodicStore {
         let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::purge_agent_memories");
         let removed = inner.items.remove(agent_id).map_or(0, |v| v.len());
         Ok(removed)
+    }
+
+    /// Remove all memories for the given agent.
+    ///
+    /// After this call, `recall` for this agent returns an empty list.
+    pub fn clear_agent_memory(&self, agent_id: &AgentId) -> Result<(), AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::clear_agent_memory");
+        inner.items.remove(agent_id);
+        Ok(())
+    }
+
+    /// Export all memories for the given agent as a serializable Vec.
+    ///
+    /// Useful for migrating agent state across runtime instances.
+    pub fn export_agent_memory(&self, agent_id: &AgentId) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::export_agent_memory");
+        Ok(inner.items.get(agent_id).cloned().unwrap_or_default())
+    }
+
+    /// Import a Vec of MemoryItems for the given agent, replacing any existing memories.
+    ///
+    /// The agent's existing memories are completely replaced by the imported items.
+    pub fn import_agent_memory(&self, agent_id: &AgentId, items: Vec<MemoryItem>) -> Result<(), AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::import_agent_memory");
+        inner.items.insert(agent_id.clone(), items);
+        Ok(())
     }
 
     /// Bump the `recall_count` of every item whose content equals `content` by `amount`.
@@ -934,6 +1039,16 @@ impl WorkingMemory {
     /// Return `true` if no entries are stored.
     pub fn is_empty(&self) -> Result<bool, AgentRuntimeError> {
         Ok(self.len()? == 0)
+    }
+
+    /// Iterate over all key-value pairs in insertion order.
+    ///
+    /// Equivalent to [`entries`]; provided as a more idiomatic name
+    /// for `for`-loop patterns.
+    ///
+    /// [`entries`]: WorkingMemory::entries
+    pub fn iter(&self) -> Result<Vec<(String, String)>, AgentRuntimeError> {
+        self.entries()
     }
 
     /// Return all key-value pairs in insertion order.
@@ -1678,6 +1793,66 @@ mod tests {
     }
 
     // ── Improvement 12: EvictionPolicy::Oldest ────────────────────────────────
+
+    // ── #3 clear_agent_memory ────────────────────────────────────────────────
+
+    #[test]
+    fn test_clear_agent_memory_removes_all_episodes() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "ep1", 0.5).unwrap();
+        store.add_episode(agent.clone(), "ep2", 0.9).unwrap();
+        store.clear_agent_memory(&agent).unwrap();
+        let items = store.recall(&agent, 10).unwrap();
+        assert!(items.is_empty(), "all memories should be cleared");
+    }
+
+    // ── #13 AgentId::as_str / MemoryId::as_str ───────────────────────────────
+
+    #[test]
+    fn test_agent_id_as_str() {
+        let id = AgentId::new("hello");
+        assert_eq!(id.as_str(), "hello");
+    }
+
+    // ── #15 export/import round trip ─────────────────────────────────────────
+
+    #[test]
+    fn test_export_import_agent_memory_round_trip() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("export-agent");
+        store.add_episode(agent.clone(), "fact1", 0.8).unwrap();
+        store.add_episode(agent.clone(), "fact2", 0.6).unwrap();
+
+        let exported = store.export_agent_memory(&agent).unwrap();
+        assert_eq!(exported.len(), 2);
+
+        let new_store = EpisodicStore::new();
+        new_store.import_agent_memory(&agent, exported).unwrap();
+        let recalled = new_store.recall(&agent, 10).unwrap();
+        assert_eq!(recalled.len(), 2);
+    }
+
+    // ── #19 WorkingMemory::iter ───────────────────────────────────────────────
+
+    #[test]
+    fn test_working_memory_iter_matches_entries() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("a", "1").unwrap();
+        wm.set("b", "2").unwrap();
+        let via_iter = wm.iter().unwrap();
+        let via_entries = wm.entries().unwrap();
+        assert_eq!(via_iter, via_entries);
+    }
+
+    // ── #37 AsRef<str> for AgentId and MemoryId ──────────────────────────────
+
+    #[test]
+    fn test_agent_id_as_ref_str() {
+        let id = AgentId::new("ref-test");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "ref-test");
+    }
 
     #[test]
     fn test_eviction_policy_oldest_evicts_first_inserted() {

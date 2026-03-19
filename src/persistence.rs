@@ -140,6 +140,38 @@ impl PersistenceBackend for FilePersistenceBackend {
     }
 }
 
+impl FilePersistenceBackend {
+    /// List all keys currently stored in the backend.
+    ///
+    /// Returns the readable prefix portion of stored filenames (the part before
+    /// the hash suffix). Useful for backup/restore tooling and debugging.
+    pub async fn list_keys(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let mut entries = tokio::fs::read_dir(self.base_dir.as_ref())
+            .await
+            .map_err(|e| AgentRuntimeError::Persistence(format!("list_keys readdir: {e}")))?;
+
+        let mut keys = Vec::new();
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| AgentRuntimeError::Persistence(format!("list_keys entry: {e}")))?
+        {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.ends_with(".bin") {
+                    if let Some(stem) = name.strip_suffix(".bin") {
+                        // Strip the "-<16hexdigits>" suffix to recover the readable prefix.
+                        if stem.len() > 17 {
+                            let prefix = &stem[..stem.len() - 17]; // 16 hex + 1 dash
+                            keys.push(prefix.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(keys)
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -269,6 +301,20 @@ mod tests {
         assert_eq!(results[0], Some(b"value1".to_vec()));
         assert_eq!(results[1], Some(b"value2".to_vec()));
         assert_eq!(results[2], None);
+    }
+
+    #[tokio::test]
+    async fn test_file_backend_list_keys() {
+        let dir = std::env::temp_dir().join(format!("art_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let _guard = tempdir::Handle { path: dir.clone() };
+        let backend = FilePersistenceBackend::new(&dir);
+
+        backend.save("my-session", b"data1").await.unwrap();
+        backend.save("another-key", b"data2").await.unwrap();
+
+        let keys = backend.list_keys().await.unwrap();
+        assert_eq!(keys.len(), 2);
     }
 
     #[tokio::test]

@@ -68,6 +68,27 @@ impl Message {
             content: content.into(),
         }
     }
+
+    /// Return a reference to the message role.
+    pub fn role(&self) -> &Role {
+        &self.role
+    }
+
+    /// Return the message content as a `&str`.
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+}
+
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Role::System => write!(f, "system"),
+            Role::User => write!(f, "user"),
+            Role::Assistant => write!(f, "assistant"),
+            Role::Tool => write!(f, "tool"),
+        }
+    }
 }
 
 /// A single ReAct step: Thought → Action → Observation.
@@ -85,6 +106,18 @@ pub struct ReActStep {
     /// constructed outside the loop (e.g., in tests).
     #[serde(default)]
     pub step_duration_ms: u64,
+}
+
+impl ReActStep {
+    /// Returns `true` if this step's action is a `FINAL_ANSWER`.
+    pub fn is_final_answer(&self) -> bool {
+        self.action.trim().to_ascii_uppercase().starts_with("FINAL_ANSWER")
+    }
+
+    /// Returns `true` if this step's action is a tool call (not a FINAL_ANSWER).
+    pub fn is_tool_call(&self) -> bool {
+        !self.is_final_answer() && !self.action.trim().is_empty()
+    }
 }
 
 /// Configuration for the ReAct agent loop.
@@ -185,7 +218,7 @@ pub struct ToolSpec {
     /// Human-readable description passed to the model as part of the system prompt.
     pub description: String,
     /// Async handler: receives JSON arguments, returns a future resolving to a JSON result.
-    pub handler: AsyncToolHandler,
+    pub(crate) handler: AsyncToolHandler,
     /// Field names that must be present in the JSON args object.
     /// Empty means no validation is performed.
     pub required_fields: Vec<String>,
@@ -1616,6 +1649,116 @@ mod tests {
     }
 
     // ── Improvement 15: ActionHook ────────────────────────────────────────────
+
+    // ── #2 ReActStep::is_final_answer / is_tool_call ──────────────────────────
+
+    #[test]
+    fn test_react_step_is_final_answer() {
+        let step = ReActStep {
+            thought: "".into(),
+            action: "FINAL_ANSWER done".into(),
+            observation: "".into(),
+            step_duration_ms: 0,
+        };
+        assert!(step.is_final_answer());
+        assert!(!step.is_tool_call());
+    }
+
+    #[test]
+    fn test_react_step_is_tool_call() {
+        let step = ReActStep {
+            thought: "".into(),
+            action: "search {}".into(),
+            observation: "".into(),
+            step_duration_ms: 0,
+        };
+        assert!(!step.is_final_answer());
+        assert!(step.is_tool_call());
+    }
+
+    // ── #6 Role Display ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_role_display() {
+        assert_eq!(Role::System.to_string(), "system");
+        assert_eq!(Role::User.to_string(), "user");
+        assert_eq!(Role::Assistant.to_string(), "assistant");
+        assert_eq!(Role::Tool.to_string(), "tool");
+    }
+
+    // ── #12 Message accessors ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_message_accessors() {
+        let msg = Message::new(Role::User, "hello");
+        assert_eq!(msg.role(), &Role::User);
+        assert_eq!(msg.content(), "hello");
+    }
+
+    // ── #25 Action parse round-trips ──────────────────────────────────────────
+
+    #[test]
+    fn test_action_parse_final_answer_round_trip() {
+        let step = ReActStep {
+            thought: "done".into(),
+            action: "FINAL_ANSWER Paris".into(),
+            observation: "".into(),
+            step_duration_ms: 0,
+        };
+        assert!(step.is_final_answer());
+        let action = Action::parse(&step.action).unwrap();
+        assert!(matches!(action, Action::FinalAnswer(ref s) if s == "Paris"));
+    }
+
+    #[test]
+    fn test_action_parse_tool_call_round_trip() {
+        let step = ReActStep {
+            thought: "searching".into(),
+            action: "search {\"q\":\"hello\"}".into(),
+            observation: "".into(),
+            step_duration_ms: 0,
+        };
+        assert!(step.is_tool_call());
+        let action = Action::parse(&step.action).unwrap();
+        assert!(matches!(action, Action::ToolCall { ref name, .. } if name == "search"));
+    }
+
+    // ── #26 Observer step indices ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_observer_receives_correct_step_indices() {
+        use std::sync::{Arc, Mutex};
+
+        struct IndexCollector(Arc<Mutex<Vec<usize>>>);
+        impl Observer for IndexCollector {
+            fn on_step(&self, step_index: usize, _step: &ReActStep) {
+                self.0.lock().unwrap_or_else(|e| e.into_inner()).push(step_index);
+            }
+        }
+
+        let indices = Arc::new(Mutex::new(Vec::new()));
+        let obs = Arc::new(IndexCollector(Arc::clone(&indices)));
+
+        let config = AgentConfig::new(5, "test");
+        let mut loop_ = ReActLoop::new(config).with_observer(obs as Arc<dyn Observer>);
+        loop_.register_tool(ToolSpec::new("noop", "no-op", |_| serde_json::json!({})));
+
+        let mut call_count = 0;
+        loop_.run("test", |_ctx| {
+            call_count += 1;
+            let count = call_count;
+            async move {
+                if count == 1 {
+                    "Thought: step1\nAction: noop {}".to_string()
+                } else {
+                    "Thought: done\nAction: FINAL_ANSWER ok".to_string()
+                }
+            }
+        }).await.unwrap();
+
+        let collected = indices.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(collected, vec![0, 1], "expected step indices 0 and 1");
+    }
 
     #[tokio::test]
     async fn test_action_hook_blocking_inserts_blocked_observation() {

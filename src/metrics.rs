@@ -13,10 +13,19 @@ use std::sync::{Arc, Mutex};
 
 /// A simple fixed-bucket latency histogram.
 ///
-/// Buckets (upper bound, ms): 1, 5, 10, 50, 100, 500, ∞
+/// Bucket upper bounds are **inclusive** (i.e., a sample of exactly 1 ms falls into bucket 0).
+/// Bucket index mapping:
+/// - 0: ≤ 1 ms
+/// - 1: 2 – 5 ms
+/// - 2: 6 – 10 ms
+/// - 3: 11 – 50 ms
+/// - 4: 51 – 100 ms
+/// - 5: 101 – 500 ms
+/// - 6: > 500 ms
 #[derive(Debug)]
 pub struct LatencyHistogram {
     /// Counts per bucket. Index 0 = ≤1ms, …, index 6 = >500ms.
+    /// Bucket upper bounds are **inclusive**.
     buckets: [AtomicU64; 7],
     total_count: AtomicU64,
     total_sum_ms: AtomicU64,
@@ -85,6 +94,8 @@ impl LatencyHistogram {
 /// integers so the snapshot can be logged, serialised, or diffed without
 /// holding any locks.
 ///
+/// See also [`snapshot`] for a richer snapshot including per-tool and histogram data.
+///
 /// # Example
 /// ```rust
 /// use llm_agent_runtime::metrics::RuntimeMetrics;
@@ -94,7 +105,9 @@ impl LatencyHistogram {
 /// assert_eq!(snap.active_sessions, 0);
 /// assert_eq!(snap.total_sessions, 0);
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+///
+/// [`snapshot`]: RuntimeMetrics::snapshot
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct MetricsSnapshot {
     /// Number of agent sessions currently in progress.
     pub active_sessions: usize,
@@ -114,6 +127,14 @@ pub struct MetricsSnapshot {
     pub per_tool_calls: HashMap<String, u64>,
     /// Per-tool failure counts: `tool_name → failed_calls`.
     pub per_tool_failures: HashMap<String, u64>,
+    /// Step latency histogram bucket counts as `(upper_bound_ms_inclusive, count)`.
+    pub step_latency_buckets: Vec<(u64, u64)>,
+    /// Mean step latency in milliseconds.
+    pub step_latency_mean_ms: f64,
+    /// Per-agent, per-tool call counts: `agent_id → tool_name → count`.
+    pub per_agent_tool_calls: HashMap<String, HashMap<String, u64>>,
+    /// Per-agent, per-tool failure counts: `agent_id → tool_name → count`.
+    pub per_agent_tool_failures: HashMap<String, HashMap<String, u64>>,
 }
 
 /// Shared runtime metrics. Clone the `Arc` to share across threads.
@@ -139,6 +160,10 @@ pub struct RuntimeMetrics {
     per_tool_failures: Mutex<HashMap<String, u64>>,
     /// Per-step latency histogram.
     pub step_latency: LatencyHistogram,
+    /// Per-agent, per-tool call counts.
+    per_agent_tool_calls: Mutex<HashMap<String, HashMap<String, u64>>>,
+    /// Per-agent, per-tool failure counts.
+    per_agent_tool_failures: Mutex<HashMap<String, HashMap<String, u64>>>,
 }
 
 impl Default for RuntimeMetrics {
@@ -154,6 +179,8 @@ impl Default for RuntimeMetrics {
             per_tool_calls: Mutex::new(HashMap::new()),
             per_tool_failures: Mutex::new(HashMap::new()),
             step_latency: LatencyHistogram::default(),
+            per_agent_tool_calls: Mutex::new(HashMap::new()),
+            per_agent_tool_failures: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -235,6 +262,42 @@ impl RuntimeMetrics {
             .unwrap_or_default()
     }
 
+    /// Increment call counter for (agent_id, tool_name).
+    pub fn record_agent_tool_call(&self, agent_id: &str, tool_name: &str) {
+        if let Ok(mut map) = self.per_agent_tool_calls.lock() {
+            *map.entry(agent_id.to_owned())
+                .or_default()
+                .entry(tool_name.to_owned())
+                .or_insert(0) += 1;
+        }
+    }
+
+    /// Increment failure counter for (agent_id, tool_name).
+    pub fn record_agent_tool_failure(&self, agent_id: &str, tool_name: &str) {
+        if let Ok(mut map) = self.per_agent_tool_failures.lock() {
+            *map.entry(agent_id.to_owned())
+                .or_default()
+                .entry(tool_name.to_owned())
+                .or_insert(0) += 1;
+        }
+    }
+
+    /// Snapshot of per-agent, per-tool call counts.
+    pub fn per_agent_tool_calls_snapshot(&self) -> HashMap<String, HashMap<String, u64>> {
+        self.per_agent_tool_calls
+            .lock()
+            .map(|m| m.clone())
+            .unwrap_or_default()
+    }
+
+    /// Snapshot of per-agent, per-tool failure counts.
+    pub fn per_agent_tool_failures_snapshot(&self) -> HashMap<String, HashMap<String, u64>> {
+        self.per_agent_tool_failures
+            .lock()
+            .map(|m| m.clone())
+            .unwrap_or_default()
+    }
+
     /// Capture a complete snapshot of all counters, including per-tool breakdowns.
     ///
     /// This is the preferred alternative to [`to_snapshot`] — it returns a
@@ -252,6 +315,10 @@ impl RuntimeMetrics {
             memory_recall_count: self.memory_recall_count.load(Ordering::Relaxed),
             per_tool_calls: self.per_tool_calls_snapshot(),
             per_tool_failures: self.per_tool_failures_snapshot(),
+            step_latency_buckets: self.step_latency.buckets(),
+            step_latency_mean_ms: self.step_latency.mean_ms(),
+            per_agent_tool_calls: self.per_agent_tool_calls_snapshot(),
+            per_agent_tool_failures: self.per_agent_tool_failures_snapshot(),
         }
     }
 
@@ -275,6 +342,12 @@ impl RuntimeMetrics {
             m.clear();
         }
         if let Ok(mut m) = self.per_tool_failures.lock() {
+            m.clear();
+        }
+        if let Ok(mut m) = self.per_agent_tool_calls.lock() {
+            m.clear();
+        }
+        if let Ok(mut m) = self.per_agent_tool_failures.lock() {
             m.clear();
         }
         self.step_latency.total_count.store(0, Ordering::Relaxed);
@@ -544,5 +617,45 @@ mod tests {
         assert_eq!(snap.total_steps, 0);
         assert!(snap.per_tool_calls.is_empty());
         assert!(snap.per_tool_failures.is_empty());
+    }
+
+    // ── #8 MetricsSnapshot histogram fields ───────────────────────────────────
+
+    #[test]
+    fn test_metrics_snapshot_contains_all_fields() {
+        let m = RuntimeMetrics::new();
+        m.record_step_latency(5);
+        m.record_step_latency(200);
+        let snap = m.snapshot();
+        // Should have 7 buckets
+        assert_eq!(snap.step_latency_buckets.len(), 7);
+        assert!(snap.step_latency_mean_ms > 0.0);
+    }
+
+    // ── #9 per-agent tool call tracking ──────────────────────────────────────
+
+    #[test]
+    fn test_per_agent_tool_call_tracking() {
+        let m = RuntimeMetrics::new();
+        m.record_agent_tool_call("agent-1", "search");
+        m.record_agent_tool_call("agent-1", "search");
+        m.record_agent_tool_call("agent-2", "lookup");
+        m.record_agent_tool_failure("agent-1", "search");
+
+        let calls = m.per_agent_tool_calls_snapshot();
+        assert_eq!(calls.get("agent-1").and_then(|t| t.get("search")).copied(), Some(2));
+        assert_eq!(calls.get("agent-2").and_then(|t| t.get("lookup")).copied(), Some(1));
+
+        let failures = m.per_agent_tool_failures_snapshot();
+        assert_eq!(failures.get("agent-1").and_then(|t| t.get("search")).copied(), Some(1));
+
+        // Also check snapshot includes them
+        let snap = m.snapshot();
+        assert_eq!(snap.per_agent_tool_calls.get("agent-1").and_then(|t| t.get("search")).copied(), Some(2));
+
+        // Reset clears them
+        m.reset();
+        assert!(m.per_agent_tool_calls_snapshot().is_empty());
+        assert!(m.per_agent_tool_failures_snapshot().is_empty());
     }
 }

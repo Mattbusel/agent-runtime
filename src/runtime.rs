@@ -67,8 +67,32 @@ pub struct AgentSession {
 
 impl AgentSession {
     /// Return the number of steps in the session.
+    ///
+    /// Each [`ReActStep`] in `steps` carries a `step_duration_ms` field measuring
+    /// wall-clock time from inference call to observation for that individual step.
+    /// Use this to identify slow steps:
+    /// ```rust,ignore
+    /// for (i, step) in session.steps.iter().enumerate() {
+    ///     println!("step {i}: {}ms", step.step_duration_ms);
+    /// }
+    /// ```
     pub fn step_count(&self) -> usize {
         self.steps.len()
+    }
+
+    /// Return the final answer text from the last step, if available.
+    ///
+    /// Extracts the content after `FINAL_ANSWER` in the last step's `action` field.
+    /// Returns `None` if there are no steps or the last action is not a FINAL_ANSWER.
+    pub fn final_answer(&self) -> Option<String> {
+        let last = self.steps.last()?;
+        let upper = last.action.trim().to_ascii_uppercase();
+        if upper.starts_with("FINAL_ANSWER") {
+            let answer = last.action.trim()["FINAL_ANSWER".len()..].trim().to_owned();
+            Some(answer)
+        } else {
+            None
+        }
     }
 
     /// Persist this session as a checkpoint under `"session:<session_id>"`.
@@ -1205,5 +1229,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(session.step_count(), 1);
+    }
+
+    // ── #1 final_answer() ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_final_answer_extracts_text() {
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![ReActStep {
+                thought: "done".into(),
+                action: "FINAL_ANSWER Paris".into(),
+                observation: "".into(),
+                step_duration_ms: 0,
+            }],
+            memory_hits: 0,
+            graph_lookups: 0,
+            duration_ms: 0,
+            checkpoint_errors: vec![],
+        };
+        assert_eq!(session.final_answer(), Some("Paris".to_string()));
+    }
+
+    #[test]
+    fn test_final_answer_returns_none_without_final_step() {
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![ReActStep {
+                thought: "thinking".into(),
+                action: "search {}".into(),
+                observation: "result".into(),
+                step_duration_ms: 0,
+            }],
+            memory_hits: 0,
+            graph_lookups: 0,
+            duration_ms: 0,
+            checkpoint_errors: vec![],
+        };
+        assert_eq!(session.final_answer(), None);
+
+        let empty_session = AgentSession {
+            session_id: "s2".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![],
+            memory_hits: 0,
+            graph_lookups: 0,
+            duration_ms: 0,
+            checkpoint_errors: vec![],
+        };
+        assert_eq!(empty_session.final_answer(), None);
     }
 }

@@ -239,7 +239,7 @@ async fn main() {
 | `orchestrator` | yes | `CircuitBreaker` with pluggable backends, `RetryPolicy`, `Deduplicator`, `BackpressureGuard` with soft limit, `Pipeline` |
 | `memory` | yes | `EpisodicStore` with `DecayPolicy`, `RecallPolicy::Hybrid`, per-agent capacity; `SemanticStore` with cosine search; `WorkingMemory` LRU |
 | `graph` | yes | `GraphStore` — BFS, DFS, Dijkstra, transitive closure, degree/betweenness centrality, community detection, subgraph, cycle detection |
-| `wasm` | yes | `ReActLoop`, `ToolRegistry`, `ToolSpec`, `parse_react_step`, `AgentConfig` |
+| `wasm` | yes | `ReActLoop` with sync and streaming inference, `ToolRegistry`, `ToolSpec`, `parse_react_step`, `AgentConfig`, observer callbacks, and step-level metrics |
 | `persistence` | no | `PersistenceBackend` trait + `FilePersistenceBackend`; session and per-step checkpointing |
 | `providers` | no | `LlmProvider` async trait |
 | `anthropic` | no | Built-in Anthropic Messages API provider with SSE streaming (implies `providers` + `reqwest`) |

@@ -102,7 +102,11 @@ impl RetryPolicy {
 /// Tracks failure rates and opens when the threshold is exceeded.
 ///
 /// States: `Closed` (normal) → `Open` (fast-fail) → `HalfOpen` (probe).
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Note: `PartialEq` is implemented manually because the `Open` variant
+/// contains `std::time::Instant` which does not implement `Eq`. The manual
+/// implementation compares only the variant discriminant, not the timestamp.
+#[derive(Debug, Clone)]
 pub enum CircuitState {
     /// Circuit is operating normally; requests pass through.
     Closed,
@@ -114,6 +118,19 @@ pub enum CircuitState {
     /// Recovery probe period; the next request will be attempted to test recovery.
     HalfOpen,
 }
+
+impl PartialEq for CircuitState {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (CircuitState::Closed, CircuitState::Closed) => true,
+            (CircuitState::Open { .. }, CircuitState::Open { .. }) => true,
+            (CircuitState::HalfOpen, CircuitState::HalfOpen) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for CircuitState {}
 
 /// Backend for circuit breaker state storage.
 ///
@@ -454,6 +471,43 @@ impl Deduplicator {
         Ok(DeduplicationResult::New)
     }
 
+    /// Check deduplication state for a key with a per-call TTL override.
+    ///
+    /// Marks the key as in-flight if it is new. Ignores the stored TTL and uses
+    /// `ttl` instead for expiry checks.
+    pub fn check(&self, key: &str, ttl: std::time::Duration) -> Result<DeduplicationResult, AgentRuntimeError> {
+        let mut inner = timed_lock(&self.inner, "Deduplicator::check");
+        let now = Instant::now();
+
+        inner.cache.retain(|_, (_, ts)| now.duration_since(*ts) < ttl);
+        inner.in_flight.retain(|_, ts| now.duration_since(*ts) < ttl);
+
+        if let Some((result, _)) = inner.cache.get(key) {
+            return Ok(DeduplicationResult::Cached(result.clone()));
+        }
+
+        if inner.in_flight.contains_key(key) {
+            return Ok(DeduplicationResult::InProgress);
+        }
+
+        inner.in_flight.insert(key.to_owned(), now);
+        Ok(DeduplicationResult::New)
+    }
+
+    /// Check deduplication state for multiple keys at once.
+    ///
+    /// Returns results in the same order as `requests`.
+    /// Each entry is `(key, ttl)` — same signature as `check`.
+    pub fn dedup_many(
+        &self,
+        requests: &[(&str, std::time::Duration)],
+    ) -> Result<Vec<DeduplicationResult>, AgentRuntimeError> {
+        requests
+            .iter()
+            .map(|(key, ttl)| self.check(key, *ttl))
+            .collect()
+    }
+
     /// Complete a request: move from in-flight to cached with the given result.
     pub fn complete(&self, key: &str, result: impl Into<String>) -> Result<(), AgentRuntimeError> {
         let mut inner = timed_lock(&self.inner, "Deduplicator::complete");
@@ -549,6 +603,11 @@ impl BackpressureGuard {
         Ok(())
     }
 
+    /// Return the hard capacity (maximum concurrent slots) configured for this guard.
+    pub fn hard_capacity(&self) -> usize {
+        self.capacity
+    }
+
     /// Return the current depth.
     pub fn depth(&self) -> Result<usize, AgentRuntimeError> {
         let depth = timed_lock(&self.inner, "BackpressureGuard::depth");
@@ -595,21 +654,46 @@ impl std::fmt::Debug for Stage {
     }
 }
 
+/// Error handler callback type for pipeline stage failures.
+type StageErrorHandler = Box<dyn Fn(&str, &str) -> String + Send + Sync>;
+
 /// A composable pipeline that passes a string through a sequence of named stages.
 ///
 /// ## Guarantees
 /// - Stages execute in insertion order
-/// - First stage failure short-circuits remaining stages
+/// - First stage failure short-circuits remaining stages (unless an error handler is set)
 /// - Non-panicking
-#[derive(Debug)]
 pub struct Pipeline {
     stages: Vec<Stage>,
+    error_handler: Option<StageErrorHandler>,
+}
+
+impl std::fmt::Debug for Pipeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pipeline")
+            .field("stages", &self.stages)
+            .field("has_error_handler", &self.error_handler.is_some())
+            .finish()
+    }
 }
 
 impl Pipeline {
     /// Create a new empty pipeline.
     pub fn new() -> Self {
-        Self { stages: Vec::new() }
+        Self { stages: Vec::new(), error_handler: None }
+    }
+
+    /// Attach a recovery callback for stage failures.
+    ///
+    /// When a stage fails, `handler(stage_name, error_message)` is called.
+    /// The returned string becomes the input to the next stage.
+    /// If no handler is set, stage failures propagate as errors.
+    pub fn with_error_handler(
+        mut self,
+        handler: impl Fn(&str, &str) -> String + Send + Sync + 'static,
+    ) -> Self {
+        self.error_handler = Some(Box::new(handler));
+        self
     }
 
     /// Append a stage to the pipeline.
@@ -631,10 +715,17 @@ impl Pipeline {
         let mut current = input;
         for stage in &self.stages {
             tracing::debug!(stage = %stage.name, "running pipeline stage");
-            current = (stage.handler)(current).map_err(|e| {
-                tracing::error!(stage = %stage.name, error = %e, "pipeline stage failed");
-                e
-            })?;
+            match (stage.handler)(current) {
+                Ok(out) => current = out,
+                Err(e) => {
+                    tracing::error!(stage = %stage.name, error = %e, "pipeline stage failed");
+                    if let Some(ref handler) = self.error_handler {
+                        current = handler(&stage.name, &e.to_string());
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
         }
         Ok(current)
     }
@@ -646,10 +737,17 @@ impl Pipeline {
         for (idx, stage) in self.stages.iter().enumerate() {
             let start = std::time::Instant::now();
             tracing::debug!(stage = %stage.name, "running timed pipeline stage");
-            current = (stage.handler)(current).map_err(|e| {
-                tracing::error!(stage = %stage.name, error = %e, "timed pipeline stage failed");
-                e
-            })?;
+            match (stage.handler)(current) {
+                Ok(out) => current = out,
+                Err(e) => {
+                    tracing::error!(stage = %stage.name, error = %e, "timed pipeline stage failed");
+                    if let Some(ref handler) = self.error_handler {
+                        current = handler(&stage.name, &e.to_string());
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
             let duration_ms = start.elapsed().as_millis() as u64;
             stage_timings.push((idx, duration_ms));
         }
@@ -992,6 +1090,53 @@ mod tests {
             result,
             Err(AgentRuntimeError::BackpressureShed { .. })
         ));
+    }
+
+    // ── #4/#31 BackpressureGuard::hard_capacity ───────────────────────────────
+
+    #[test]
+    fn test_backpressure_hard_capacity_matches_new() {
+        let g = BackpressureGuard::new(7).unwrap();
+        assert_eq!(g.hard_capacity(), 7);
+    }
+
+    // ── #10 Pipeline::with_error_handler ──────────────────────────────────────
+
+    #[test]
+    fn test_pipeline_error_handler_recovers_from_stage_failure() {
+        let p = Pipeline::new()
+            .add_stage("fail_stage", |_| {
+                Err(AgentRuntimeError::Orchestration("oops".into()))
+            })
+            .add_stage("append", |s| Ok(format!("{s}-recovered")))
+            .with_error_handler(|stage_name, _err| format!("recovered_from_{stage_name}"));
+        let result = p.run("input".to_string()).unwrap();
+        assert_eq!(result, "recovered_from_fail_stage-recovered");
+    }
+
+    // ── #11/#32 CircuitState PartialEq/Eq ────────────────────────────────────
+
+    #[test]
+    fn test_circuit_state_eq() {
+        assert_eq!(CircuitState::Closed, CircuitState::Closed);
+        assert_eq!(CircuitState::HalfOpen, CircuitState::HalfOpen);
+        assert_eq!(
+            CircuitState::Open { opened_at: std::time::Instant::now() },
+            CircuitState::Open { opened_at: std::time::Instant::now() }
+        );
+        assert_ne!(CircuitState::Closed, CircuitState::HalfOpen);
+        assert_ne!(CircuitState::Closed, CircuitState::Open { opened_at: std::time::Instant::now() });
+    }
+
+    // ── #18 Deduplicator::dedup_many ──────────────────────────────────────────
+
+    #[test]
+    fn test_dedup_many_independent_keys() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        let ttl = Duration::from_secs(60);
+        let results = d.dedup_many(&[("key-a", ttl), ("key-b", ttl), ("key-c", ttl)]).unwrap();
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|r| matches!(r, DeduplicationResult::New)));
     }
 
     // ── Item 14: timed_lock concurrency correctness ───────────────────────────

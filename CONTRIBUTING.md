@@ -66,6 +66,49 @@ fix: handle EOF in stream parser
 docs: update README with usage example
 ```
 
+## Implementing a Custom LlmProvider
+
+Enable the `providers` feature in your `Cargo.toml`:
+
+```toml
+llm-agent-runtime = { version = "*", features = ["providers"] }
+```
+
+Then implement the [`LlmProvider`] trait:
+
+```rust
+use llm_agent_runtime::providers::LlmProvider;
+use llm_agent_runtime::agent::Message;
+use llm_agent_runtime::error::AgentRuntimeError;
+
+pub struct MyProvider;
+
+#[async_trait::async_trait]
+impl LlmProvider for MyProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        model: &str,
+    ) -> Result<String, AgentRuntimeError> {
+        // Call your LLM API here and return the assistant response text.
+        todo!()
+    }
+}
+```
+
+Pass your provider to `AgentRuntime::builder()`:
+
+```rust
+use llm_agent_runtime::prelude::*;
+
+let runtime = AgentRuntime::builder()
+    .with_agent_config(AgentConfig::new(10, "my-model"))
+    .build();
+```
+
+The `LlmProvider` trait is object-safe — you can store `Arc<dyn LlmProvider>`
+and swap implementations at runtime without recompiling the rest of your code.
+
 ## License
 
 By contributing you agree that your contributions will be licensed under the

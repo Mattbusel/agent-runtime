@@ -54,6 +54,17 @@ impl EntityId {
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
+
+    /// Return the inner ID string as a `&str`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for EntityId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for EntityId {
@@ -806,6 +817,20 @@ impl GraphStore {
         Ok(has_cycle)
     }
 
+    /// Return `true` if there is any path from `from` to `to`.
+    ///
+    /// Both nodes must exist or returns `Err`. Uses BFS internally.
+    /// Returns `Ok(false)` if nodes exist but are not connected.
+    pub fn path_exists(&self, from: &str, to: &str) -> Result<bool, AgentRuntimeError> {
+        let from_id = EntityId::new(from);
+        let to_id = EntityId::new(to);
+        match self.shortest_path(&from_id, &to_id) {
+            Ok(Some(_)) => Ok(true),
+            Ok(None) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// BFS limited by maximum depth and maximum node count.
     ///
     /// Returns the subset of nodes visited within those limits (including start).
@@ -1512,6 +1537,44 @@ mod tests {
         assert!(visited.contains(&EntityId::new("a")));
         assert!(visited.contains(&EntityId::new("b")));
         assert!(!visited.contains(&EntityId::new("c")), "c is at depth 2, should not be visited");
+    }
+
+    // ── #5/#35 path_exists ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_path_exists_returns_true() {
+        let g = make_graph();
+        add(&g, "a");
+        add(&g, "b");
+        add(&g, "c");
+        link(&g, "a", "b");
+        link(&g, "b", "c");
+        assert_eq!(g.path_exists("a", "c").unwrap(), true);
+    }
+
+    #[test]
+    fn test_path_exists_returns_false() {
+        let g = make_graph();
+        add(&g, "a");
+        add(&g, "b");
+        assert_eq!(g.path_exists("a", "b").unwrap(), false);
+    }
+
+    // ── #13 EntityId::as_str ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_entity_id_as_str() {
+        let id = EntityId::new("my-entity");
+        assert_eq!(id.as_str(), "my-entity");
+    }
+
+    // ── #38 EntityId AsRef<str> ───────────────────────────────────────────────
+
+    #[test]
+    fn test_entity_id_as_ref_str() {
+        let id = EntityId::new("asref-test");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "asref-test");
     }
 
     #[test]

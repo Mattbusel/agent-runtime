@@ -78,6 +78,14 @@ required-features = ["memory"]
 name = "multi_turn_chat"
 required-features = ["memory"]
 
+
+[[example]]
+name = "streaming_inference"
+
+[[example]]
+name = "graph_query_agent"
+required-features = ["graph"]
+
 [dev-dependencies]
 # tokio-test: async test utilities
 tokio-test = "0.4"
