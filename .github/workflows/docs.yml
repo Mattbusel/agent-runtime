@@ -26,8 +26,7 @@ jobs:
         run: |
           cargo doc \
             --no-deps \
-            --all-features \
-            --document-private-items=false
+            --all-features
         env:
           RUSTDOCFLAGS: "--enable-index-page -Zunstable-options --default-theme=ayu"
 
