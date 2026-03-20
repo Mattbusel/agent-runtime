@@ -4704,4 +4704,41 @@ mod tests {
         let reg = ToolRegistry::new();
         assert_eq!(reg.max_description_bytes(), 0);
     }
+
+    // ── Round 50: has_tool_with_description_containing ────────────────────────
+
+    #[test]
+    fn test_has_tool_with_description_containing_true_when_keyword_found() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("search", "search the web", |_| serde_json::json!({})));
+        assert!(reg.has_tool_with_description_containing("web"));
+    }
+
+    #[test]
+    fn test_has_tool_with_description_containing_false_when_keyword_absent() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("search", "search the web", |_| serde_json::json!({})));
+        assert!(!reg.has_tool_with_description_containing("database"));
+    }
+
+    #[test]
+    fn test_has_tool_with_description_containing_false_for_empty_registry() {
+        let reg = ToolRegistry::new();
+        assert!(!reg.has_tool_with_description_containing("anything"));
+    }
+
+    // ── Round 47: system_prompt_word_count ────────────────────────────────────
+
+    #[test]
+    fn test_system_prompt_word_count_counts_words() {
+        let cfg = AgentConfig::new(10, "m")
+            .with_system_prompt("You are a helpful AI agent.");
+        assert_eq!(cfg.system_prompt_word_count(), 6);
+    }
+
+    #[test]
+    fn test_system_prompt_word_count_zero_for_empty_prompt() {
+        let cfg = AgentConfig::new(10, "m").with_system_prompt("");
+        assert_eq!(cfg.system_prompt_word_count(), 0);
+    }
 }

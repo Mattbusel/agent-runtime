@@ -1343,6 +1343,24 @@ impl AgentSession {
             .collect()
     }
 
+    /// Return references to steps whose observation contains `substr`.
+    ///
+    /// Case-sensitive substring match.  Returns an empty `Vec` when no step
+    /// matches or the session is empty.
+    pub fn steps_matching_observation<'a>(&'a self, substr: &str) -> Vec<&'a ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.observation.contains(substr))
+            .collect()
+    }
+
+    /// Return the byte lengths of each step's action field, in order.
+    ///
+    /// Returns an empty `Vec` for an empty session.
+    pub fn step_action_lengths(&self) -> Vec<usize> {
+        self.steps.iter().map(|s| s.action.len()).collect()
+    }
+
     /// Return the 0-based index of the first `FINAL_ANSWER` step, or `None` if
     /// no such step exists in the session.
     ///

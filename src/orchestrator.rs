@@ -2075,6 +2075,21 @@ impl Pipeline {
         self.stages.iter().any(|s| s.name.contains(substr))
     }
 
+    /// Return the names of all stages whose name contains `substr`.
+    ///
+    /// Complements [`has_stage_with_name_containing`] by returning the full
+    /// list rather than just a boolean.  Returns an empty `Vec` when no stage
+    /// matches or the pipeline is empty.
+    ///
+    /// [`has_stage_with_name_containing`]: Pipeline::has_stage_with_name_containing
+    pub fn stage_names_containing<'a>(&'a self, substr: &str) -> Vec<&'a str> {
+        self.stages
+            .iter()
+            .filter(|s| s.name.contains(substr))
+            .map(|s| s.name.as_str())
+            .collect()
+    }
+
     /// Return the total number of bytes across all stage name strings.
     ///
     /// Useful for estimating the overhead of storing pipeline metadata.
@@ -4318,5 +4333,55 @@ mod tests {
     fn test_stage_count_above_name_bytes_zero_for_empty_pipeline() {
         let p = Pipeline::new();
         assert_eq!(p.stage_count_above_name_bytes(0), 0);
+    }
+
+    // ── Round 47: contains_stage_with_prefix ──────────────────────────────────
+
+    #[test]
+    fn test_contains_stage_with_prefix_true_when_present() {
+        let p = Pipeline::new()
+            .add_stage("validate_input", |s: String| Ok(s))
+            .add_stage("transform_data", |s: String| Ok(s));
+        assert!(p.contains_stage_with_prefix("validate"));
+    }
+
+    #[test]
+    fn test_contains_stage_with_prefix_false_when_absent() {
+        let p = Pipeline::new().add_stage("stage_a", |s: String| Ok(s));
+        assert!(!p.contains_stage_with_prefix("missing"));
+    }
+
+    #[test]
+    fn test_contains_stage_with_prefix_false_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(!p.contains_stage_with_prefix("any"));
+    }
+
+    // ── Round 50: is_bounded, remaining_wait_budget_ms ────────────────────────
+
+    #[test]
+    fn test_retry_policy_is_bounded_true_for_normal_policy() {
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        assert!(p.is_bounded());
+    }
+
+    #[test]
+    fn test_retry_policy_is_bounded_true_for_none_policy() {
+        let p = RetryPolicy::none();
+        assert!(p.is_bounded());
+    }
+
+    #[test]
+    fn test_retry_policy_remaining_wait_budget_full_at_zero_attempts() {
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        // total budget = 3 * 100 = 300, no attempts done → remaining = 300
+        assert_eq!(p.remaining_wait_budget_ms(0), 300);
+    }
+
+    #[test]
+    fn test_retry_policy_remaining_wait_budget_decreases_with_attempts() {
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        // After 1 attempt: delay_sum_ms(1) = 100, remaining = 300 - 100 = 200
+        assert_eq!(p.remaining_wait_budget_ms(1), 200);
     }
 }

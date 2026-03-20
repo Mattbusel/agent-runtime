@@ -2438,6 +2438,14 @@ impl EpisodicStore {
         Ok(pairs.into_iter().map(|(id, _)| id).collect())
     }
 
+    /// Return the number of distinct agents that have at least one episode.
+    ///
+    /// Returns `0` for an empty store.
+    pub fn unique_agents_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::unique_agents_count");
+        Ok(inner.items.len())
+    }
+
     /// Return all episodes for `agent_id` whose content has at least `min_words`
     /// whitespace-delimited words.
     ///
@@ -3719,6 +3727,21 @@ impl WorkingMemory {
             .values()
             .max_by_key(|v| v.len())
             .map(|v| v.clone()))
+    }
+
+    /// Return all `(key, value)` pairs sorted alphabetically by key.
+    ///
+    /// Provides a stable, deterministic view of the store contents.
+    /// Returns an empty `Vec` for an empty store.
+    pub fn key_value_pairs_sorted(&self) -> Result<Vec<(String, String)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::key_value_pairs_sorted");
+        let mut pairs: Vec<(String, String)> = inner
+            .map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        Ok(pairs)
     }
 
     /// Return all `(key, value)` pairs whose key starts with `prefix`.
@@ -9011,5 +9034,82 @@ mod tests {
     fn test_value_count_above_bytes_zero_for_empty_store() {
         let wm = WorkingMemory::new(10).unwrap();
         assert_eq!(wm.value_count_above_bytes(0).unwrap(), 0);
+    }
+
+    // ── Round 47: most_important_episode, count_keys_above_bytes ──────────────
+
+    #[test]
+    fn test_most_important_episode_returns_highest_importance() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r47-imp-a");
+        store.add_episode(agent.clone(), "low", 0.2).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        let result = store.most_important_episode(&agent).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().content, "high");
+    }
+
+    #[test]
+    fn test_most_important_episode_returns_none_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        assert!(store.most_important_episode(&AgentId::new("nobody-r47")).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_count_keys_above_bytes_counts_long_keys() {
+        let wm = WorkingMemory::new(100).unwrap();
+        wm.set("ab", "v").unwrap();       // key len=2
+        wm.set("abcdef", "v").unwrap();   // key len=6
+        assert_eq!(wm.count_keys_above_bytes(3).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_count_keys_above_bytes_zero_for_empty_store() {
+        let wm = WorkingMemory::new(100).unwrap();
+        assert_eq!(wm.count_keys_above_bytes(0).unwrap(), 0);
+    }
+
+    // ── Round 50: most_tagged_episode, tag_frequency, agents_sorted_by_episode_count,
+    //              values_sorted ───────────────────────────────────────────────
+
+    #[test]
+    fn test_most_tagged_episode_returns_episode_with_most_tags() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r50-mte-a");
+        store
+            .add_episode_with_tags(agent.clone(), "many", 0.5, vec!["a".into(), "b".into(), "c".into()])
+            .unwrap();
+        store
+            .add_episode_with_tags(agent.clone(), "few", 0.5, vec!["a".into()])
+            .unwrap();
+        let result = store.most_tagged_episode(&agent).unwrap().unwrap();
+        assert_eq!(result.content, "many");
+    }
+
+    #[test]
+    fn test_most_tagged_episode_none_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        assert!(store.most_tagged_episode(&AgentId::new("nobody-r50")).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_tag_frequency_counts_each_tag() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r50-tf-a");
+        store
+            .add_episode_with_tags(agent.clone(), "e1", 0.5, vec!["x".into(), "y".into()])
+            .unwrap();
+        store
+            .add_episode_with_tags(agent.clone(), "e2", 0.5, vec!["x".into()])
+            .unwrap();
+        let freq = store.tag_frequency(&agent).unwrap();
+        assert_eq!(freq["x"], 2);
+        assert_eq!(freq["y"], 1);
+    }
+
+    #[test]
+    fn test_tag_frequency_empty_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        assert!(store.tag_frequency(&AgentId::new("nobody-r50-tf")).unwrap().is_empty());
     }
 }

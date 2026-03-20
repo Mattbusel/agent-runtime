@@ -3142,6 +3142,37 @@ impl GraphStore {
         Ok(inner.adjacency.get(entity_id).map_or(0, |rels| rels.len()))
     }
 
+    /// Return all unique entity labels in alphabetical order.
+    ///
+    /// Deduplicates labels so each label appears only once.
+    /// Returns an empty `Vec` for an empty graph.
+    pub fn entity_labels_sorted(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entity_labels_sorted");
+        let mut labels: Vec<String> = inner
+            .entities
+            .values()
+            .map(|e| e.label.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        labels.sort_unstable();
+        Ok(labels)
+    }
+
+    /// Return the number of unique relationship (edge) types in the graph.
+    ///
+    /// Counts distinct `kind` values across all relationships.
+    /// Returns `0` for an empty graph.
+    pub fn relationship_type_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::relationship_type_count");
+        let kinds: std::collections::HashSet<&str> = inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter().map(|r| r.kind.as_str()))
+            .collect();
+        Ok(kinds.len())
+    }
+
     /// Return all entities whose out-degree is at least `min_degree`.
     ///
     /// Entities with no outgoing edges have an out-degree of 0 and are
@@ -6698,5 +6729,81 @@ mod tests {
         g.add_entity(Entity::new("lone", "N")).unwrap();
         let id = EntityId("lone".to_string());
         assert_eq!(g.entity_neighbor_count(&id).unwrap(), 0);
+    }
+
+    // ── Round 47: entity_by_label, distinct_relationship_kind_count ────────────
+
+    #[test]
+    fn test_entity_by_label_returns_matching_entity() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Person")).unwrap();
+        let result = g.entity_by_label("Person").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().id.as_str(), "a");
+    }
+
+    #[test]
+    fn test_entity_by_label_returns_none_when_not_found() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Node")).unwrap();
+        assert!(g.entity_by_label("Missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_distinct_relationship_kind_count_counts_unique_kinds() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "FRIEND", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "ENEMY", 1.0)).unwrap();
+        assert_eq!(g.distinct_relationship_kind_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_distinct_relationship_kind_count_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.distinct_relationship_kind_count().unwrap(), 0);
+    }
+
+    // ── Round 50: weight_above_threshold_ratio, entities_sorted_by_out_degree ──
+
+    #[test]
+    fn test_weight_above_threshold_ratio_returns_correct_fraction() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "E", 0.8)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "E", 0.3)).unwrap();
+        // 1 out of 2 relationships has weight > 0.5
+        let ratio = g.weight_above_threshold_ratio(0.5).unwrap();
+        assert!((ratio - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_weight_above_threshold_ratio_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.weight_above_threshold_ratio(0.5).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_entities_sorted_by_out_degree_most_connected_first() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("hub", "N")).unwrap();
+        g.add_entity(Entity::new("leaf", "N")).unwrap();
+        g.add_entity(Entity::new("mid", "N")).unwrap();
+        g.add_relationship(Relationship::new("hub", "leaf", "E", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("hub", "mid", "E", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("mid", "leaf", "E", 1.0)).unwrap();
+        let sorted = g.entities_sorted_by_out_degree().unwrap();
+        assert_eq!(sorted[0].id.as_str(), "hub"); // out-degree 2
+        assert_eq!(sorted[1].id.as_str(), "mid"); // out-degree 1
+    }
+
+    #[test]
+    fn test_entities_sorted_by_out_degree_empty_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(g.entities_sorted_by_out_degree().unwrap().is_empty());
     }
 }

@@ -1511,6 +1511,17 @@ impl RuntimeMetrics {
         self.failed_tool_calls() > 0
     }
 
+    /// Return tool names sorted by total call count in descending order.
+    ///
+    /// The highest-called tool appears first.  Ties are broken alphabetically.
+    /// Returns an empty `Vec` when no tools have been called.
+    pub fn tool_names_by_call_count(&self) -> Vec<String> {
+        let snap = self.per_tool_calls_snapshot();
+        let mut pairs: Vec<(String, u64)> = snap.into_iter().collect();
+        pairs.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        pairs.into_iter().map(|(name, _)| name).collect()
+    }
+
     /// Return the average number of memory recalls per recorded step.
     ///
     /// Computed as `memory_recall_count / total_steps`.  Returns `0.0`
@@ -3793,5 +3804,49 @@ mod tests {
         let m = RuntimeMetrics::new();
         m.record_tool_call("search");
         assert!(!m.has_failed_tools());
+    }
+
+    // ── Round 47: distinct_tool_count ─────────────────────────────────────────
+
+    #[test]
+    fn test_distinct_tool_count_reflects_unique_tools() {
+        let snap = MetricsSnapshot {
+            per_tool_calls: [
+                ("tool_a".to_string(), 3),
+                ("tool_b".to_string(), 1),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        assert_eq!(snap.distinct_tool_count(), 2);
+    }
+
+    #[test]
+    fn test_distinct_tool_count_zero_for_empty_snapshot() {
+        let snap = MetricsSnapshot::default();
+        assert_eq!(snap.distinct_tool_count(), 0);
+    }
+
+    // ── Round 50: tools_with_zero_failures, tool_call_imbalance ───────────────
+
+    #[test]
+    fn test_tools_with_zero_failures_returns_tools_without_failures() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        m.record_tool_call("lookup");
+        m.record_tool_failure("search");
+        let snap = m.snapshot();
+        let zero_fail = snap.tools_with_zero_failures();
+        assert_eq!(zero_fail, vec!["lookup"]);
+    }
+
+    #[test]
+    fn test_tools_with_zero_failures_empty_when_all_have_failures() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("a");
+        m.record_tool_failure("a");
+        let snap = m.snapshot();
+        assert!(snap.tools_with_zero_failures().is_empty());
     }
 }

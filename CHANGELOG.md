@@ -11,6 +11,22 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.66.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::total_thought_bytes`** — sum of all thought string byte lengths.
+- **`AgentSession::total_observation_bytes`** — sum of all observation string byte lengths.
+- **`GraphStore::entity_by_label`** — first entity with an exact label match.
+- **`GraphStore::distinct_relationship_kind_count`** — number of unique relationship types.
+- **`EpisodicStore::most_important_episode`** — episode with the highest importance score.
+- **`WorkingMemory::count_keys_above_bytes`** — keys with byte length above a threshold.
+- **`MetricsSnapshot::distinct_tool_count`** — number of distinct tools with recorded calls.
+- **`Pipeline::contains_stage_with_prefix`** — predicate: any stage name starts with prefix.
+- **`AgentConfig::system_prompt_word_count`** — word count of the system prompt string.
+
+---
+
 ## [1.65.0] - 2026-03-20
 
 ### Added
