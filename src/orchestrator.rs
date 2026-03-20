@@ -631,6 +631,14 @@ impl CircuitBreaker {
         failures >= self.threshold
     }
 
+    /// Return the number of additional failures needed to open the circuit.
+    ///
+    /// Returns `0` when the circuit is already at or beyond threshold.
+    pub fn failures_until_open(&self) -> u32 {
+        let failures = self.backend.get_failures(&self.service);
+        self.threshold.saturating_sub(failures)
+    }
+
     /// Return the configured recovery window duration.
     ///
     /// After the circuit has been `Open` for this long, it transitions to
@@ -2694,6 +2702,38 @@ mod tests {
         assert_eq!(result, "HELLO");
     }
 
+    // ── Round 21: CircuitBreaker::is_at_threshold, BackpressureGuard::headroom_ratio ──
+
+    #[test]
+    fn test_circuit_breaker_is_at_threshold_false_initially() {
+        let cb = CircuitBreaker::new("svc", 3, std::time::Duration::from_secs(10)).unwrap();
+        assert!(!cb.is_at_threshold());
+    }
+
+    #[test]
+    fn test_circuit_breaker_is_at_threshold_true_when_failures_reach_threshold() {
+        let cb = CircuitBreaker::new("svc-t", 2, std::time::Duration::from_secs(10)).unwrap();
+        cb.record_failure();
+        assert!(!cb.is_at_threshold());
+        cb.record_failure();
+        assert!(cb.is_at_threshold());
+    }
+
+    #[test]
+    fn test_backpressure_headroom_ratio_one_when_empty() {
+        let g = BackpressureGuard::new(10).unwrap();
+        let ratio = g.headroom_ratio().unwrap();
+        assert!((ratio - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_backpressure_headroom_ratio_decreases_on_acquire() {
+        let g = BackpressureGuard::new(4).unwrap();
+        g.try_acquire().unwrap(); // 1/4 used → headroom = 3/4
+        let ratio = g.headroom_ratio().unwrap();
+        assert!((ratio - 0.75).abs() < 1e-9);
+    }
+
     // ── Round 17: Pipeline first/last/stage_index, BackpressureGuard is_empty/available ──
 
     #[test]
@@ -2774,33 +2814,14 @@ mod tests {
         assert!(!d.evict_oldest().unwrap());
     }
 
-    // ── Round 17: CircuitBreaker::is_at_threshold / BackpressureGuard::headroom_ratio
+    // ── Round 17: CircuitBreaker::is_at_threshold three-failure variant ──────
 
     #[test]
-    fn test_circuit_breaker_is_at_threshold_false_initially() {
-        let cb = CircuitBreaker::new("svc", 3, std::time::Duration::from_secs(60)).unwrap();
-        assert!(!cb.is_at_threshold());
-    }
-
-    #[test]
-    fn test_circuit_breaker_is_at_threshold_true_after_threshold_failures() {
-        let cb = CircuitBreaker::new("svc-t", 3, std::time::Duration::from_secs(60)).unwrap();
+    fn test_circuit_breaker_is_at_threshold_true_after_three_failures() {
+        let cb = CircuitBreaker::new("svc-3", 3, std::time::Duration::from_secs(60)).unwrap();
         cb.record_failure();
         cb.record_failure();
         cb.record_failure();
         assert!(cb.is_at_threshold());
-    }
-
-    #[test]
-    fn test_backpressure_headroom_ratio_one_when_empty() {
-        let g = BackpressureGuard::new(4).unwrap();
-        assert!((g.headroom_ratio().unwrap() - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_backpressure_headroom_ratio_decreases_on_acquire() {
-        let g = BackpressureGuard::new(4).unwrap();
-        g.try_acquire().unwrap();
-        assert!((g.headroom_ratio().unwrap() - 0.75).abs() < 1e-9);
     }
 }
