@@ -1067,6 +1067,39 @@ impl EpisodicStore {
         Ok(count)
     }
 
+    /// Return the number of episodes for `agent_id` that carry the given tag.
+    pub fn count_episodes_with_tag(
+        &self,
+        agent_id: &AgentId,
+        tag: &str,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::count_episodes_with_tag");
+        let count = inner
+            .items
+            .get(agent_id)
+            .map_or(0, |items| items.iter().filter(|i| i.has_tag(tag)).count());
+        Ok(count)
+    }
+
+    /// Return the content strings of all episodes for `agent_id` whose content contains `substring`.
+    pub fn episodes_with_content(
+        &self,
+        agent_id: &AgentId,
+        substring: &str,
+    ) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episodes_with_content");
+        let items = inner
+            .items
+            .get(agent_id)
+            .map_or_else(Vec::new, |v| {
+                v.iter()
+                    .filter(|i| i.content.contains(substring))
+                    .map(|i| i.content.clone())
+                    .collect()
+            });
+        Ok(items)
+    }
+
     /// Return the total byte length of all episode content strings for `agent_id`.
     ///
     /// Returns `0` if the agent has no stored episodes.
@@ -2082,6 +2115,20 @@ impl SemanticStore {
         Ok(tags.into_iter().collect())
     }
 
+    /// Return the tag that appears most often across all entries.
+    ///
+    /// Returns `None` if there are no tagged entries.
+    pub fn most_common_tag(&self) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::most_common_tag");
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for entry in &inner.entries {
+            for tag in &entry.tags {
+                *counts.entry(tag.as_str()).or_insert(0) += 1;
+            }
+        }
+        Ok(counts.into_iter().max_by_key(|(_, c)| *c).map(|(t, _)| t.to_string()))
+    }
+
     /// Return the keys of all entries that have the given tag.
     pub fn keys_for_tag(&self, tag: &str) -> Result<Vec<String>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::keys_for_tag");
@@ -2931,6 +2978,18 @@ impl WorkingMemory {
             .values()
             .max_by_key(|v| v.len())
             .map(|v| v.clone()))
+    }
+
+    /// Return all `(key, value)` pairs whose key starts with `prefix`.
+    pub fn pairs_starting_with(&self, prefix: &str) -> Result<Vec<(String, String)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::pairs_starting_with");
+        let pairs = inner
+            .map
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        Ok(pairs)
     }
 
     /// Return the number of keys that start with the given prefix.
@@ -6613,5 +6672,55 @@ mod tests {
         let store = SemanticStore::new();
         store.store("k", "v", vec!["rust".to_string()]).unwrap();
         assert!(store.keys_for_tag("missing").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_count_episodes_with_tag_returns_correct_count() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode_with_tags(agent.clone(), "e1", 0.5, vec!["ai".to_string()]).unwrap();
+        store.add_episode_with_tags(agent.clone(), "e2", 0.5, vec!["ai".to_string(), "ml".to_string()]).unwrap();
+        store.add_episode_with_tags(agent.clone(), "e3", 0.5, vec!["ml".to_string()]).unwrap();
+        assert_eq!(store.count_episodes_with_tag(&agent, "ai").unwrap(), 2);
+        assert_eq!(store.count_episodes_with_tag(&agent, "ml").unwrap(), 2);
+    }
+
+    #[test]
+    fn test_episodes_with_content_returns_matching_content() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "rust is great", 0.5).unwrap();
+        store.add_episode(agent.clone(), "python is fun", 0.5).unwrap();
+        store.add_episode(agent.clone(), "rust and python", 0.5).unwrap();
+        let matches = store.episodes_with_content(&agent, "rust").unwrap();
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn test_semantic_store_most_common_tag_returns_most_frequent() {
+        let store = SemanticStore::new();
+        store.store("k1", "v1", vec!["a".to_string(), "b".to_string()]).unwrap();
+        store.store("k2", "v2", vec!["a".to_string()]).unwrap();
+        store.store("k3", "v3", vec!["b".to_string()]).unwrap();
+        // "a" appears 2 times, "b" appears 2 times - either is valid
+        let tag = store.most_common_tag().unwrap();
+        assert!(tag.is_some());
+    }
+
+    #[test]
+    fn test_semantic_store_most_common_tag_empty_returns_none() {
+        let store = SemanticStore::new();
+        assert!(store.most_common_tag().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_working_memory_pairs_starting_with_returns_matching_pairs() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("user:name", "alice").unwrap();
+        wm.set("user:age", "30").unwrap();
+        wm.set("sys:mode", "prod").unwrap();
+        let pairs = wm.pairs_starting_with("user:").unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.iter().all(|(k, _)| k.starts_with("user:")));
     }
 }

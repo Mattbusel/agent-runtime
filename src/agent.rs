@@ -1182,6 +1182,16 @@ impl ToolRegistry {
         self.tools.clear();
     }
 
+    /// Return the description of the tool with the longest description string.
+    ///
+    /// Returns `None` if the registry is empty.
+    pub fn longest_description(&self) -> Option<&str> {
+        self.tools
+            .values()
+            .max_by_key(|s| s.description.len())
+            .map(|s| s.description.as_str())
+    }
+
     /// Return a sorted list of all tool descriptions.
     pub fn all_descriptions(&self) -> Vec<&str> {
         let mut descs: Vec<&str> = self.tools.values().map(|s| s.description.as_str()).collect();
@@ -3664,5 +3674,19 @@ mod tests {
     fn test_all_descriptions_empty_registry_returns_empty() {
         let reg = ToolRegistry::new();
         assert!(reg.all_descriptions().is_empty());
+    }
+
+    #[test]
+    fn test_longest_description_returns_longest() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "short", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("t2", "a much longer description here", |_| serde_json::json!({})));
+        assert_eq!(reg.longest_description(), Some("a much longer description here"));
+    }
+
+    #[test]
+    fn test_longest_description_empty_registry_returns_none() {
+        let reg = ToolRegistry::new();
+        assert!(reg.longest_description().is_none());
     }
 }

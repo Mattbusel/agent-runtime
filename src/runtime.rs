@@ -792,6 +792,16 @@ impl AgentSession {
         counts.into_iter().max_by_key(|(_, c)| *c).map(|(a, _)| a)
     }
 
+    /// Return the number of steps whose action string matches `action` exactly.
+    pub fn count_steps_with_action(&self, action: &str) -> usize {
+        self.steps.iter().filter(|s| s.action == action).count()
+    }
+
+    /// Return the number of steps whose thought contains `substring`.
+    pub fn thought_contains_count(&self, substring: &str) -> usize {
+        self.steps.iter().filter(|s| s.thought.contains(substring)).count()
+    }
+
     /// Return the fraction of steps that had a tool failure observation.
     ///
     /// Computed as `failed_tool_call_count / step_count`.  Returns `0.0` for
@@ -3951,5 +3961,31 @@ mod tests {
     fn test_most_common_action_none_for_empty_session() {
         let session = make_session(vec![], 0);
         assert!(session.most_common_action().is_none());
+    }
+
+    #[test]
+    fn test_count_steps_with_action_counts_exact_matches() {
+        let steps = vec![
+            make_step("t", "search", "o"),
+            make_step("t", "search", "o"),
+            make_step("t", "other", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.count_steps_with_action("search"), 2);
+        assert_eq!(session.count_steps_with_action("other"), 1);
+        assert_eq!(session.count_steps_with_action("missing"), 0);
+    }
+
+    #[test]
+    fn test_thought_contains_count_counts_matching_steps() {
+        let steps = vec![
+            make_step("search for rust", "a", "o"),
+            make_step("think about python", "b", "o"),
+            make_step("rust is great", "c", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.thought_contains_count("rust"), 2);
+        assert_eq!(session.thought_contains_count("python"), 1);
+        assert_eq!(session.thought_contains_count("java"), 0);
     }
 }

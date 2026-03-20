@@ -1113,6 +1113,11 @@ impl RuntimeMetrics {
         pairs
     }
 
+    /// Return the sum of all recorded step latencies in milliseconds.
+    pub fn total_step_latency_ms(&self) -> u64 {
+        self.step_latency.sum_ms()
+    }
+
     /// Capture a snapshot of global counters as plain integers.
     ///
     /// Returns `(active_sessions, total_sessions, total_steps,
@@ -2584,5 +2589,19 @@ mod tests {
     fn test_metrics_snapshot_tool_diversity_empty_returns_zero() {
         let snap = MetricsSnapshot::default();
         assert_eq!(snap.tool_diversity(), 0);
+    }
+
+    #[test]
+    fn test_runtime_metrics_total_step_latency_ms_sums_recorded_latencies() {
+        let m = RuntimeMetrics::new();
+        m.record_step_latency(100);
+        m.record_step_latency(200);
+        assert_eq!(m.total_step_latency_ms(), 300);
+    }
+
+    #[test]
+    fn test_runtime_metrics_total_step_latency_ms_zero_when_empty() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.total_step_latency_ms(), 0);
     }
 }

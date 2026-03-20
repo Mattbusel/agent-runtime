@@ -365,6 +365,26 @@ impl GraphStore {
         Ok(inner.adjacency.get(id).map_or(0, |v| v.len()))
     }
 
+    /// Return the count of entities that have no outgoing edges (sink nodes).
+    pub fn sink_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::sink_count");
+        let count = inner
+            .entities
+            .keys()
+            .filter(|id| inner.adjacency.get(*id).map_or(true, |v| v.is_empty()))
+            .count();
+        Ok(count)
+    }
+
+    /// Return `true` if any relationship is a self-loop (`from == to`).
+    pub fn has_self_loops(&self) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::has_self_loops");
+        let found = inner.adjacency.iter().any(|(from, rels)| {
+            rels.iter().any(|r| &r.to == from)
+        });
+        Ok(found)
+    }
+
     /// Return the count of entities that have no incoming edges (source nodes).
     pub fn source_count(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "GraphStore::source_count");
@@ -4707,5 +4727,33 @@ mod tests {
         g.add_entity(Entity::new("x", "Node")).unwrap();
         g.add_entity(Entity::new("y", "Node")).unwrap();
         assert_eq!(g.source_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_sink_count_returns_nodes_with_no_outgoing_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Node")).unwrap();
+        g.add_entity(Entity::new("b", "Node")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        // b has no outgoing edges → sink
+        assert_eq!(g.sink_count().unwrap(), 1);
+        assert_eq!(g.source_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_has_self_loops_true_when_self_loop_exists() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Node")).unwrap();
+        g.add_relationship(Relationship::new("a", "a", "self", 1.0)).unwrap();
+        assert!(g.has_self_loops().unwrap());
+    }
+
+    #[test]
+    fn test_has_self_loops_false_when_no_self_loops() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Node")).unwrap();
+        g.add_entity(Entity::new("b", "Node")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        assert!(!g.has_self_loops().unwrap());
     }
 }

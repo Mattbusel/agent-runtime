@@ -11,6 +11,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.53.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::count_steps_with_action`** — count of steps with an exact action match.
+- **`AgentSession::thought_contains_count`** — count of steps whose thought contains a substring.
+- **`EpisodicStore::count_episodes_with_tag`** — count of episodes for an agent with a given tag.
+- **`EpisodicStore::episodes_with_content`** — content strings of episodes matching a substring.
+- **`SemanticStore::most_common_tag`** — the tag appearing most often across all entries.
+- **`WorkingMemory::pairs_starting_with`** — `(key, value)` pairs for keys with a given prefix.
+- **`RuntimeMetrics::total_step_latency_ms`** — sum of all recorded step latency values.
+- **`GraphStore::sink_count`** — count of entities with no outgoing edges.
+- **`GraphStore::has_self_loops`** — true if any relationship is a self-loop.
+- **`ToolRegistry::longest_description`** — description of the tool with the longest description.
+
+---
+
 ## [1.52.0] - 2026-03-20
 
 ### Added
