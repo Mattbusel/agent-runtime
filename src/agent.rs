@@ -317,6 +317,14 @@ impl ReActStep {
     pub fn is_complete(&self) -> bool {
         !self.thought.is_empty() && !self.action.is_empty() && !self.observation.is_empty()
     }
+
+    /// Return `true` if the `observation` field starts with the given `prefix`.
+    ///
+    /// Useful for quick pattern checks on the model's last observation without
+    /// allocating a new string.
+    pub fn observation_starts_with(&self, prefix: &str) -> bool {
+        self.observation.starts_with(prefix)
+    }
 }
 
 /// Configuration for the ReAct agent loop.
@@ -724,6 +732,14 @@ impl AgentConfig {
     /// and want to fall back to a safe default when none has been configured.
     pub fn max_tokens_or_default(&self, default: usize) -> usize {
         self.max_tokens.unwrap_or(default)
+    }
+
+    /// Return the configured temperature, or `1.0` if none has been set.
+    ///
+    /// Provides a safe default for inference calls that always need a concrete
+    /// value without requiring callers to unwrap an `Option<f32>`.
+    pub fn effective_temperature(&self) -> f32 {
+        self.temperature.unwrap_or(1.0)
     }
 }
 
@@ -5167,5 +5183,31 @@ mod tests {
     fn test_max_tokens_or_default_returns_default_when_unset() {
         let cfg = AgentConfig::new(3, "m");
         assert_eq!(cfg.max_tokens_or_default(256), 256);
+    }
+
+    // ── Round 59 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_observation_starts_with_true_for_matching_prefix() {
+        let step = ReActStep::new("t", "a", "Result: ok");
+        assert!(step.observation_starts_with("Result:"));
+    }
+
+    #[test]
+    fn test_observation_starts_with_false_for_non_matching_prefix() {
+        let step = ReActStep::new("t", "a", "Error: failed");
+        assert!(!step.observation_starts_with("Result:"));
+    }
+
+    #[test]
+    fn test_effective_temperature_returns_configured_value() {
+        let cfg = AgentConfig::new(3, "m").with_temperature(0.5);
+        assert!((cfg.effective_temperature() - 0.5_f32).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_effective_temperature_returns_default_when_unset() {
+        let cfg = AgentConfig::new(3, "m");
+        assert!((cfg.effective_temperature() - 1.0_f32).abs() < 1e-6);
     }
 }

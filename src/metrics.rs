@@ -4582,6 +4582,8 @@ mod tests {
         let m = RuntimeMetrics::new();
         m.record_step_latency(100);
         m.record_step_latency(200);
+        // avg_step_latency_ms divides by total_steps, not latency sample count
+        m.total_steps.store(2, Ordering::Relaxed);
         assert!((m.avg_step_latency_ms() - 150.0).abs() < 1e-9);
     }
 
