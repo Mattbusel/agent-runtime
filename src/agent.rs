@@ -94,6 +94,26 @@ impl Message {
     pub fn content(&self) -> &str {
         &self.content
     }
+
+    /// Return `true` if this is a `User` role message.
+    pub fn is_user(&self) -> bool {
+        self.role == Role::User
+    }
+
+    /// Return `true` if this is an `Assistant` role message.
+    pub fn is_assistant(&self) -> bool {
+        self.role == Role::Assistant
+    }
+
+    /// Return `true` if this is a `System` role message.
+    pub fn is_system(&self) -> bool {
+        self.role == Role::System
+    }
+
+    /// Return `true` if this is a `Tool` role message.
+    pub fn is_tool(&self) -> bool {
+        self.role == Role::Tool
+    }
 }
 
 impl std::fmt::Display for Role {
@@ -447,6 +467,12 @@ impl ToolSpec {
     #[cfg(feature = "orchestrator")]
     pub fn with_circuit_breaker(mut self, cb: Arc<crate::orchestrator::CircuitBreaker>) -> Self {
         self.circuit_breaker = Some(cb);
+        self
+    }
+
+    /// Override the human-readable description after construction.
+    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
+        self.description = desc.into();
         self
     }
 

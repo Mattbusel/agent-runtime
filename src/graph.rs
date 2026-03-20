@@ -2220,4 +2220,131 @@ mod tests {
         assert!(g.update_entity_property(&id, "key", serde_json::json!("val")).unwrap());
         assert_eq!(g.get_entity(&id).unwrap().properties["key"], serde_json::json!("val"));
     }
+
+    #[test]
+    fn test_connected_components_single_node() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        assert_eq!(g.connected_components().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_connected_components_two_isolated_nodes() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        assert_eq!(g.connected_components().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_connected_components_connected_pair() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        assert_eq!(g.connected_components().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_connected_components_two_separate_pairs() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_entity(Entity::new("c", "C")).unwrap();
+        g.add_entity(Entity::new("d", "D")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("c", "d", "link", 1.0)).unwrap();
+        assert_eq!(g.connected_components().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_connected_components_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.connected_components().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_isolates_returns_nodes_with_no_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_entity(Entity::new("c", "C")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        let iso = g.isolates().unwrap();
+        let mut ids: Vec<String> = iso.iter().map(|e| e.id.as_str().to_string()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["c".to_string()]);
+    }
+
+    #[test]
+    fn test_isolates_returns_empty_when_all_connected() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        assert!(g.isolates().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_isolates_all_isolated() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("x", "X")).unwrap();
+        g.add_entity(Entity::new("y", "Y")).unwrap();
+        let iso = g.isolates().unwrap();
+        let mut ids: Vec<String> = iso.iter().map(|e| e.id.as_str().to_string()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["x".to_string(), "y".to_string()]);
+    }
+
+    #[test]
+    fn test_is_dag_on_dag() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "edge", 1.0)).unwrap();
+        assert!(g.is_dag().unwrap());
+    }
+
+    #[test]
+    fn test_is_dag_on_cyclic_graph() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "edge", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "a", "back", 1.0)).unwrap();
+        assert!(!g.is_dag().unwrap());
+    }
+
+    #[test]
+    fn test_in_degree_and_out_degree() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_entity(Entity::new("c", "C")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "e1", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("c", "b", "e2", 1.0)).unwrap();
+        let a = EntityId::new("a");
+        let b = EntityId::new("b");
+        let c = EntityId::new("c");
+        assert_eq!(g.out_degree(&a).unwrap(), 1);
+        assert_eq!(g.in_degree(&a).unwrap(), 0);
+        assert_eq!(g.in_degree(&b).unwrap(), 2);
+        assert_eq!(g.out_degree(&b).unwrap(), 0);
+        assert_eq!(g.out_degree(&c).unwrap(), 1);
+        assert_eq!(g.in_degree(&c).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_in_degree_missing_entity_returns_zero() {
+        let g = GraphStore::new();
+        let id = EntityId::new("ghost");
+        assert_eq!(g.in_degree(&id).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_out_degree_missing_entity_returns_zero() {
+        let g = GraphStore::new();
+        let id = EntityId::new("ghost");
+        assert_eq!(g.out_degree(&id).unwrap(), 0);
+    }
 }

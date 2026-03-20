@@ -22,7 +22,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use uuid::Uuid;
+
+// Re-export the core ID types so callers can import from either module.
+pub use crate::types::{AgentId, MemoryId};
 
 // ── Cosine similarity ─────────────────────────────────────────────────────────
 
@@ -34,117 +36,6 @@ fn normalize_in_place(v: &mut Vec<f32>) {
         for x in v.iter_mut() {
             *x /= norm;
         }
-    }
-}
-
-
-// ── Newtype IDs ───────────────────────────────────────────────────────────────
-
-/// Stable identifier for an agent instance.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AgentId(pub String);
-
-impl AgentId {
-    /// Create a new `AgentId` from any string-like value.
-    ///
-    /// # Panics (debug only)
-    ///
-    /// Triggers a `debug_assert!` if `id` is empty.  In release builds a
-    /// `tracing::warn!` is emitted instead so that the misconfiguration is
-    /// surfaced in production logs without aborting the process.
-    pub fn new(id: impl Into<String>) -> Self {
-        let id = id.into();
-        if id.is_empty() {
-            debug_assert!(false, "AgentId must not be empty");
-            tracing::warn!("AgentId::new called with an empty string — agent IDs should be non-empty to avoid lookup ambiguity");
-        }
-        Self(id)
-    }
-
-    /// Create a validated `AgentId`, returning an error if `id` is empty.
-    ///
-    /// Prefer this constructor in user-facing code where empty IDs must be
-    /// rejected explicitly rather than silently warned about.
-    pub fn try_new(id: impl Into<String>) -> Result<Self, crate::error::AgentRuntimeError> {
-        let id = id.into();
-        if id.is_empty() {
-            return Err(crate::error::AgentRuntimeError::Memory(
-                "AgentId must not be empty".into(),
-            ));
-        }
-        Ok(Self(id))
-    }
-
-    /// Generate a random `AgentId` backed by a UUID v4.
-    pub fn random() -> Self {
-        Self(Uuid::new_v4().to_string())
-    }
-
-    /// Return the inner ID string as a `&str`.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl AsRef<str> for AgentId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for AgentId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Stable identifier for a memory item.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct MemoryId(pub String);
-
-impl MemoryId {
-    /// Create a new `MemoryId` from any string-like value.
-    ///
-    /// # Panics (debug only)
-    ///
-    /// Triggers a `debug_assert!` if `id` is empty.  In release builds a
-    /// `tracing::warn!` is emitted instead so that the misconfiguration is
-    /// surfaced in production logs without aborting the process.
-    pub fn new(id: impl Into<String>) -> Self {
-        let id = id.into();
-        if id.is_empty() {
-            debug_assert!(false, "MemoryId must not be empty");
-            tracing::warn!("MemoryId::new called with an empty string — memory IDs should be non-empty to avoid lookup ambiguity");
-        }
-        Self(id)
-    }
-
-    /// Create a validated `MemoryId`, returning an error if `id` is empty.
-    pub fn try_new(id: impl Into<String>) -> Result<Self, crate::error::AgentRuntimeError> {
-        let id = id.into();
-        if id.is_empty() {
-            return Err(crate::error::AgentRuntimeError::Memory(
-                "MemoryId must not be empty".into(),
-            ));
-        }
-        Ok(Self(id))
-    }
-
-    /// Generate a random `MemoryId` backed by a UUID v4.
-    pub fn random() -> Self {
-        Self(Uuid::new_v4().to_string())
-    }
-}
-
-impl AsRef<str> for MemoryId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for MemoryId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
     }
 }
 
@@ -2666,5 +2557,84 @@ mod tests {
         store.store("b", "2", vec!["rust".into(), "ml".into()]).unwrap();
         let tags = store.list_tags().unwrap();
         assert_eq!(tags, vec!["ml", "rust", "sys"]); // sorted
+    }
+
+    #[test]
+    fn test_semantic_store_count_by_tag() {
+        let store = SemanticStore::new();
+        store.store("a", "1", vec!["rust".into(), "sys".into()]).unwrap();
+        store.store("b", "2", vec!["rust".into(), "ml".into()]).unwrap();
+        store.store("c", "3", vec!["ml".into()]).unwrap();
+        assert_eq!(store.count_by_tag("rust").unwrap(), 2);
+        assert_eq!(store.count_by_tag("ml").unwrap(), 2);
+        assert_eq!(store.count_by_tag("sys").unwrap(), 1);
+        assert_eq!(store.count_by_tag("absent").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_working_memory_get_many_returns_present_values() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("a", "alpha".to_string()).unwrap();
+        wm.set("b", "beta".to_string()).unwrap();
+        // get_many returns a Vec<Option<String>> in the same order as the input keys
+        let results = wm.get_many(&["a", "b", "c"]).unwrap();
+        assert_eq!(results[0].as_deref(), Some("alpha"));
+        assert_eq!(results[1].as_deref(), Some("beta"));
+        assert_eq!(results[2], None);
+    }
+
+    #[test]
+    fn test_working_memory_update_if_exists_changes_value() {
+        let wm = WorkingMemory::new(5).unwrap();
+        wm.set("x", "old".to_string()).unwrap();
+        assert!(wm.update_if_exists("x", "new".to_string()).unwrap());
+        assert_eq!(wm.get("x").unwrap().as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn test_working_memory_update_if_exists_returns_false_for_missing() {
+        let wm = WorkingMemory::new(5).unwrap();
+        assert!(!wm.update_if_exists("nope", "val".to_string()).unwrap());
+    }
+
+    #[test]
+    fn test_episodic_total_recall_count_sums_all_accesses() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("agent1");
+        store.add_episode(agent.clone(), "first", 0.8).unwrap();
+        store.add_episode(agent.clone(), "second", 0.5).unwrap();
+        // recall() increments recall_count on each returned item
+        store.recall(&agent, 10).unwrap();
+        store.recall(&agent, 10).unwrap();
+        let total = store.total_recall_count(&agent).unwrap();
+        // 2 items × 2 recalls = 4
+        assert_eq!(total, 4);
+    }
+
+    #[test]
+    fn test_episodic_total_recall_count_zero_before_recall() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("fresh");
+        store.add_episode(agent.clone(), "ep", 0.5).unwrap();
+        assert_eq!(store.total_recall_count(&agent).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_episodic_recall_all_returns_all_items() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("agent-all");
+        store.add_episode(agent.clone(), "one", 0.9).unwrap();
+        store.add_episode(agent.clone(), "two", 0.5).unwrap();
+        store.add_episode(agent.clone(), "three", 0.1).unwrap();
+        let all = store.recall_all(&agent).unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn test_episodic_recall_all_empty_agent_returns_empty() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("nobody");
+        let all = store.recall_all(&agent).unwrap();
+        assert!(all.is_empty());
     }
 }

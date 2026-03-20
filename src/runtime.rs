@@ -133,6 +133,40 @@ impl AgentSession {
         self.steps.iter().map(|s| s.step_duration_ms).sum()
     }
 
+    /// Return the average step duration in milliseconds.
+    ///
+    /// Returns `0` when there are no steps.
+    pub fn average_step_duration_ms(&self) -> u64 {
+        if self.steps.is_empty() {
+            return 0;
+        }
+        self.total_step_duration_ms() / self.steps.len() as u64
+    }
+
+    /// Return a reference to the slowest step (highest `step_duration_ms`).
+    ///
+    /// Returns `None` when there are no steps.
+    pub fn slowest_step(&self) -> Option<&ReActStep> {
+        self.steps.iter().max_by_key(|s| s.step_duration_ms)
+    }
+
+    /// Return a reference to the fastest step (lowest `step_duration_ms`).
+    ///
+    /// Returns `None` when there are no steps.
+    pub fn fastest_step(&self) -> Option<&ReActStep> {
+        self.steps.iter().min_by_key(|s| s.step_duration_ms)
+    }
+
+    /// Collect all thought strings from every step, in order.
+    pub fn all_thoughts(&self) -> Vec<&str> {
+        self.steps.iter().map(|s| s.thought.as_str()).collect()
+    }
+
+    /// Collect all observation strings from every step, in order.
+    pub fn all_observations(&self) -> Vec<&str> {
+        self.steps.iter().map(|s| s.observation.as_str()).collect()
+    }
+
     /// Persist this session as a checkpoint under `"session:<session_id>"`.
     #[cfg(feature = "persistence")]
     pub async fn save_checkpoint(

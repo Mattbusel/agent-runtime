@@ -11,6 +11,38 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.9.0] - 2026-03-20
+
+### Added
+
+- **`Message::is_user`** / **`is_assistant`** / **`is_system`** / **`is_tool`**
+  (`agent.rs`) — boolean role predicates replacing verbose `==` comparisons.
+- **`ToolSpec::with_description`** (`agent.rs`) — override the tool description
+  after initial construction.
+- **`AgentSession::average_step_duration_ms`** (`runtime.rs`) — arithmetic mean
+  of per-step durations; returns `0` for empty sessions.
+- **`AgentSession::slowest_step`** / **`fastest_step`** (`runtime.rs`) — return
+  a reference to the step with the highest/lowest `step_duration_ms`; useful for
+  profiling long-running agents.
+- **`AgentSession::all_thoughts`** / **`all_observations`** (`runtime.rs`) —
+  collect all thought or observation strings across every step.
+- **`WorkingMemory::values`** (`memory.rs`) — return all stored values in
+  insertion order, parallel to the existing `keys()` method.
+- **`Pipeline::is_empty`** (`orchestrator.rs`) — return `true` when no stages
+  have been added.
+- **`BackpressureGuard::remaining_capacity`** (`orchestrator.rs`) — number of
+  additional slots that can be acquired before hitting hard capacity.
+
+### Fixed
+
+- **`Deduplicator::purge_expired`** (`orchestrator.rs`) — after removing expired
+  entries from `cache`, the `cache_order` VecDeque was not updated, allowing
+  ghost keys to accumulate and cause spurious no-op evictions on the next
+  `complete` call when `max_entries` is set.  `purge_expired` now calls
+  `cache_order.retain` to drop any keys that are no longer in `cache`.
+
+---
+
 ## [1.8.0] - 2026-03-20
 
 ### Added

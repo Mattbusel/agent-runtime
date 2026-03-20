@@ -211,4 +211,54 @@ mod tests {
             "Validation failed for field 'n': [out_of_range] n must be between 1 and 100"
         );
     }
+
+    #[test]
+    fn test_is_circuit_open_true() {
+        let e = AgentRuntimeError::CircuitOpen { service: "svc".into() };
+        assert!(e.is_circuit_open());
+        assert!(!e.is_backpressure());
+        assert!(!e.is_provider());
+        assert!(!e.is_validation());
+        assert!(!e.is_memory());
+        assert!(!e.is_graph());
+    }
+
+    #[test]
+    fn test_is_backpressure_true() {
+        let e = AgentRuntimeError::BackpressureShed { depth: 5, capacity: 5 };
+        assert!(e.is_backpressure());
+        assert!(!e.is_circuit_open());
+    }
+
+    #[test]
+    fn test_is_provider_true() {
+        let e = AgentRuntimeError::Provider("timeout".into());
+        assert!(e.is_provider());
+        assert!(!e.is_memory());
+    }
+
+    #[test]
+    fn test_is_validation_true() {
+        let e = AgentRuntimeError::Validation {
+            field: "x".into(),
+            code: "bad".into(),
+            message: "msg".into(),
+        };
+        assert!(e.is_validation());
+        assert!(!e.is_graph());
+    }
+
+    #[test]
+    fn test_is_memory_true() {
+        let e = AgentRuntimeError::Memory("oom".into());
+        assert!(e.is_memory());
+        assert!(!e.is_validation());
+    }
+
+    #[test]
+    fn test_is_graph_true() {
+        let e = AgentRuntimeError::Graph("no such entity".into());
+        assert!(e.is_graph());
+        assert!(!e.is_memory());
+    }
 }

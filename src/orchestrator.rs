@@ -1737,4 +1737,49 @@ mod tests {
         assert_eq!(p.stage_count(), 2);
         assert_eq!(p.stage_names(), vec!["first", "second"]);
     }
+
+    #[test]
+    fn test_pipeline_is_empty_true_for_new() {
+        let p = Pipeline::new();
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_is_empty_false_after_add_stage() {
+        let p = Pipeline::new().add_stage("s", |s: String| Ok(s));
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn test_circuit_breaker_service_name() {
+        let cb = CircuitBreaker::new("my-service", 3, Duration::from_secs(1)).unwrap();
+        assert_eq!(cb.service_name(), "my-service");
+    }
+
+    #[test]
+    fn test_retry_policy_none_has_max_one_attempt() {
+        let p = RetryPolicy::none();
+        assert_eq!(p.max_attempts, 1);
+        assert_eq!(p.delay_for(0), Duration::ZERO);
+    }
+
+    #[test]
+    fn test_backpressure_is_full_false_when_empty() {
+        let g = BackpressureGuard::new(5).unwrap();
+        assert!(!g.is_full().unwrap());
+    }
+
+    #[test]
+    fn test_backpressure_is_full_true_when_at_capacity() {
+        let g = BackpressureGuard::new(2).unwrap();
+        g.try_acquire().unwrap();
+        g.try_acquire().unwrap();
+        assert!(g.is_full().unwrap());
+    }
+
+    #[test]
+    fn test_deduplicator_ttl_returns_configured_value() {
+        let d = Deduplicator::new(Duration::from_secs(42));
+        assert_eq!(d.ttl(), Duration::from_secs(42));
+    }
 }

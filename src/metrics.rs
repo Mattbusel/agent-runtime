@@ -961,4 +961,60 @@ mod tests {
         assert!(s.contains("steps"));
         assert!(s.contains("latency_mean"));
     }
+
+    #[test]
+    fn test_failure_rate_zero_when_no_calls() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.failure_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_failure_rate_correct_proportion() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("tool_a");
+        m.record_tool_call("tool_a");
+        m.record_tool_failure("tool_a");
+        // 1 failure out of 2 total = 0.5
+        assert!((m.failure_rate() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_failure_rate_all_failed() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("x");
+        m.record_tool_failure("x");
+        assert!((m.failure_rate() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_top_tools_by_calls_returns_top_n() {
+        let m = RuntimeMetrics::new();
+        for _ in 0..5 { m.record_tool_call("a"); }
+        for _ in 0..3 { m.record_tool_call("b"); }
+        for _ in 0..1 { m.record_tool_call("c"); }
+        let top = m.top_tools_by_calls(2);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].0, "a");
+        assert_eq!(top[1].0, "b");
+    }
+
+    #[test]
+    fn test_top_tools_by_calls_returns_all_when_n_exceeds_count() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("only");
+        let top = m.top_tools_by_calls(10);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].0, "only");
+    }
+
+    #[test]
+    fn test_metrics_snapshot_to_json_contains_key_fields() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("t");
+        let snap = m.snapshot();
+        let json = snap.to_json();
+        assert!(json.get("total_sessions").is_some());
+        assert!(json.get("total_steps").is_some());
+        assert!(json.get("total_tool_calls").is_some());
+    }
 }
