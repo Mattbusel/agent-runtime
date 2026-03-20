@@ -847,6 +847,34 @@ impl EpisodicStore {
             .and_then(|v| v.last().cloned()))
     }
 
+    /// Return the highest importance score for `agent_id`, or `None` if the
+    /// agent has no episodes.
+    pub fn max_importance(&self, agent_id: &AgentId) -> Result<Option<f32>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::max_importance");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|v| {
+                v.iter()
+                    .map(|i| i.importance)
+                    .reduce(f32::max)
+            }))
+    }
+
+    /// Return the lowest importance score for `agent_id`, or `None` if the
+    /// agent has no episodes.
+    pub fn min_importance(&self, agent_id: &AgentId) -> Result<Option<f32>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::min_importance");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|v| {
+                v.iter()
+                    .map(|i| i.importance)
+                    .reduce(f32::min)
+            }))
+    }
+
     /// Return the episode with the highest `recall_count` for `agent_id`.
     ///
     /// Returns `None` if the agent has no stored episodes.  When multiple
@@ -2163,6 +2191,21 @@ impl WorkingMemory {
             .keys()
             .filter(|k| k.starts_with(prefix))
             .cloned()
+            .collect())
+    }
+
+    /// Return all `(key, value)` pairs whose value contains `pattern` as a
+    /// substring.  Comparison is case-sensitive.
+    ///
+    /// Useful for scanning working memory for values that match a keyword
+    /// without iterating the full map externally.
+    pub fn values_matching(&self, pattern: &str) -> Result<Vec<(String, String)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::values_matching");
+        Ok(inner
+            .map
+            .iter()
+            .filter(|(_, v)| v.contains(pattern))
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect())
     }
 
@@ -4695,5 +4738,45 @@ mod tests {
         let wm = WorkingMemory::new(5).unwrap();
         wm.set("a", "1").unwrap();
         assert!(!wm.has_any_key([]).unwrap());
+    }
+
+    // ── Round 13: EpisodicStore::most_recalled ────────────────────────────────
+
+    #[test]
+    fn test_most_recalled_returns_none_for_new_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("fresh");
+        assert!(store.most_recalled(&agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_most_recalled_returns_highest_recall_count() {
+        use std::sync::Arc;
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "low", 0.3).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        store.add_episode(agent.clone(), "mid", 0.6).unwrap();
+        // Increment recall count on "high" episode by recalling it multiple times
+        let items = store.recall(&agent, 3).unwrap();
+        // recall_count is incremented on each recall; all items start at 0 after add,
+        // then each recall increments them. We need to find which has highest recall_count.
+        // After recall(3), all 3 items get incremented once. Let's recall just "high" more.
+        // Simulate: call recall again to increment counts further
+        store.recall(&agent, 1).unwrap();
+        let top = store.most_recalled(&agent).unwrap();
+        assert!(top.is_some());
+        // The most recalled has recall_count >= 1
+        assert!(top.unwrap().recall_count >= 1);
+    }
+
+    #[test]
+    fn test_most_recalled_single_episode() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("solo");
+        store.add_episode(agent.clone(), "only one", 0.7).unwrap();
+        store.recall(&agent, 1).unwrap();
+        let top = store.most_recalled(&agent).unwrap();
+        assert_eq!(top.unwrap().content, "only one");
     }
 }

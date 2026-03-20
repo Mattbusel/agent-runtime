@@ -783,6 +783,27 @@ impl GraphStore {
         Ok(self.in_degree_for(entity_id)? == 0)
     }
 
+    /// Return all entities directly reachable from `entity_id` via outgoing edges
+    /// (its successors / immediate out-neighbors).
+    ///
+    /// Returns an empty `Vec` if the entity has no outgoing edges or does not exist.
+    pub fn successors(&self, entity_id: &EntityId) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "successors");
+        let rels = inner.adjacency.get(entity_id).cloned().unwrap_or_default();
+        Ok(rels
+            .iter()
+            .filter_map(|r| inner.entities.get(&r.to).cloned())
+            .collect())
+    }
+
+    /// Return `true` if the entity has no outgoing edges (out-degree == 0).
+    ///
+    /// In a DAG, sink nodes (leaves) have no successors.  Returns `true` if
+    /// the entity does not exist (unknown nodes cannot have outgoing edges).
+    pub fn is_sink(&self, entity_id: &EntityId) -> Result<bool, AgentRuntimeError> {
+        Ok(self.out_degree_for(entity_id)? == 0)
+    }
+
     /// Return the number of relationships in the graph.
     ///
     /// Alias for [`relationship_count`] using graph-theory terminology.
@@ -3680,5 +3701,70 @@ mod tests {
         g.add_relationship(Relationship::new("src", "dst", "r", 1.0)).unwrap();
         assert!(g.is_source(&EntityId::new("src")).unwrap());
         assert!(!g.is_source(&EntityId::new("dst")).unwrap());
+    }
+
+    // ── Round 13: Relationship::is_self_loop/reversed, find_entities_by_labels, remove_isolated ──
+
+    #[test]
+    fn test_relationship_is_self_loop_true_when_from_equals_to() {
+        let r = Relationship::new("a", "a", "self", 1.0);
+        assert!(r.is_self_loop());
+    }
+
+    #[test]
+    fn test_relationship_is_self_loop_false_for_normal_edge() {
+        let r = Relationship::new("a", "b", "edge", 1.0);
+        assert!(!r.is_self_loop());
+    }
+
+    #[test]
+    fn test_relationship_reversed_swaps_endpoints() {
+        let r = Relationship::new("from", "to", "knows", 0.5);
+        let rev = r.reversed();
+        assert_eq!(rev.from.as_str(), "to");
+        assert_eq!(rev.to.as_str(), "from");
+        assert_eq!(rev.kind, "knows");
+        assert!((rev.weight - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_find_entities_by_labels_returns_matching() {
+        let g = make_graph();
+        g.add_entity(Entity::new("p1", "Person")).unwrap();
+        g.add_entity(Entity::new("p2", "Person")).unwrap();
+        g.add_entity(Entity::new("c1", "Concept")).unwrap();
+        let results = g.find_entities_by_labels(&["Person"]).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|e| e.label == "Person"));
+    }
+
+    #[test]
+    fn test_find_entities_by_labels_empty_when_no_match() {
+        let g = make_graph();
+        g.add_entity(Entity::new("n1", "Node")).unwrap();
+        let results = g.find_entities_by_labels(&["Missing"]).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_remove_isolated_removes_nodes_without_edges() {
+        let g = make_graph();
+        g.add_entity(Entity::new("connected", "N")).unwrap();
+        g.add_entity(Entity::new("isolated", "N")).unwrap();
+        g.add_entity(Entity::new("other", "N")).unwrap();
+        g.add_relationship(Relationship::new("connected", "other", "r", 1.0)).unwrap();
+        let removed = g.remove_isolated().unwrap();
+        assert_eq!(removed, 1);
+        assert!(g.get_entity(&EntityId::new("isolated")).is_err());
+        assert!(g.get_entity(&EntityId::new("connected")).is_ok());
+    }
+
+    #[test]
+    fn test_remove_isolated_zero_when_all_connected() {
+        let g = make_graph();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "r", 1.0)).unwrap();
+        assert_eq!(g.remove_isolated().unwrap(), 0);
     }
 }

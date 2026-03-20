@@ -2990,4 +2990,56 @@ mod tests {
         let reg = ToolRegistry::new();
         assert!(reg.all_tool_names().is_empty());
     }
+
+    // ── Round 13: AgentConfig::remaining_iterations_after, ToolSpec predicates ──
+
+    #[test]
+    fn test_remaining_iterations_after_full_budget() {
+        let cfg = AgentConfig::new(10, "m");
+        assert_eq!(cfg.remaining_iterations_after(0), 10);
+    }
+
+    #[test]
+    fn test_remaining_iterations_after_partial_use() {
+        let cfg = AgentConfig::new(10, "m");
+        assert_eq!(cfg.remaining_iterations_after(3), 7);
+    }
+
+    #[test]
+    fn test_remaining_iterations_after_saturates_at_zero() {
+        let cfg = AgentConfig::new(5, "m");
+        assert_eq!(cfg.remaining_iterations_after(10), 0);
+    }
+
+    #[test]
+    fn test_tool_spec_required_field_count_zero_by_default() {
+        let spec = ToolSpec::new("t", "d", |_| serde_json::json!({}));
+        assert_eq!(spec.required_field_count(), 0);
+    }
+
+    #[test]
+    fn test_tool_spec_required_field_count_after_adding() {
+        let spec = ToolSpec::new("t", "d", |_| serde_json::json!({}))
+            .with_required_fields(["query", "limit"]);
+        assert_eq!(spec.required_field_count(), 2);
+    }
+
+    #[test]
+    fn test_tool_spec_has_required_fields_false_by_default() {
+        let spec = ToolSpec::new("t", "d", |_| serde_json::json!({}));
+        assert!(!spec.has_required_fields());
+    }
+
+    #[test]
+    fn test_tool_spec_has_required_fields_true_after_adding() {
+        let spec = ToolSpec::new("t", "d", |_| serde_json::json!({}))
+            .with_required_fields(["key"]);
+        assert!(spec.has_required_fields());
+    }
+
+    #[test]
+    fn test_tool_spec_has_validators_false_by_default() {
+        let spec = ToolSpec::new("t", "d", |_| serde_json::json!({}));
+        assert!(!spec.has_validators());
+    }
 }
