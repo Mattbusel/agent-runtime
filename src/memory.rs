@@ -1034,6 +1034,25 @@ impl EpisodicStore {
             .unwrap_or_default())
     }
 
+    /// Return the sum of importance values for all episodes belonging to
+    /// `agent_id`.
+    ///
+    /// Returns `0.0` when the agent has no recorded episodes.
+    pub fn agent_episode_importance_sum(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(
+            self.inner.lock(),
+            "EpisodicStore::agent_episode_importance_sum",
+        );
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map(|v| v.iter().map(|m| m.importance as f64).sum())
+            .unwrap_or(0.0))
+    }
+
     /// Return the `AgentId` of the agent with the most stored episodes, or
     /// `None` if the store is empty.
     pub fn agent_with_most_episodes(&self) -> Result<Option<AgentId>, AgentRuntimeError> {
@@ -4328,6 +4347,14 @@ impl WorkingMemory {
     pub fn value_char_count(&self, key: &str) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::value_char_count");
         Ok(inner.map.get(key).map_or(0, |v| v.chars().count()))
+    }
+
+    /// Return all keys whose byte length is strictly greater than `min_bytes`.
+    ///
+    /// Returns an empty `Vec` when no keys satisfy the condition.
+    pub fn keys_longer_than(&self, min_bytes: usize) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::keys_longer_than");
+        Ok(inner.map.keys().filter(|k| k.len() > min_bytes).cloned().collect())
     }
 
     /// Return `true` if the value stored under `key` starts with `prefix`.

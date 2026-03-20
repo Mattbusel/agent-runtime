@@ -11,6 +11,28 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.70.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::has_step_with_empty_observation`** — `true` if any step produced an empty observation.
+- **`AgentSession::thought_to_action_byte_ratio`** — ratio of total thought bytes to total action bytes.
+- **`WorkingMemory::values_longer_than`** — keys whose stored value exceeds a byte threshold.
+- **`WorkingMemory::has_key_with_prefix`** — `true` if any key starts with a given prefix.
+- **`EpisodicStore::min_episode_importance`** — minimum importance score across all episodes for an agent.
+- **`RuntimeMetrics::global_failure_rate`** — ratio of failed tool calls to total tool calls.
+- **`GraphStore::entities_by_label`** — entity IDs whose label matches a given string.
+- **`GraphStore::edge_count_between`** — count of edges from one entity to another.
+- **`Pipeline::longest_stage_name_len`** — byte length of the longest stage name.
+
+### Fixed
+
+- Removed duplicate method definitions (`relationship_kinds`, `max_out_degree` in `graph.rs`; `agent_count`, `max_key_length` in `memory.rs`) introduced by the worktree agent.
+- Fixed `total_agent_tool_calls` to use `per_agent_tool_calls_snapshot()` instead of a non-existent field.
+- Fixed tests that incorrectly used `input_schema`/`validator` fields on `ToolSpec` and `register_tool`/`build` on `AgentRuntime` directly.
+
+---
+
 ## [1.69.0] - 2026-03-20
 
 ### Added

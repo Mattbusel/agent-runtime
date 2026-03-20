@@ -2064,6 +2064,38 @@ impl AgentSession {
             .min()
             .unwrap_or(0)
     }
+
+    /// Return the average number of Unicode chars in the `action` field across
+    /// all steps.
+    ///
+    /// Returns `0.0` for an empty session.
+    pub fn avg_action_chars(&self) -> f64 {
+        if self.steps.is_empty() {
+            return 0.0;
+        }
+        let total: usize = self.steps.iter().map(|s| s.action.chars().count()).sum();
+        total as f64 / self.steps.len() as f64
+    }
+
+    /// Return the average number of Unicode chars in the `observation` field
+    /// across all steps.
+    ///
+    /// Returns `0.0` for an empty session.
+    pub fn avg_observation_chars(&self) -> f64 {
+        if self.steps.is_empty() {
+            return 0.0;
+        }
+        let total: usize = self.steps.iter().map(|s| s.observation.chars().count()).sum();
+        total as f64 / self.steps.len() as f64
+    }
+
+    /// Return a reference to the step whose `action` string is the longest
+    /// (by Unicode char count), or `None` for an empty session.
+    ///
+    /// When multiple steps tie, the first is returned.
+    pub fn step_with_longest_action(&self) -> Option<&ReActStep> {
+        self.steps.iter().max_by_key(|s| s.action.chars().count())
+    }
 }
 
 // ── AgentRuntimeBuilder ───────────────────────────────────────────────────────
