@@ -1166,6 +1166,16 @@ impl ToolRegistry {
     pub fn description_for(&self, name: &str) -> Option<&str> {
         self.tools.get(name).map(|s| s.description.as_str())
     }
+
+    /// Return the count of tools whose description contains `keyword`
+    /// (case-insensitive).
+    pub fn count_with_description_containing(&self, keyword: &str) -> usize {
+        let lower = keyword.to_ascii_lowercase();
+        self.tools
+            .values()
+            .filter(|s| s.description.to_ascii_lowercase().contains(&lower))
+            .count()
+    }
 }
 
 // ── ReActLoop ─────────────────────────────────────────────────────────────────
@@ -3572,5 +3582,23 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.register(ToolSpec::new("search", "Find web results", |_| serde_json::json!({})));
         assert_eq!(reg.description_for("search"), Some("Find web results"));
+    }
+
+    // ── Round 30: count_with_description_containing ───────────────────────────
+
+    #[test]
+    fn test_count_with_description_containing_zero_when_no_match() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "database query", |_| serde_json::json!({})));
+        assert_eq!(reg.count_with_description_containing("weather"), 0);
+    }
+
+    #[test]
+    fn test_count_with_description_containing_case_insensitive() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "Search the WEB", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("t2", "web scraper tool", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("t3", "database lookup", |_| serde_json::json!({})));
+        assert_eq!(reg.count_with_description_containing("web"), 2);
     }
 }

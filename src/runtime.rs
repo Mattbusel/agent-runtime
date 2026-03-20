@@ -708,6 +708,23 @@ impl AgentSession {
         self.steps.iter().filter(|s| s.observation.is_empty()).count()
     }
 
+    /// Return the byte length of each observation, in step order.
+    pub fn observation_lengths(&self) -> Vec<usize> {
+        self.steps.iter().map(|s| s.observation.len()).collect()
+    }
+
+    /// Return the mean observation byte length across all steps.
+    ///
+    /// Returns `0.0` for empty sessions.
+    pub fn avg_observation_length(&self) -> f64 {
+        let n = self.steps.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let total: usize = self.steps.iter().map(|s| s.observation.len()).sum();
+        total as f64 / n as f64
+    }
+
     /// Return the byte length of the shortest non-empty thought, or `0` if
     /// no non-empty thoughts exist.
     pub fn min_thought_length(&self) -> usize {
@@ -3774,5 +3791,40 @@ mod tests {
         ];
         let session = make_session(steps, 0);
         assert_eq!(session.min_thought_length(), 2);
+    }
+
+    // ── Round 30: observation_lengths / avg_observation_length ────────────────
+
+    #[test]
+    fn test_observation_lengths_empty_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.observation_lengths().is_empty());
+    }
+
+    #[test]
+    fn test_observation_lengths_returns_lengths_in_order() {
+        let steps = vec![
+            make_step("t", "a", "hi"),    // 2
+            make_step("t", "b", "hello"), // 5
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.observation_lengths(), vec![2, 5]);
+    }
+
+    #[test]
+    fn test_avg_observation_length_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!((session.avg_observation_length() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_observation_length_correct_mean() {
+        let steps = vec![
+            make_step("t", "a", "hi"),   // 2
+            make_step("t", "b", "hello"), // 5
+        ];
+        let session = make_session(steps, 0);
+        // mean = 3.5
+        assert!((session.avg_observation_length() - 3.5).abs() < 1e-9);
     }
 }

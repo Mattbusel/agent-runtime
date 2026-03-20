@@ -335,6 +335,20 @@ impl GraphStore {
         Ok(types.len())
     }
 
+    /// Return the distinct entity labels present in the graph, sorted.
+    pub fn labels(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::labels");
+        let mut labels: Vec<String> = inner
+            .entities
+            .values()
+            .map(|e| e.label.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        labels.sort();
+        Ok(labels)
+    }
+
     /// Return the number of entities that have no outgoing relationships.
     pub fn orphan_count(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "GraphStore::orphan_count");
@@ -4605,5 +4619,22 @@ mod tests {
         g.add_relationship(Relationship::new("a", "b", "edge", 1.0)).unwrap();
         // "a" has out-edge → not orphan; "b" has no out-edges → orphan
         assert_eq!(g.orphan_count().unwrap(), 1);
+    }
+
+    // ── Round 30: labels ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_labels_empty_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(g.labels().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_labels_returns_distinct_sorted_labels() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Concept")).unwrap();
+        g.add_entity(Entity::new("b", "Person")).unwrap();
+        g.add_entity(Entity::new("c", "Concept")).unwrap();
+        assert_eq!(g.labels().unwrap(), vec!["Concept".to_string(), "Person".to_string()]);
     }
 }

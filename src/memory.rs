@@ -793,6 +793,24 @@ impl EpisodicStore {
         Ok(ids)
     }
 
+    /// Return the variance of importance scores for the given agent's episodes.
+    ///
+    /// Returns `0.0` when the agent has fewer than two episodes.
+    pub fn importance_variance_for(&self, agent_id: &AgentId) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::importance_variance_for");
+        let vals: Vec<f64> = inner
+            .items
+            .get(agent_id)
+            .map(|v| v.iter().map(|e| e.importance as f64).collect())
+            .unwrap_or_default();
+        if vals.len() < 2 {
+            return Ok(0.0);
+        }
+        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+        let variance = vals.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / vals.len() as f64;
+        Ok(variance)
+    }
+
     /// Return up to `n` episodes for `agent_id` sorted by descending importance
     /// without incrementing recall counts or applying decay.
     ///
@@ -2118,6 +2136,12 @@ impl SemanticStore {
             .map(|e| e.key.clone()))
     }
 
+    /// Return the count of entries whose value contains `substring`.
+    pub fn count_matching_value(&self, substring: &str) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::count_matching_value");
+        Ok(inner.entries.iter().filter(|e| e.value.contains(substring)).count())
+    }
+
     /// Return the keys of all entries that have no tags.
     pub fn entries_with_no_tags(&self) -> Result<Vec<String>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::entries_with_no_tags");
@@ -2823,6 +2847,18 @@ impl WorkingMemory {
     pub fn value_lengths(&self) -> Result<Vec<(String, usize)>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::value_lengths");
         Ok(inner.map.iter().map(|(k, v)| (k.clone(), v.len())).collect())
+    }
+
+    /// Return the keys of all entries whose value byte length is strictly
+    /// greater than `threshold`.
+    pub fn keys_with_value_longer_than(&self, threshold: usize) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::keys_with_value_longer_than");
+        Ok(inner
+            .map
+            .iter()
+            .filter(|(_, v)| v.len() > threshold)
+            .map(|(k, _)| k.clone())
+            .collect())
     }
 
     /// Return the key whose associated value has the most bytes, or `None` if empty.
@@ -6291,5 +6327,58 @@ mod tests {
         let lengths = wm.value_lengths().unwrap();
         assert_eq!(lengths.len(), 1);
         assert_eq!(lengths[0], ("k".to_string(), 5));
+    }
+
+    // ── Round 30: importance_variance_for / count_matching_value / keys_with_value_longer_than
+
+    #[test]
+    fn test_importance_variance_for_zero_when_fewer_than_two() {
+        let store = EpisodicStore::new();
+        let id = AgentId::new("a");
+        store.add_episode(id.clone(), "e", 0.5).unwrap();
+        assert!((store.importance_variance_for(&id).unwrap() - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_importance_variance_for_nonzero_with_spread() {
+        let store = EpisodicStore::new();
+        let id = AgentId::new("a");
+        store.add_episode(id.clone(), "e1", 0.0).unwrap();
+        store.add_episode(id.clone(), "e2", 1.0).unwrap();
+        // mean=0.5, variance = 0.25
+        let v = store.importance_variance_for(&id).unwrap();
+        assert!((v - 0.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_count_matching_value_zero_when_no_match() {
+        let store = SemanticStore::new();
+        store.store("k", "hello world", vec![]).unwrap();
+        assert_eq!(store.count_matching_value("xyz").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_count_matching_value_counts_containing_entries() {
+        let store = SemanticStore::new();
+        store.store("k1", "hello world", vec![]).unwrap();
+        store.store("k2", "world peace", vec![]).unwrap();
+        store.store("k3", "goodbye", vec![]).unwrap();
+        assert_eq!(store.count_matching_value("world").unwrap(), 2);
+    }
+
+    #[test]
+    fn test_keys_with_value_longer_than_empty_when_all_short() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k", "hi").unwrap();
+        assert!(wm.keys_with_value_longer_than(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_keys_with_value_longer_than_returns_qualifying_keys() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("short", "hi").unwrap();
+        wm.set("long", "this is a longer value").unwrap();
+        let keys = wm.keys_with_value_longer_than(5).unwrap();
+        assert_eq!(keys, vec!["long".to_string()]);
     }
 }

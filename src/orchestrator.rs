@@ -234,6 +234,16 @@ impl RetryPolicy {
             .sum()
     }
 
+    /// Return the average delay per attempt in milliseconds.
+    ///
+    /// Returns `0` for policies with no delay (e.g. `RetryPolicy::none()`).
+    pub fn avg_delay_ms(&self) -> u64 {
+        if self.max_attempts == 0 {
+            return 0;
+        }
+        self.max_total_delay_ms() / self.max_attempts as u64
+    }
+
     /// Return a copy of this policy with the base delay changed to `ms` milliseconds.
     ///
     /// # Errors
@@ -3221,5 +3231,21 @@ mod tests {
         let p = RetryPolicy::constant(2, 50).unwrap();
         // n=10 but max_attempts=2 → only 2 delays summed = 100
         assert_eq!(p.delay_sum_ms(10), 100);
+    }
+
+    // ── Round 30: avg_delay_ms ────────────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_avg_delay_ms_constant() {
+        let p = RetryPolicy::constant(4, 100).unwrap();
+        // every attempt = 100ms → average = 100ms
+        assert_eq!(p.avg_delay_ms(), 100);
+    }
+
+    #[test]
+    fn test_retry_policy_avg_delay_ms_single_attempt_policy() {
+        // RetryPolicy::none() has 1 attempt and ZERO delay
+        let p = RetryPolicy::none();
+        assert_eq!(p.avg_delay_ms(), 0);
     }
 }

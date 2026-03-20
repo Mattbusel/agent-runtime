@@ -11,6 +11,27 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.49.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::observation_lengths`** — byte lengths of all observations in step order.
+- **`AgentSession::avg_observation_length`** — mean observation byte length.
+- **`EpisodicStore::importance_variance_for`** — variance of importance scores for one agent.
+- **`SemanticStore::count_matching_value`** — entries whose value contains a substring.
+- **`WorkingMemory::keys_with_value_longer_than`** — keys with values exceeding a threshold.
+- **`MetricsSnapshot::active_session_ratio`** — fraction of sessions currently active.
+- **`LatencyHistogram::bucket_counts`** — raw count per bucket as an array.
+- **`RetryPolicy::avg_delay_ms`** — average delay per attempt.
+- **`GraphStore::labels`** — sorted list of distinct entity labels.
+- **`ToolRegistry::count_with_description_containing`** — count of tools matching a keyword.
+
+### Tests
+
+- Full test coverage for all ten Round 30 methods.
+
+---
+
 ## [1.48.0] - 2026-03-20
 
 ### Added

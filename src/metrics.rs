@@ -323,6 +323,16 @@ impl LatencyHistogram {
         self.p99().saturating_sub(self.p50())
     }
 
+    /// Return the count for each bucket as an array, in order from the
+    /// fastest (≤1ms) to the slowest (>500ms) bucket.
+    pub fn bucket_counts(&self) -> [u64; 7] {
+        let mut out = [0u64; 7];
+        for (i, b) in self.buckets.iter().enumerate() {
+            out[i] = b.load(std::sync::atomic::Ordering::Relaxed);
+        }
+        out
+    }
+
     /// Return `true` if all recorded samples fall into exactly one bucket.
     ///
     /// An empty histogram is considered uniform.
@@ -604,6 +614,16 @@ impl MetricsSnapshot {
             return 0.0;
         }
         self.memory_recall_count as f64 / self.total_steps as f64
+    }
+
+    /// Return the fraction of sessions that are currently active.
+    ///
+    /// Returns `0.0` when no sessions have been started.
+    pub fn active_session_ratio(&self) -> f64 {
+        if self.total_sessions == 0 {
+            return 0.0;
+        }
+        self.active_sessions as f64 / self.total_sessions as f64
     }
 }
 
@@ -2386,5 +2406,38 @@ mod tests {
         h.record(1);
         h.record(1000);
         assert!(!h.is_uniform());
+    }
+
+    // ── Round 30: bucket_counts / active_session_ratio ────────────────────────
+
+    #[test]
+    fn test_latency_histogram_bucket_counts_all_zero_when_empty() {
+        let h = LatencyHistogram::default();
+        assert_eq!(h.bucket_counts(), [0u64; 7]);
+    }
+
+    #[test]
+    fn test_latency_histogram_bucket_counts_increments_correct_bucket() {
+        let h = LatencyHistogram::default();
+        h.record(1); // should go into the first bucket (≤1ms)
+        let counts = h.bucket_counts();
+        assert_eq!(counts[0], 1);
+        assert!(counts[1..].iter().all(|&c| c == 0));
+    }
+
+    #[test]
+    fn test_metrics_snapshot_active_session_ratio_zero_when_no_sessions() {
+        let snap = MetricsSnapshot::default();
+        assert!((snap.active_session_ratio() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_active_session_ratio_correct() {
+        let snap = MetricsSnapshot {
+            total_sessions: 10,
+            active_sessions: 3,
+            ..Default::default()
+        };
+        assert!((snap.active_session_ratio() - 0.3).abs() < 1e-9);
     }
 }
