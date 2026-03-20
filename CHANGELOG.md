@@ -11,6 +11,40 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.37.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::most_used_action`** (`runtime.rs`) — returns the action name
+  that appears most frequently across all ReAct steps; `None` when no steps
+  have been recorded.
+- **`AgentSession::graph_lookup_rate`** (`runtime.rs`) — graph lookups per
+  ReAct step; `0.0` when the session has no steps.
+- **`AgentConfig::has_max_context_chars`** (`agent.rs`) — `true` when a maximum
+  context character limit has been configured.
+- **`AgentConfig::max_context_chars`** (`agent.rs`) — getter for the optional
+  maximum context character limit.
+- **`GraphStore::weight_stats`** (`graph.rs`) — returns `(min, max, mean)`
+  relationship weights; `None` when the graph has no edges.
+- **`EpisodicStore::max_recall_count_for`** (`memory.rs`) — highest
+  `recall_count` across all episodes for an agent; `None` when the agent has
+  no episodes.
+- **`SemanticStore::most_recent_key`** (`memory.rs`) — the insertion key of the
+  last stored semantic entry; `None` when the store is empty.
+- **`WorkingMemory::max_key_length`** (`memory.rs`) — byte length of the
+  longest key currently stored; `0` when the store is empty.
+- **`LatencyHistogram::p10`** (`metrics.rs`) — 10th-percentile latency in
+  milliseconds; useful for assessing the fast tail of the distribution.
+- **`CircuitBreaker::failures_until_open`** (`orchestrator.rs`) — number of
+  additional failures needed before the circuit opens; `0` when already at or
+  beyond the threshold.
+
+### Tests
+
+- 32 new unit tests covering all ten methods listed above.
+
+---
+
 ## [1.36.0] - 2026-03-20
 
 ### Added

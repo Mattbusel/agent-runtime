@@ -1025,6 +1025,17 @@ impl Deduplicator {
         Ok(inner.cache.len())
     }
 
+    /// Return a snapshot of all keys that have cached results.
+    ///
+    /// Expired entries are included (they are removed lazily).  Use
+    /// [`purge_expired`] first for a clean list of live keys.
+    ///
+    /// [`purge_expired`]: Deduplicator::purge_expired
+    pub fn cached_keys(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = timed_lock(&self.inner, "Deduplicator::cached_keys");
+        Ok(inner.cache.keys().cloned().collect())
+    }
+
     /// Return the configured time-to-live for cached results.
     pub fn ttl(&self) -> Duration {
         self.ttl
@@ -2823,5 +2834,30 @@ mod tests {
         cb.record_failure();
         cb.record_failure();
         assert!(cb.is_at_threshold());
+    }
+
+    // ── Round 22: CircuitBreaker::failures_until_open ─────────────────────────
+
+    #[test]
+    fn test_failures_until_open_equals_threshold_initially() {
+        let cb = CircuitBreaker::new("svc-fuo", 5, std::time::Duration::from_secs(60)).unwrap();
+        assert_eq!(cb.failures_until_open(), 5);
+    }
+
+    #[test]
+    fn test_failures_until_open_decrements_with_each_failure() {
+        let cb = CircuitBreaker::new("svc-fuo2", 4, std::time::Duration::from_secs(60)).unwrap();
+        cb.record_failure();
+        assert_eq!(cb.failures_until_open(), 3);
+        cb.record_failure();
+        assert_eq!(cb.failures_until_open(), 2);
+    }
+
+    #[test]
+    fn test_failures_until_open_zero_when_at_threshold() {
+        let cb = CircuitBreaker::new("svc-fuo3", 2, std::time::Duration::from_secs(60)).unwrap();
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.failures_until_open(), 0);
     }
 }
