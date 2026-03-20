@@ -284,6 +284,14 @@ impl ReActStep {
             o = preview(self.observation.trim()),
         )
     }
+
+    /// Return the total byte length of `thought`, `action`, and `observation`
+    /// combined.
+    ///
+    /// Useful for estimating token cost or bounding memory usage per step.
+    pub fn combined_byte_length(&self) -> usize {
+        self.thought.len() + self.action.len() + self.observation.len()
+    }
 }
 
 /// Configuration for the ReAct agent loop.
@@ -641,6 +649,15 @@ impl AgentConfig {
     /// Returns `0` for an empty prompt.
     pub fn system_prompt_word_count(&self) -> usize {
         self.system_prompt.split_whitespace().count()
+    }
+
+    /// Return the number of iterations still available after `steps_done`
+    /// steps have been completed.
+    ///
+    /// Saturates at `0` — never returns a negative-equivalent value even if
+    /// `steps_done` exceeds `max_iterations`.
+    pub fn iteration_budget_remaining(&self, steps_done: usize) -> usize {
+        self.max_iterations.saturating_sub(steps_done)
     }
 }
 
@@ -1576,6 +1593,28 @@ impl ToolRegistry {
         })
     }
 
+    /// Return a reference to the `ToolSpec` with the given `name`, or `None`.
+    pub fn tool_by_name(&self, name: &str) -> Option<&ToolSpec> {
+        self.tools.get(name)
+    }
+
+    /// Return the names of all tools that have no validators, sorted alphabetically.
+    ///
+    /// Complements [`tool_count_with_validators`] by returning the actual names.
+    /// Returns an empty `Vec` for an empty registry.
+    ///
+    /// [`tool_count_with_validators`]: ToolRegistry::tool_count_with_validators
+    pub fn tools_without_validators(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .tools
+            .values()
+            .filter(|s| s.validators.is_empty())
+            .map(|s| s.name.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
     /// Return the names of all tools that have at least one required field,
     /// sorted alphabetically.
     ///
@@ -1590,6 +1629,14 @@ impl ToolRegistry {
             .collect();
         names.sort_unstable();
         names
+    }
+
+    /// Return `true` if **all** of the given `names` are registered in this
+    /// registry.
+    ///
+    /// Returns `true` for an empty `names` slice (vacuously true).
+    pub fn has_all_tools(&self, names: &[&str]) -> bool {
+        names.iter().all(|n| self.tools.contains_key(*n))
     }
 }
 
@@ -4773,5 +4820,90 @@ mod tests {
     fn test_description_starts_with_any_false_for_empty_registry() {
         let reg = ToolRegistry::new();
         assert!(!reg.description_starts_with_any(&["Search"]));
+    }
+
+    // ── Round 52 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_combined_byte_length_sums_all_fields() {
+        let step = ReActStep::new("hello", "search", "result");
+        assert_eq!(step.combined_byte_length(), 5 + 6 + 6);
+    }
+
+    #[test]
+    fn test_combined_byte_length_zero_for_empty_step() {
+        let step = ReActStep::new("", "", "");
+        assert_eq!(step.combined_byte_length(), 0);
+    }
+
+    #[test]
+    fn test_iteration_budget_remaining_full_when_no_steps_done() {
+        let cfg = AgentConfig::new(10, "m");
+        assert_eq!(cfg.iteration_budget_remaining(0), 10);
+    }
+
+    #[test]
+    fn test_iteration_budget_remaining_decreases_with_steps() {
+        let cfg = AgentConfig::new(10, "m");
+        assert_eq!(cfg.iteration_budget_remaining(7), 3);
+    }
+
+    #[test]
+    fn test_iteration_budget_remaining_saturates_at_zero() {
+        let cfg = AgentConfig::new(5, "m");
+        assert_eq!(cfg.iteration_budget_remaining(10), 0);
+    }
+
+    #[test]
+    fn test_has_all_tools_true_when_all_registered() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("search", "Search", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("write", "Write", |_| serde_json::json!({})));
+        assert!(reg.has_all_tools(&["search", "write"]));
+    }
+
+    #[test]
+    fn test_has_all_tools_false_when_one_missing() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("search", "Search", |_| serde_json::json!({})));
+        assert!(!reg.has_all_tools(&["search", "write"]));
+    }
+
+    #[test]
+    fn test_has_all_tools_true_for_empty_slice() {
+        let reg = ToolRegistry::new();
+        assert!(reg.has_all_tools(&[]));
+    }
+
+    // ── Round 52: tool_by_name, tools_without_validators ──────────────────────
+
+    #[test]
+    fn test_tool_by_name_returns_tool_when_present() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("search", "Search the web", |_| serde_json::json!({})));
+        assert!(reg.tool_by_name("search").is_some());
+        assert_eq!(reg.tool_by_name("search").unwrap().name, "search");
+    }
+
+    #[test]
+    fn test_tool_by_name_returns_none_when_absent() {
+        let reg = ToolRegistry::new();
+        assert!(reg.tool_by_name("missing").is_none());
+    }
+
+    #[test]
+    fn test_tools_without_validators_returns_unvalidated_tools() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("a", "Tool A", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("b", "Tool B", |_| serde_json::json!({})));
+        let names = reg.tools_without_validators();
+        assert!(names.contains(&"a"));
+        assert!(names.contains(&"b"));
+    }
+
+    #[test]
+    fn test_tools_without_validators_empty_for_empty_registry() {
+        let reg = ToolRegistry::new();
+        assert!(reg.tools_without_validators().is_empty());
     }
 }

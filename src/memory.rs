@@ -2446,6 +2446,17 @@ impl EpisodicStore {
         Ok(inner.items.len())
     }
 
+    /// Return the number of episodes for `agent_id` that have at least one tag.
+    ///
+    /// Returns `0` for an unknown agent or an empty store.
+    pub fn episodes_with_tag_count(&self, agent_id: &AgentId) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episodes_with_tag_count");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or(0, |items| items.iter().filter(|m| !m.tags.is_empty()).count()))
+    }
+
     /// Return all episodes for `agent_id` whose content has at least `min_words`
     /// whitespace-delimited words.
     ///
@@ -2527,6 +2538,21 @@ impl EpisodicStore {
                     })
                     .cloned()
             }))
+    }
+
+    /// Return the number of episodes for `agent_id` that carry `tag`.
+    ///
+    /// Returns `0` for unknown agents or if no episode carries `tag`.
+    pub fn episode_count_with_tag(
+        &self,
+        agent_id: &AgentId,
+        tag: &str,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episode_count_with_tag");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or(0, |items| items.iter().filter(|m| m.has_tag(tag)).count()))
     }
 }
 
@@ -3778,6 +3804,14 @@ impl WorkingMemory {
         Ok(inner.map.values().filter(|v| v.len() > min_bytes).count())
     }
 
+    /// Return `true` if any key in the store starts with `prefix`.
+    ///
+    /// Returns `false` for an empty store.
+    pub fn has_key_starting_with(&self, prefix: &str) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::has_key_starting_with");
+        Ok(inner.map.keys().any(|k| k.starts_with(prefix)))
+    }
+
     /// Return a histogram of value byte lengths bucketed by `bucket_size`.
     ///
     /// The returned `Vec` contains `(bucket_start, count)` pairs where
@@ -4200,6 +4234,20 @@ impl WorkingMemory {
     pub fn count_keys_above_bytes(&self, min_bytes: usize) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::count_keys_above_bytes");
         Ok(inner.map.keys().filter(|k| k.len() > min_bytes).count())
+    }
+
+    /// Return `true` if any two distinct keys share the same value.
+    ///
+    /// Returns `false` for an empty store or a store with only one entry.
+    pub fn has_duplicate_values(&self) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::has_duplicate_values");
+        let mut seen = std::collections::HashSet::new();
+        for v in inner.map.values() {
+            if !seen.insert(v.as_str()) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -9145,5 +9193,93 @@ mod tests {
     fn test_key_value_pairs_sorted_empty_for_empty_store() {
         let wm = WorkingMemory::new(10).unwrap();
         assert!(wm.key_value_pairs_sorted().unwrap().is_empty());
+    }
+
+    // ── Round 52 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_episode_count_with_tag_counts_matching_episodes() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a1");
+        store
+            .add_episode_with_tags(agent.clone(), "content", 0.5, vec!["rust".into(), "ai".into()])
+            .unwrap();
+        store
+            .add_episode_with_tags(agent.clone(), "other", 0.3, vec!["rust".into()])
+            .unwrap();
+        assert_eq!(store.episode_count_with_tag(&agent, "rust").unwrap(), 2);
+        assert_eq!(store.episode_count_with_tag(&agent, "ai").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_episode_count_with_tag_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("unknown");
+        assert_eq!(store.episode_count_with_tag(&agent, "rust").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_has_duplicate_values_true_when_two_keys_share_value() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "same").unwrap();
+        wm.set("k2", "same").unwrap();
+        assert!(wm.has_duplicate_values().unwrap());
+    }
+
+    #[test]
+    fn test_has_duplicate_values_false_for_unique_values() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "one").unwrap();
+        wm.set("k2", "two").unwrap();
+        assert!(!wm.has_duplicate_values().unwrap());
+    }
+
+    #[test]
+    fn test_has_duplicate_values_false_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(!wm.has_duplicate_values().unwrap());
+    }
+
+    // ── Round 52: episodes_with_tag_count, has_key_starting_with ──────────────
+
+    #[test]
+    fn test_episodes_with_tag_count_counts_tagged_items() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r52-ewtc-1");
+        store.add_episode(agent.clone(), "no tags episode", 0.5).unwrap();
+        // Add a tagged item directly
+        {
+            let mut inner = store.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let item = MemoryItem::new(agent.clone(), "tagged content", 0.8, vec!["relevant".to_string()]);
+            inner.items.entry(agent.clone()).or_default().push(item);
+        }
+        assert_eq!(store.episodes_with_tag_count(&agent).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_episodes_with_tag_count_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r52-ewtc-unknown");
+        assert_eq!(store.episodes_with_tag_count(&agent).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_has_key_starting_with_true_when_prefix_matches() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("config_timeout", "30").unwrap();
+        assert!(wm.has_key_starting_with("config_").unwrap());
+    }
+
+    #[test]
+    fn test_has_key_starting_with_false_when_no_match() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("data_x", "v").unwrap();
+        assert!(!wm.has_key_starting_with("config_").unwrap());
+    }
+
+    #[test]
+    fn test_has_key_starting_with_false_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(!wm.has_key_starting_with("any").unwrap());
     }
 }

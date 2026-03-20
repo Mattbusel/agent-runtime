@@ -3173,6 +3173,17 @@ impl GraphStore {
         Ok(kinds.len())
     }
 
+    /// Return all entities whose label exactly matches `label` (case-sensitive).
+    ///
+    /// Unlike [`entities_with_label_containing`] this performs an exact match.
+    /// Returns an empty `Vec` for an empty graph or when no entity matches.
+    ///
+    /// [`entities_with_label_containing`]: GraphStore::entities_with_label_containing
+    pub fn entities_with_exact_label(&self, label: &str) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entities_with_exact_label");
+        Ok(inner.entities.values().filter(|e| e.label == label).cloned().collect())
+    }
+
     /// Return all entities whose out-degree is at least `min_degree`.
     ///
     /// Entities with no outgoing edges have an out-degree of 0 and are
@@ -3315,6 +3326,28 @@ impl GraphStore {
             .map(|r| r.kind.as_str())
             .collect();
         Ok(kinds.len())
+    }
+
+    /// Return `true` if at least one entity in the graph has `label` as its
+    /// label.
+    ///
+    /// Returns `false` for an empty graph.
+    pub fn has_entity_with_label(&self, label: &str) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::has_entity_with_label");
+        Ok(inner.entities.values().any(|e| e.label == label))
+    }
+
+    /// Return the minimum edge weight across all relationships, or `None` if
+    /// the graph has no relationships.
+    pub fn min_weight(&self) -> Result<Option<f32>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::min_weight");
+        let min = inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter())
+            .map(|r| r.weight)
+            .reduce(f32::min);
+        Ok(min)
     }
 }
 
@@ -6840,5 +6873,71 @@ mod tests {
     fn test_relationship_type_count_zero_for_empty_graph() {
         let g = GraphStore::new();
         assert_eq!(g.relationship_type_count().unwrap(), 0);
+    }
+
+    // ── Round 52 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_has_entity_with_label_true_when_present() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Person")).unwrap();
+        assert!(g.has_entity_with_label("Person").unwrap());
+    }
+
+    #[test]
+    fn test_has_entity_with_label_false_when_absent() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Person")).unwrap();
+        assert!(!g.has_entity_with_label("Robot").unwrap());
+    }
+
+    #[test]
+    fn test_has_entity_with_label_false_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(!g.has_entity_with_label("Anything").unwrap());
+    }
+
+    #[test]
+    fn test_min_weight_returns_smallest_weight() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "k", 0.5)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "k", 2.0)).unwrap();
+        assert_eq!(g.min_weight().unwrap(), Some(0.5));
+    }
+
+    #[test]
+    fn test_min_weight_none_for_graph_with_no_relationships() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        assert_eq!(g.min_weight().unwrap(), None);
+    }
+
+    // ── Round 52: entities_with_exact_label ───────────────────────────────────
+
+    #[test]
+    fn test_entities_with_exact_label_returns_matching_entities() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Person")).unwrap();
+        g.add_entity(Entity::new("b", "Person")).unwrap();
+        g.add_entity(Entity::new("c", "Robot")).unwrap();
+        let people = g.entities_with_exact_label("Person").unwrap();
+        assert_eq!(people.len(), 2);
+        assert!(people.iter().all(|e| e.label == "Person"));
+    }
+
+    #[test]
+    fn test_entities_with_exact_label_empty_when_no_match() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Person")).unwrap();
+        assert!(g.entities_with_exact_label("Robot").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_entities_with_exact_label_empty_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(g.entities_with_exact_label("Person").unwrap().is_empty());
     }
 }

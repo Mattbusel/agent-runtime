@@ -2106,6 +2106,11 @@ impl Pipeline {
         self.stages.iter().filter(|s| s.name.len() > min_bytes).count()
     }
 
+    /// Return a reference to the stage at 0-based `index`, or `None` if out of range.
+    pub fn stage_at_index(&self, index: usize) -> Option<&Stage> {
+        self.stages.get(index)
+    }
+
     /// Return the position of the stage named `name` counted from the end of
     /// the pipeline (0 = last stage, 1 = second-to-last, …).
     ///
@@ -2120,6 +2125,18 @@ impl Pipeline {
     /// Returns `true` for an empty `names` slice (vacuously true).
     pub fn contains_all_stages(&self, names: &[&str]) -> bool {
         names.iter().all(|&n| self.stages.iter().any(|s| s.name == n))
+    }
+
+    /// Return the stage name at position `n` from the **end** of the pipeline
+    /// (0-indexed, so `0` is the last stage).
+    ///
+    /// Returns `None` when `n` is out of bounds or the pipeline is empty.
+    pub fn stage_name_from_end(&self, n: usize) -> Option<&str> {
+        let len = self.stages.len();
+        if n >= len {
+            return None;
+        }
+        Some(self.stages[len - 1 - n].name.as_str())
     }
 
 }
@@ -4401,5 +4418,60 @@ mod tests {
     fn test_stage_names_containing_empty_when_no_match() {
         let p = Pipeline::new().add_stage("transform", |s: String| Ok(s));
         assert!(p.stage_names_containing("process").is_empty());
+    }
+
+    // ── Round 52 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_stage_name_from_end_zero_returns_last_stage() {
+        let p = Pipeline::new()
+            .add_stage("first", |s: String| Ok(s))
+            .add_stage("second", |s: String| Ok(s))
+            .add_stage("third", |s: String| Ok(s));
+        assert_eq!(p.stage_name_from_end(0), Some("third"));
+    }
+
+    #[test]
+    fn test_stage_name_from_end_one_returns_second_to_last() {
+        let p = Pipeline::new()
+            .add_stage("first", |s: String| Ok(s))
+            .add_stage("second", |s: String| Ok(s))
+            .add_stage("third", |s: String| Ok(s));
+        assert_eq!(p.stage_name_from_end(1), Some("second"));
+    }
+
+    #[test]
+    fn test_stage_name_from_end_out_of_bounds_returns_none() {
+        let p = Pipeline::new().add_stage("only", |s: String| Ok(s));
+        assert_eq!(p.stage_name_from_end(1), None);
+    }
+
+    #[test]
+    fn test_stage_name_from_end_none_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert_eq!(p.stage_name_from_end(0), None);
+    }
+
+    // ── Round 52: stage_at_index ───────────────────────────────────────────────
+
+    #[test]
+    fn test_stage_at_index_returns_correct_stage() {
+        let p = Pipeline::new()
+            .add_stage("alpha", |s: String| Ok(s))
+            .add_stage("beta", |s: String| Ok(s));
+        assert_eq!(p.stage_at_index(0).map(|s| s.name.as_str()), Some("alpha"));
+        assert_eq!(p.stage_at_index(1).map(|s| s.name.as_str()), Some("beta"));
+    }
+
+    #[test]
+    fn test_stage_at_index_none_for_out_of_bounds() {
+        let p = Pipeline::new().add_stage("only", |s: String| Ok(s));
+        assert!(p.stage_at_index(5).is_none());
+    }
+
+    #[test]
+    fn test_stage_at_index_none_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.stage_at_index(0).is_none());
     }
 }

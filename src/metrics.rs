@@ -981,6 +981,24 @@ impl MetricsSnapshot {
     pub fn distinct_tool_count(&self) -> usize {
         self.per_tool_calls.len()
     }
+
+    /// Return `true` if at least one tool call has been recorded.
+    ///
+    /// Equivalent to `self.total_tool_calls > 0`, provided as a convenience
+    /// predicate for guard clauses.
+    pub fn has_any_tool_calls(&self) -> bool {
+        self.total_tool_calls > 0
+    }
+
+    /// Return tool names sorted alphabetically.
+    ///
+    /// Only names that appear in the `per_tool_calls` map are included.
+    /// Returns an empty `Vec` when no tool calls have been recorded.
+    pub fn tool_names_alphabetical(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.per_tool_calls.keys().cloned().collect();
+        names.sort_unstable();
+        names
+    }
 }
 
 impl std::fmt::Display for MetricsSnapshot {
@@ -1544,6 +1562,18 @@ impl RuntimeMetrics {
             return 0.0;
         }
         self.failed_tool_calls() as f64 / sessions as f64
+    }
+
+    /// Return the ratio of total tool calls to total memory recalls.
+    ///
+    /// Returns `0.0` when no memory recalls have been recorded to avoid
+    /// division by zero.
+    pub fn tool_calls_per_memory_recall(&self) -> f64 {
+        let recalls = self.memory_recall_count();
+        if recalls == 0 {
+            return 0.0;
+        }
+        self.total_tool_calls() as f64 / recalls as f64
     }
 
     /// Return the top `n` tools by total call count, sorted descending.
@@ -3871,5 +3901,62 @@ mod tests {
     fn test_tool_names_by_call_count_empty_when_no_calls() {
         let m = RuntimeMetrics::new();
         assert!(m.tool_names_by_call_count().is_empty());
+    }
+
+    // ── Round 52 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_has_any_tool_calls_false_when_no_calls() {
+        let m = RuntimeMetrics::new();
+        assert!(!m.snapshot().has_any_tool_calls());
+    }
+
+    #[test]
+    fn test_has_any_tool_calls_true_after_recording() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        assert!(m.snapshot().has_any_tool_calls());
+    }
+
+    #[test]
+    fn test_tool_names_alphabetical_sorted() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("zebra");
+        m.record_tool_call("alpha");
+        m.record_tool_call("mango");
+        let names = m.snapshot().tool_names_alphabetical();
+        assert_eq!(names, vec!["alpha", "mango", "zebra"]);
+    }
+
+    #[test]
+    fn test_tool_names_alphabetical_empty_when_no_calls() {
+        let m = RuntimeMetrics::new();
+        assert!(m.snapshot().tool_names_alphabetical().is_empty());
+    }
+
+    // ── Round 52: tool_calls_per_memory_recall ─────────────────────────────────
+
+    #[test]
+    fn test_tool_calls_per_memory_recall_returns_ratio() {
+        let m = RuntimeMetrics::new();
+        m.memory_recall_count.store(2, std::sync::atomic::Ordering::Relaxed);
+        m.record_tool_call("a");
+        m.record_tool_call("b");
+        m.record_tool_call("c");
+        m.record_tool_call("d");
+        assert_eq!(m.tool_calls_per_memory_recall(), 2.0);
+    }
+
+    #[test]
+    fn test_tool_calls_per_memory_recall_zero_when_no_recalls() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("a");
+        assert_eq!(m.tool_calls_per_memory_recall(), 0.0);
+    }
+
+    #[test]
+    fn test_tool_calls_per_memory_recall_zero_for_empty_metrics() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.tool_calls_per_memory_recall(), 0.0);
     }
 }
