@@ -96,6 +96,27 @@ impl AgentSession {
         }
     }
 
+    /// Return the session wall-clock duration as a [`std::time::Duration`].
+    pub fn elapsed(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.duration_ms)
+    }
+
+    /// Return the number of tool-call actions dispatched during the session.
+    ///
+    /// Each [`ReActStep`] whose `action` parses as a `ToolCall` (not a `FinalAnswer`)
+    /// is counted.
+    pub fn tool_calls_made(&self) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| {
+                // A ToolCall action contains a JSON object.  A FinalAnswer starts
+                // with the literal "FINAL_ANSWER" prefix.
+                !s.action.trim().to_ascii_uppercase().starts_with("FINAL_ANSWER")
+                    && !s.action.trim().is_empty()
+            })
+            .count()
+    }
+
     /// Persist this session as a checkpoint under `"session:<session_id>"`.
     #[cfg(feature = "persistence")]
     pub async fn save_checkpoint(

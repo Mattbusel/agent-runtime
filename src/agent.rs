@@ -70,6 +70,21 @@ impl Message {
         }
     }
 
+    /// Create a `User` role message.
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::new(Role::User, content)
+    }
+
+    /// Create an `Assistant` role message.
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self::new(Role::Assistant, content)
+    }
+
+    /// Create a `System` role message.
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::new(Role::System, content)
+    }
+
     /// Return a reference to the message role.
     pub fn role(&self) -> &Role {
         &self.role
@@ -258,6 +273,12 @@ impl AgentConfig {
     /// initial system prompt + user turn) so the context stays under the limit.
     pub fn with_max_context_chars(mut self, n: usize) -> Self {
         self.max_context_chars = Some(n);
+        self
+    }
+
+    /// Change the model used for completions.
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = model.into();
         self
     }
 }

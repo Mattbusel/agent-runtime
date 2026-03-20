@@ -657,6 +657,30 @@ impl GraphStore {
         Ok(inner.relationships.len())
     }
 
+    /// Count entities whose label equals `label` (case-sensitive).
+    pub fn entity_count_by_label(&self, label: &str) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "entity_count_by_label");
+        Ok(inner.entities.values().filter(|e| e.label == label).count())
+    }
+
+    /// Update the label of an existing entity in-place.
+    ///
+    /// Returns `Ok(true)` if the entity was found and updated, `Ok(false)` if not found.
+    pub fn update_entity_label(
+        &self,
+        id: &EntityId,
+        new_label: impl Into<String>,
+    ) -> Result<bool, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "update_entity_label");
+        if let Some(entity) = inner.entities.get_mut(id) {
+            entity.label = new_label.into();
+            inner.cycle_cache = None;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Compute normalized degree centrality for each entity.
     /// Degree = (in_degree + out_degree) / (n - 1), or 0.0 if n <= 1.
     pub fn degree_centrality(&self) -> Result<HashMap<EntityId, f32>, AgentRuntimeError> {

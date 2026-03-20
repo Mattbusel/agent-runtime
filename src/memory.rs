@@ -189,6 +189,15 @@ impl MemoryItem {
             recall_count: 0,
         }
     }
+
+    /// Return the age of this memory in fractional hours since it was recorded.
+    ///
+    /// Returns `0.0` if the current time is somehow before `timestamp`.
+    pub fn age_hours(&self) -> f64 {
+        let now = Utc::now();
+        let elapsed = now.signed_duration_since(self.timestamp);
+        elapsed.num_milliseconds().max(0) as f64 / 3_600_000.0
+    }
 }
 
 // ── DecayPolicy ───────────────────────────────────────────────────────────────
@@ -946,6 +955,29 @@ impl EpisodicStore {
             }
         }
         Ok(false)
+    }
+
+    /// Recall the most recently added episodes for `agent_id` in reverse insertion order.
+    ///
+    /// Unlike [`recall`] (which ranks by importance), this returns the `limit` most
+    /// recently inserted items with no re-ordering.  Useful when recency matters more
+    /// than importance, e.g. retrieving the latest context window entries.
+    ///
+    /// [`recall`]: EpisodicStore::recall
+    pub fn recall_recent(
+        &self,
+        agent_id: &AgentId,
+        limit: usize,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::recall_recent");
+        let items = inner.items.get(agent_id).cloned().unwrap_or_default();
+        drop(inner);
+        let start = if limit > 0 && limit < items.len() {
+            items.len() - limit
+        } else {
+            0
+        };
+        Ok(items[start..].iter().rev().cloned().collect())
     }
 
     /// Return the total number of stored episodes across all agents.

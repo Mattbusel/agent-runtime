@@ -127,6 +127,20 @@ impl RetryPolicy {
         })
     }
 
+    /// Return a copy of this policy with `max_attempts` changed.
+    ///
+    /// # Errors
+    /// Returns `Err` if `n == 0`.
+    pub fn with_max_attempts(mut self, n: u32) -> Result<Self, AgentRuntimeError> {
+        if n == 0 {
+            return Err(AgentRuntimeError::Orchestration(
+                "max_attempts must be >= 1".into(),
+            ));
+        }
+        self.max_attempts = n;
+        Ok(self)
+    }
+
     /// Compute the delay before the given attempt number (1-based).
     ///
     /// - [`RetryKind::Exponential`]: `base_delay * 2^(attempt-1)`, capped at `MAX_RETRY_DELAY`.
@@ -1005,6 +1019,16 @@ impl Pipeline {
         self
     }
 
+    /// Return the number of stages in the pipeline.
+    pub fn stage_count(&self) -> usize {
+        self.stages.len()
+    }
+
+    /// Return the names of all stages in execution order.
+    pub fn stage_names(&self) -> Vec<&str> {
+        self.stages.iter().map(|s| s.name.as_str()).collect()
+    }
+
     /// Execute the pipeline, passing `input` through each stage in order.
     #[tracing::instrument(skip(self))]
     pub fn run(&self, input: String) -> Result<String, AgentRuntimeError> {
@@ -1056,10 +1080,6 @@ impl Pipeline {
         })
     }
 
-    /// Return the number of stages in the pipeline.
-    pub fn stage_count(&self) -> usize {
-        self.stages.len()
-    }
 }
 
 impl Default for Pipeline {
