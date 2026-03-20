@@ -653,14 +653,37 @@ impl Deduplicator {
     ///
     /// Returns results in the same order as `requests`.
     /// Each entry is `(key, ttl)` — same signature as `check`.
+    ///
+    /// Acquires the internal mutex **once** for the entire batch, avoiding the
+    /// per-key lock overhead of calling `check` in a loop.
     pub fn dedup_many(
         &self,
         requests: &[(&str, std::time::Duration)],
     ) -> Result<Vec<DeduplicationResult>, AgentRuntimeError> {
-        requests
-            .iter()
-            .map(|(key, ttl)| self.check(key, *ttl))
-            .collect()
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut inner = timed_lock(&self.inner, "Deduplicator::dedup_many");
+        let now = std::time::Instant::now();
+        let mut results = Vec::with_capacity(requests.len());
+
+        for &(key, ttl) in requests {
+            // Expire stale entries using this request's TTL.
+            inner.cache.retain(|_, (_, ts)| now.duration_since(*ts) < ttl);
+            inner.in_flight.retain(|_, ts| now.duration_since(*ts) < ttl);
+
+            let result = if let Some((cached_result, _)) = inner.cache.get(key) {
+                DeduplicationResult::Cached(cached_result.clone())
+            } else if inner.in_flight.contains_key(key) {
+                DeduplicationResult::InProgress
+            } else {
+                inner.in_flight.insert(key.to_owned(), now);
+                DeduplicationResult::New
+            };
+            results.push(result);
+        }
+
+        Ok(results)
     }
 
     /// Complete a request: move from in-flight to cached with the given result.
@@ -700,6 +723,20 @@ impl Deduplicator {
         let mut inner = timed_lock(&self.inner, "Deduplicator::fail");
         inner.in_flight.remove(key);
         Ok(())
+    }
+
+    /// Return the number of keys currently in-flight (not yet completed or failed).
+    pub fn in_flight_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = timed_lock(&self.inner, "Deduplicator::in_flight_count");
+        Ok(inner.in_flight.len())
+    }
+
+    /// Return the number of keys currently in the completed result cache.
+    ///
+    /// Note: expired entries are only removed lazily on the next `check*` call.
+    pub fn cached_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = timed_lock(&self.inner, "Deduplicator::cached_count");
+        Ok(inner.cache.len())
     }
 }
 
@@ -820,8 +857,8 @@ impl BackpressureGuard {
 pub struct PipelineResult {
     /// Final output value after all stages.
     pub output: String,
-    /// Per-stage timing: (stage_index, duration_ms).
-    pub stage_timings: Vec<(usize, u64)>,
+    /// Per-stage timing: `(stage_name, duration_ms)` in execution order.
+    pub stage_timings: Vec<(String, u64)>,
 }
 
 /// A single named stage in the pipeline.
@@ -915,10 +952,13 @@ impl Pipeline {
     }
 
     /// Execute the pipeline with per-stage timing.
+    ///
+    /// Returns a [`PipelineResult`] whose `stage_timings` contains
+    /// `(stage_name, duration_ms)` pairs in execution order.
     pub fn execute_timed(&self, input: String) -> Result<PipelineResult, AgentRuntimeError> {
         let mut current = input;
         let mut stage_timings = Vec::new();
-        for (idx, stage) in self.stages.iter().enumerate() {
+        for stage in &self.stages {
             let start = std::time::Instant::now();
             tracing::debug!(stage = %stage.name, "running timed pipeline stage");
             match (stage.handler)(current) {
@@ -933,7 +973,7 @@ impl Pipeline {
                 }
             }
             let duration_ms = start.elapsed().as_millis() as u64;
-            stage_timings.push((idx, duration_ms));
+            stage_timings.push((stage.name.clone(), duration_ms));
         }
         Ok(PipelineResult {
             output: current,
@@ -1234,8 +1274,8 @@ mod tests {
         let result = p.execute_timed("x".to_string()).unwrap();
         assert_eq!(result.output, "x12");
         assert_eq!(result.stage_timings.len(), 2);
-        assert_eq!(result.stage_timings[0].0, 0);
-        assert_eq!(result.stage_timings[1].0, 1);
+        assert_eq!(result.stage_timings[0].0, "s1");
+        assert_eq!(result.stage_timings[1].0, "s2");
     }
 
     // ── Item 13: BackpressureGuard soft limit ──────────────────────────────────

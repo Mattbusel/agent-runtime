@@ -746,6 +746,36 @@ impl EpisodicStore {
         Ok(id)
     }
 
+    /// Add multiple episodes for the same agent in a single lock acquisition.
+    ///
+    /// More efficient than calling [`add_episode`] in a loop when inserting
+    /// many items at once.  Returns the generated [`MemoryId`]s in the same
+    /// order as `episodes`.
+    ///
+    /// [`add_episode`]: EpisodicStore::add_episode
+    pub fn add_episodes_batch(
+        &self,
+        agent_id: AgentId,
+        episodes: impl IntoIterator<Item = (impl Into<String>, f32)>,
+    ) -> Result<Vec<MemoryId>, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::add_episodes_batch");
+        inner.purge_stale(&agent_id);
+        let cap = inner.per_agent_capacity;
+        let eviction_policy = inner.eviction_policy.clone();
+        let agent_items = inner.items.entry(agent_id.clone()).or_default();
+
+        let mut ids = Vec::new();
+        for (content, importance) in episodes {
+            let item = MemoryItem::new(agent_id.clone(), content, importance, Vec::new());
+            ids.push(item.id.clone());
+            agent_items.push(item);
+        }
+        if let Some(cap) = cap {
+            evict_if_over_capacity(agent_items, cap, &eviction_policy);
+        }
+        Ok(ids)
+    }
+
     /// Recall up to `limit` memories for the given agent.
     ///
     /// Applies decay if configured, purges stale items if `max_age` is set,

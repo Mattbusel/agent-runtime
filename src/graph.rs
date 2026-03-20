@@ -66,6 +66,17 @@ impl EntityId {
         Self(id)
     }
 
+    /// Create a validated `EntityId`, returning an error if `id` is empty.
+    pub fn try_new(id: impl Into<String>) -> Result<Self, AgentRuntimeError> {
+        let id = id.into();
+        if id.is_empty() {
+            return Err(AgentRuntimeError::Graph(
+                "EntityId must not be empty".into(),
+            ));
+        }
+        Ok(Self(id))
+    }
+
     /// Return the inner ID string as a `&str`.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -694,42 +705,63 @@ impl GraphStore {
         let mut centrality: HashMap<EntityId, f32> =
             nodes.iter().map(|id| (id.clone(), 0.0f32)).collect();
 
+        // Pre-allocate per-source work buffers and reuse them each iteration
+        // to avoid O(V) HashMap allocations * V source nodes = O(V²) allocations.
+        let mut stack: Vec<EntityId> = Vec::with_capacity(n);
+        let mut predecessors: HashMap<EntityId, Vec<EntityId>> =
+            nodes.iter().map(|id| (id.clone(), vec![])).collect();
+        let mut sigma: HashMap<EntityId, f32> =
+            nodes.iter().map(|id| (id.clone(), 0.0f32)).collect();
+        let mut dist: HashMap<EntityId, i64> =
+            nodes.iter().map(|id| (id.clone(), -1i64)).collect();
+        let mut delta: HashMap<EntityId, f32> =
+            nodes.iter().map(|id| (id.clone(), 0.0f32)).collect();
+        let mut queue: VecDeque<EntityId> = VecDeque::with_capacity(n);
+
         for source in &nodes {
             // BFS to find shortest path counts and predecessors.
-            let mut stack: Vec<EntityId> = Vec::new();
-            let mut predecessors: HashMap<EntityId, Vec<EntityId>> =
-                nodes.iter().map(|id| (id.clone(), vec![])).collect();
-            let mut sigma: HashMap<EntityId, f32> =
-                nodes.iter().map(|id| (id.clone(), 0.0f32)).collect();
-            let mut dist: HashMap<EntityId, i64> =
-                nodes.iter().map(|id| (id.clone(), -1i64)).collect();
+            // Reset per-source state by clearing rather than re-allocating.
+            stack.clear();
+            for v in predecessors.values_mut() {
+                v.clear();
+            }
+            for v in sigma.values_mut() {
+                *v = 0.0;
+            }
+            for v in dist.values_mut() {
+                *v = -1;
+            }
+            for v in delta.values_mut() {
+                *v = 0.0;
+            }
+            queue.clear();
 
             *sigma.entry(source.clone()).or_insert(0.0) = 1.0;
             *dist.entry(source.clone()).or_insert(-1) = 0;
-
-            let mut queue: VecDeque<EntityId> = VecDeque::new();
             queue.push_back(source.clone());
 
             while let Some(v) = queue.pop_front() {
                 stack.push(v.clone());
                 let d_v = *dist.get(&v).unwrap_or(&0);
                 let sigma_v = *sigma.get(&v).unwrap_or(&0.0);
-                for rel in inner.relationships.iter().filter(|r| &r.from == &v) {
-                    let w = &rel.to;
-                    let d_w = dist.get(w).copied().unwrap_or(-1);
-                    if d_w < 0 {
-                        queue.push_back(w.clone());
-                        *dist.entry(w.clone()).or_insert(-1) = d_v + 1;
-                    }
-                    if dist.get(w).copied().unwrap_or(-1) == d_v + 1 {
-                        *sigma.entry(w.clone()).or_insert(0.0) += sigma_v;
-                        predecessors.entry(w.clone()).or_default().push(v.clone());
+                // Use adjacency index for O(degree) neighbour lookup.
+                if let Some(rels) = inner.adjacency.get(&v) {
+                    for rel in rels {
+                        let w = &rel.to;
+                        let d_w = dist.get(w).copied().unwrap_or(-1);
+                        if d_w < 0 {
+                            queue.push_back(w.clone());
+                            *dist.entry(w.clone()).or_insert(-1) = d_v + 1;
+                        }
+                        if dist.get(w).copied().unwrap_or(-1) == d_v + 1 {
+                            *sigma.entry(w.clone()).or_insert(0.0) += sigma_v;
+                            predecessors.entry(w.clone()).or_default().push(v.clone());
+                        }
                     }
                 }
             }
 
-            let mut delta: HashMap<EntityId, f32> =
-                nodes.iter().map(|id| (id.clone(), 0.0f32)).collect();
+            // (delta map reset above at start of loop)
 
             while let Some(w) = stack.pop() {
                 let delta_w = *delta.get(&w).unwrap_or(&0.0);
@@ -776,6 +808,18 @@ impl GraphStore {
         let inner = recover_lock(self.inner.lock(), "label_propagation_communities");
         let nodes: Vec<EntityId> = inner.entities.keys().cloned().collect();
 
+        // Build a temporary reverse-adjacency (incoming edges) so that each
+        // node can cheaply query both its out-neighbours (via adjacency) and
+        // its in-neighbours (via reverse_adj) without an O(|E|) scan per node.
+        let mut reverse_adj: HashMap<EntityId, Vec<EntityId>> =
+            nodes.iter().map(|id| (id.clone(), vec![])).collect();
+        for rel in &inner.relationships {
+            reverse_adj
+                .entry(rel.to.clone())
+                .or_default()
+                .push(rel.from.clone());
+        }
+
         // Assign each node a unique initial label (index in nodes vec).
         let mut labels: HashMap<EntityId, usize> = nodes
             .iter()
@@ -787,19 +831,22 @@ impl GraphStore {
             let mut changed = false;
             // Iterate in a stable order.
             for node in &nodes {
-                // Collect neighbour labels.
-                let neighbour_labels: Vec<usize> = inner
-                    .relationships
-                    .iter()
-                    .filter(|r| &r.from == node || &r.to == node)
-                    .map(|r| {
-                        if &r.from == node {
-                            labels.get(&r.to).copied().unwrap_or(0)
-                        } else {
-                            labels.get(&r.from).copied().unwrap_or(0)
-                        }
+                // Collect neighbour labels using adjacency (out) + reverse_adj (in).
+                let out_labels = inner
+                    .adjacency
+                    .get(node)
+                    .map(|rels| {
+                        rels.iter()
+                            .map(|r| labels.get(&r.to).copied().unwrap_or(0))
                     })
-                    .collect();
+                    .into_iter()
+                    .flatten();
+                let in_labels = reverse_adj
+                    .get(node)
+                    .map(|froms| froms.iter().map(|f| labels.get(f).copied().unwrap_or(0)))
+                    .into_iter()
+                    .flatten();
+                let neighbour_labels: Vec<usize> = out_labels.chain(in_labels).collect();
 
                 if neighbour_labels.is_empty() {
                     continue;
