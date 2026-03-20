@@ -885,6 +885,77 @@ impl AgentSession {
         unique.len()
     }
 
+    /// Return references to steps whose indices fall in `[start, end)`.
+    ///
+    /// Clamps `end` to `step_count()` so out-of-bounds ranges are safe.
+    /// Returns an empty `Vec` when `start >= step_count()` or `start >= end`.
+    pub fn steps_in_range(&self, start: usize, end: usize) -> Vec<&ReActStep> {
+        let clamped_end = end.min(self.steps.len());
+        if start >= clamped_end {
+            return Vec::new();
+        }
+        self.steps[start..clamped_end].iter().collect()
+    }
+
+    /// Return the median step duration in milliseconds.
+    ///
+    /// Sorts step durations and picks the middle value (lower median for even
+    /// counts).  Returns `0` when the session has no steps.
+    pub fn median_step_duration_ms(&self) -> u64 {
+        if self.steps.is_empty() {
+            return 0;
+        }
+        let mut durations: Vec<u64> = self.steps.iter().map(|s| s.step_duration_ms).collect();
+        durations.sort_unstable();
+        durations[durations.len() / 2]
+    }
+
+    /// Return the 95th-percentile step duration in milliseconds.
+    ///
+    /// Uses the nearest-rank method: the value at index `⌈0.95 × n⌉ − 1` in
+    /// the sorted list of step durations.  Returns `0` when the session has no
+    /// steps.
+    pub fn p95_step_duration_ms(&self) -> u64 {
+        if self.steps.is_empty() {
+            return 0;
+        }
+        let mut durations: Vec<u64> = self.steps.iter().map(|s| s.step_duration_ms).collect();
+        durations.sort_unstable();
+        let idx = ((durations.len() as f64 * 0.95).ceil() as usize)
+            .saturating_sub(1)
+            .min(durations.len() - 1);
+        durations[idx]
+    }
+
+    /// Return the 99th-percentile step duration in milliseconds.
+    ///
+    /// Uses the nearest-rank method: the value at index `⌈0.99 × n⌉ − 1` in
+    /// the sorted list of step durations.  Returns `0` when the session has no
+    /// steps.
+    pub fn p99_step_duration_ms(&self) -> u64 {
+        if self.steps.is_empty() {
+            return 0;
+        }
+        let mut durations: Vec<u64> = self.steps.iter().map(|s| s.step_duration_ms).collect();
+        durations.sort_unstable();
+        let idx = ((durations.len() as f64 * 0.99).ceil() as usize)
+            .saturating_sub(1)
+            .min(durations.len() - 1);
+        durations[idx]
+    }
+
+    /// Return the count of steps whose `step_duration_ms` is strictly greater
+    /// than `threshold_ms`.
+    ///
+    /// Useful for identifying sessions that contain outlier-slow steps.
+    /// Returns `0` for empty sessions.
+    pub fn step_count_above_duration_ms(&self, threshold_ms: u64) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| s.step_duration_ms > threshold_ms)
+            .count()
+    }
+
     /// Persist this session as a checkpoint under `"session:<session_id>"`.
     #[cfg(feature = "persistence")]
     pub async fn save_checkpoint(
@@ -951,6 +1022,35 @@ impl AgentSession {
                 Ok(Some(session))
             }
         }
+    }
+
+    /// Consume this session and return its steps as an owned `Vec`.
+    ///
+    /// Useful when the caller needs owned `ReActStep` values — for example to
+    /// move them into another data structure — without cloning the entire list.
+    ///
+    /// ```rust,ignore
+    /// let steps = session.into_steps();
+    /// for step in steps { /* owned */ }
+    /// ```
+    pub fn into_steps(self) -> Vec<crate::agent::ReActStep> {
+        self.steps
+    }
+
+    /// Return an iterator over the steps in this session.
+    ///
+    /// Equivalent to `session.steps.iter()` but avoids exposing the raw
+    /// field for callers who prefer the method-call style.
+    pub fn iter_steps(&self) -> std::slice::Iter<'_, crate::agent::ReActStep> {
+        self.steps.iter()
+    }
+
+    /// Return `true` if the session has at least `n` steps.
+    ///
+    /// More efficient than `step_count() >= n` because it uses
+    /// `steps.len()` directly and is easy to read at the call site.
+    pub fn has_at_least_steps(&self, n: usize) -> bool {
+        self.steps.len() >= n
     }
 }
 
@@ -4203,5 +4303,100 @@ mod tests {
         ];
         let session = make_session(steps, 0);
         assert_eq!(session.total_observation_bytes(), 7);
+    }
+
+    // ── Round 40 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_steps_in_range_returns_correct_slice() {
+        let steps = vec![
+            make_step("t", "a", "o"),
+            make_step("t", "b", "o"),
+            make_step("t", "c", "o"),
+        ];
+        let session = make_session(steps, 0);
+        let slice = session.steps_in_range(1, 3);
+        assert_eq!(slice.len(), 2);
+        assert_eq!(slice[0].action, "b");
+        assert_eq!(slice[1].action, "c");
+    }
+
+    #[test]
+    fn test_steps_in_range_returns_empty_for_out_of_bounds_start() {
+        let steps = vec![make_step("t", "a", "o")];
+        let session = make_session(steps, 0);
+        assert!(session.steps_in_range(5, 10).is_empty());
+    }
+
+    #[test]
+    fn test_median_step_duration_ms_odd_count() {
+        let mut steps = vec![
+            make_step("t", "a", "o"),
+            make_step("t", "b", "o"),
+            make_step("t", "c", "o"),
+        ];
+        steps[0].step_duration_ms = 10;
+        steps[1].step_duration_ms = 50;
+        steps[2].step_duration_ms = 30;
+        let session = make_session(steps, 0);
+        // sorted: [10, 30, 50] → median = 30
+        assert_eq!(session.median_step_duration_ms(), 30);
+    }
+
+    #[test]
+    fn test_median_step_duration_ms_returns_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.median_step_duration_ms(), 0);
+    }
+
+    // ── Round 40: into_steps, iter_steps, has_at_least_steps ─────────────────
+
+    #[test]
+    fn test_into_steps_consumes_session_and_returns_owned_vec() {
+        let steps = vec![
+            make_step("think", "act", "obs"),
+            make_step("think2", "act2", "obs2"),
+        ];
+        let session = make_session(steps, 0);
+        let owned = session.into_steps();
+        assert_eq!(owned.len(), 2);
+        assert_eq!(owned[0].thought, "think");
+        assert_eq!(owned[1].action, "act2");
+    }
+
+    #[test]
+    fn test_into_steps_returns_empty_vec_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.into_steps().is_empty());
+    }
+
+    #[test]
+    fn test_iter_steps_iterates_in_order() {
+        let steps = vec![
+            make_step("t1", "a1", "o1"),
+            make_step("t2", "a2", "o2"),
+        ];
+        let session = make_session(steps, 0);
+        let thoughts: Vec<&str> = session.iter_steps().map(|s| s.thought.as_str()).collect();
+        assert_eq!(thoughts, vec!["t1", "t2"]);
+    }
+
+    #[test]
+    fn test_has_at_least_steps_true_when_enough_steps() {
+        let session = make_session(vec![make_step("t", "a", "o"), make_step("t", "a", "o")], 0);
+        assert!(session.has_at_least_steps(2));
+        assert!(session.has_at_least_steps(1));
+    }
+
+    #[test]
+    fn test_has_at_least_steps_false_when_too_few() {
+        let session = make_session(vec![make_step("t", "a", "o")], 0);
+        assert!(!session.has_at_least_steps(2));
+    }
+
+    #[test]
+    fn test_has_at_least_steps_zero_always_true() {
+        let session = make_session(vec![], 0);
+        assert!(session.has_at_least_steps(0));
     }
 }

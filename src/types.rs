@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Stable identifier for an agent instance.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AgentId(pub String);
 
 impl AgentId {
@@ -82,8 +82,49 @@ impl std::fmt::Display for AgentId {
     }
 }
 
+impl From<String> for AgentId {
+    /// Create an `AgentId` from an owned `String`.
+    ///
+    /// Equivalent to [`AgentId::new`]; emits a `tracing::warn!` for empty strings.
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<&str> for AgentId {
+    /// Create an `AgentId` from a string slice.
+    ///
+    /// Equivalent to [`AgentId::new`]; emits a `tracing::warn!` for empty strings.
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl std::str::FromStr for AgentId {
+    type Err = crate::error::AgentRuntimeError;
+
+    /// Parse an `AgentId` from a string, returning an error if the string is empty.
+    ///
+    /// Unlike [`AgentId::new`] this is a validated constructor: empty strings are
+    /// rejected with `AgentRuntimeError::Memory` rather than silently warned about.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_new(s)
+    }
+}
+
+impl std::ops::Deref for AgentId {
+    type Target = str;
+
+    /// Dereference to the inner ID string slice.
+    ///
+    /// Allows `&agent_id` to coerce to `&str` transparently.
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 /// Stable identifier for a memory item.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MemoryId(pub String);
 
 impl MemoryId {
@@ -149,6 +190,47 @@ impl AsRef<str> for MemoryId {
 impl std::fmt::Display for MemoryId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl From<String> for MemoryId {
+    /// Create a `MemoryId` from an owned `String`.
+    ///
+    /// Equivalent to [`MemoryId::new`]; emits a `tracing::warn!` for empty strings.
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<&str> for MemoryId {
+    /// Create a `MemoryId` from a string slice.
+    ///
+    /// Equivalent to [`MemoryId::new`]; emits a `tracing::warn!` for empty strings.
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl std::str::FromStr for MemoryId {
+    type Err = crate::error::AgentRuntimeError;
+
+    /// Parse a `MemoryId` from a string, returning an error if the string is empty.
+    ///
+    /// Unlike [`MemoryId::new`] this is a validated constructor: empty strings are
+    /// rejected with `AgentRuntimeError::Memory` rather than silently warned about.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_new(s)
+    }
+}
+
+impl std::ops::Deref for MemoryId {
+    type Target = str;
+
+    /// Dereference to the inner ID string slice.
+    ///
+    /// Allows `&memory_id` to coerce to `&str` transparently.
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -244,5 +326,103 @@ mod tests {
         let id = MemoryId::new("mem-42");
         assert!(id.starts_with("mem-"));
         assert!(!id.starts_with("ep-"));
+    }
+
+    // ── Round 40: PartialOrd/Ord, From, FromStr, Deref ────────────────────────
+
+    #[test]
+    fn test_agent_id_ord_allows_sorting() {
+        let mut ids = vec![AgentId::new("c"), AgentId::new("a"), AgentId::new("b")];
+        ids.sort();
+        assert_eq!(ids[0].as_str(), "a");
+        assert_eq!(ids[2].as_str(), "c");
+    }
+
+    #[test]
+    fn test_agent_id_ord_allows_btreemap_key() {
+        use std::collections::BTreeMap;
+        let mut map: BTreeMap<AgentId, u32> = BTreeMap::new();
+        map.insert(AgentId::new("agent-2"), 2);
+        map.insert(AgentId::new("agent-1"), 1);
+        let keys: Vec<_> = map.keys().map(|k| k.as_str()).collect();
+        assert_eq!(keys, vec!["agent-1", "agent-2"]);
+    }
+
+    #[test]
+    fn test_agent_id_from_string() {
+        let id = AgentId::from("my-agent".to_owned());
+        assert_eq!(id.as_str(), "my-agent");
+    }
+
+    #[test]
+    fn test_agent_id_from_str_ref() {
+        let id = AgentId::from("my-agent");
+        assert_eq!(id.as_str(), "my-agent");
+    }
+
+    #[test]
+    fn test_agent_id_from_str_parse_rejects_empty() {
+        let result: Result<AgentId, _> = "".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_agent_id_from_str_parse_accepts_nonempty() {
+        let id: AgentId = "worker-1".parse().unwrap();
+        assert_eq!(id.as_str(), "worker-1");
+    }
+
+    #[test]
+    fn test_agent_id_deref_to_str() {
+        let id = AgentId::new("deref-test");
+        let s: &str = &id;
+        assert_eq!(s, "deref-test");
+    }
+
+    #[test]
+    fn test_agent_id_deref_enables_str_methods() {
+        let id = AgentId::new("hello-world");
+        // Deref lets us call &str methods directly on &AgentId
+        assert!(id.contains('-'));
+        assert_eq!(id.len(), 11);
+    }
+
+    #[test]
+    fn test_memory_id_ord_allows_sorting() {
+        let mut ids = vec![MemoryId::new("z"), MemoryId::new("a"), MemoryId::new("m")];
+        ids.sort();
+        assert_eq!(ids[0].as_str(), "a");
+        assert_eq!(ids[2].as_str(), "z");
+    }
+
+    #[test]
+    fn test_memory_id_from_string() {
+        let id = MemoryId::from("mem-x".to_owned());
+        assert_eq!(id.as_str(), "mem-x");
+    }
+
+    #[test]
+    fn test_memory_id_from_str_ref() {
+        let id = MemoryId::from("mem-y");
+        assert_eq!(id.as_str(), "mem-y");
+    }
+
+    #[test]
+    fn test_memory_id_from_str_parse_rejects_empty() {
+        let result: Result<MemoryId, _> = "".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_memory_id_from_str_parse_accepts_nonempty() {
+        let id: MemoryId = "ep-001".parse().unwrap();
+        assert_eq!(id.as_str(), "ep-001");
+    }
+
+    #[test]
+    fn test_memory_id_deref_to_str() {
+        let id = MemoryId::new("deref-mem");
+        let s: &str = &id;
+        assert_eq!(s, "deref-mem");
     }
 }

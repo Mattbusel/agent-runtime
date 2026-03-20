@@ -202,6 +202,30 @@ impl ReActStep {
     pub fn observation_is_empty(&self) -> bool {
         self.observation.is_empty()
     }
+
+    /// Return a concise single-line summary of this step.
+    ///
+    /// Format: `"[{kind}] thought={thought_preview} action={action_preview} obs={obs_preview}"`
+    /// where each preview is at most 40 bytes, truncated with `…` if longer.
+    /// `{kind}` is `"FINAL"` for a final-answer step and `"TOOL"` otherwise.
+    ///
+    /// Intended for logging and debugging — not a stable serialization format.
+    pub fn summary(&self) -> String {
+        fn preview(s: &str) -> String {
+            if s.len() <= 40 {
+                s.to_owned()
+            } else {
+                format!("{}…", &s[..40])
+            }
+        }
+        let kind = if self.is_final_answer() { "FINAL" } else { "TOOL" };
+        format!(
+            "[{kind}] thought={t} action={a} obs={o}",
+            t = preview(self.thought.trim()),
+            a = preview(self.action.trim()),
+            o = preview(self.observation.trim()),
+        )
+    }
 }
 
 /// Configuration for the ReAct agent loop.
@@ -374,6 +398,27 @@ impl AgentConfig {
     pub fn clone_with_model(&self, model: impl Into<String>) -> Self {
         let mut copy = self.clone();
         copy.model = model.into();
+        copy
+    }
+
+    /// Clone this config with only the `system_prompt` field changed.
+    ///
+    /// Useful when the same configuration is shared across multiple agents that
+    /// differ only in the system prompt used for their sessions.
+    pub fn clone_with_system_prompt(&self, prompt: impl Into<String>) -> Self {
+        let mut copy = self.clone();
+        copy.system_prompt = prompt.into();
+        copy
+    }
+
+    /// Clone this config with only the `max_iterations` field changed.
+    ///
+    /// Useful when the same configuration is shared across multiple agents that
+    /// differ only in the iteration budget — for example, a quick draft agent
+    /// and a thorough research agent backed by the same model.
+    pub fn clone_with_max_iterations(&self, n: usize) -> Self {
+        let mut copy = self.clone();
+        copy.max_iterations = n;
         copy
     }
 
@@ -1257,6 +1302,14 @@ impl ToolRegistry {
             .values()
             .filter(|s| s.description.to_ascii_lowercase().contains(&kw))
             .count()
+    }
+
+    /// Return the total byte length of all tool description strings combined.
+    ///
+    /// Useful as a rough measure of how much context the tool registry will
+    /// contribute to a prompt when all descriptions are serialized together.
+    pub fn total_description_bytes(&self) -> usize {
+        self.tools.values().map(|s| s.description.len()).sum()
     }
 }
 
@@ -3825,5 +3878,40 @@ mod tests {
     fn test_description_contains_count_zero_when_empty() {
         let reg = ToolRegistry::new();
         assert_eq!(reg.description_contains_count("anything"), 0);
+    }
+
+    // ── Round 40: ReActStep::summary ─────────────────────────────────────────
+
+    #[test]
+    fn test_react_step_summary_tool_kind() {
+        let step = ReActStep::new("I need to search", r#"{"tool":"search","q":"rust"}"#, "results");
+        let s = step.summary();
+        assert!(s.starts_with("[TOOL]"));
+        assert!(s.contains("I need to search"));
+        assert!(s.contains("results"));
+    }
+
+    #[test]
+    fn test_react_step_summary_final_kind() {
+        let step = ReActStep::new("Done", "FINAL_ANSWER hello", "");
+        let s = step.summary();
+        assert!(s.starts_with("[FINAL]"));
+        assert!(s.contains("FINAL_ANSWER hello"));
+    }
+
+    #[test]
+    fn test_react_step_summary_truncates_long_fields() {
+        let long = "a".repeat(100);
+        let step = ReActStep::new(long.clone(), long.clone(), long.clone());
+        let s = step.summary();
+        // Each preview is capped at 40 chars plus "…"
+        assert!(s.contains('…'));
+    }
+
+    #[test]
+    fn test_react_step_summary_empty_fields() {
+        let step = ReActStep::new("", "", "");
+        let s = step.summary();
+        assert!(s.contains("[TOOL]"));
     }
 }

@@ -159,6 +159,17 @@ impl From<std::io::Error> for AgentRuntimeError {
     }
 }
 
+impl From<Box<dyn std::error::Error + Send + Sync>> for AgentRuntimeError {
+    /// Convert any boxed `Send + Sync` error into an `AgentRuntimeError::AgentLoop`.
+    ///
+    /// This is a catch-all conversion that lets library users propagate arbitrary
+    /// errors through `?` in tool handlers and inference closures without having to
+    /// manually map each error type.  The error message is preserved verbatim.
+    fn from(e: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        AgentRuntimeError::AgentLoop(e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,5 +394,24 @@ mod tests {
     fn test_is_orchestration_false_for_other_variants() {
         let e = AgentRuntimeError::Graph("cycle".into());
         assert!(!e.is_orchestration());
+    }
+
+    // ── Round 40: From<Box<dyn Error + Send + Sync>> ──────────────────────────
+
+    #[test]
+    fn test_from_boxed_error_produces_agent_loop_variant() {
+        let boxed: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(std::io::Error::new(std::io::ErrorKind::Other, "generic failure"));
+        let e = AgentRuntimeError::from(boxed);
+        assert!(matches!(e, AgentRuntimeError::AgentLoop(_)));
+        assert!(e.to_string().contains("generic failure"));
+    }
+
+    #[test]
+    fn test_from_boxed_error_preserves_message() {
+        let boxed: Box<dyn std::error::Error + Send + Sync> =
+            "custom error message".parse::<i32>().unwrap_err().into();
+        let e = AgentRuntimeError::from(boxed);
+        assert!(e.is_agent_loop());
     }
 }

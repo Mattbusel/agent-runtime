@@ -1178,6 +1178,22 @@ impl RuntimeMetrics {
         self.step_latency.p99()
     }
 
+    /// Return the 95th-percentile step latency in milliseconds.
+    ///
+    /// Delegates to [`LatencyHistogram::p95`].  Returns `0` if no steps have
+    /// been recorded.
+    pub fn step_latency_p95(&self) -> u64 {
+        self.step_latency.p95()
+    }
+
+    /// Return the 75th-percentile step latency in milliseconds.
+    ///
+    /// Delegates to [`LatencyHistogram::p75`].  Returns `0` if no steps have
+    /// been recorded.
+    pub fn step_latency_p75(&self) -> u64 {
+        self.step_latency.p75()
+    }
+
     /// Return the top `n` tools by total call count, sorted descending.
     ///
     /// Returns fewer than `n` entries if fewer tools have been called.
@@ -2866,5 +2882,37 @@ mod tests {
     fn test_backpressure_shed_rate_zero_when_no_tool_calls() {
         let snap = MetricsSnapshot::default();
         assert_eq!(snap.backpressure_shed_rate(), 0.0);
+    }
+
+    // ── Round 40 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_step_latency_p95_zero_when_empty() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.step_latency_p95(), 0);
+    }
+
+    #[test]
+    fn test_step_latency_p75_zero_when_empty() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.step_latency_p75(), 0);
+    }
+
+    #[test]
+    fn test_step_latency_p95_gte_p75_after_recording() {
+        let m = RuntimeMetrics::new();
+        for ms in [1, 5, 10, 50, 100, 500, 1000] {
+            m.record_step_latency(ms);
+        }
+        assert!(m.step_latency_p95() >= m.step_latency_p75());
+    }
+
+    #[test]
+    fn test_step_latency_p99_gte_p95_after_recording() {
+        let m = RuntimeMetrics::new();
+        for ms in [1, 5, 10, 50, 100, 500, 1000] {
+            m.record_step_latency(ms);
+        }
+        assert!(m.step_latency_p99() >= m.step_latency_p95());
     }
 }

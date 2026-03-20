@@ -107,6 +107,47 @@ impl std::fmt::Display for EntityId {
     }
 }
 
+impl From<String> for EntityId {
+    /// Create an `EntityId` from an owned `String`.
+    ///
+    /// Equivalent to [`EntityId::new`]; emits a `tracing::warn!` for empty strings.
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<&str> for EntityId {
+    /// Create an `EntityId` from a string slice.
+    ///
+    /// Equivalent to [`EntityId::new`]; emits a `tracing::warn!` for empty strings.
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl std::str::FromStr for EntityId {
+    type Err = AgentRuntimeError;
+
+    /// Parse an `EntityId` from a string, returning an error if the string is empty.
+    ///
+    /// Unlike [`EntityId::new`] this is a validated constructor: empty strings are
+    /// rejected with `AgentRuntimeError::Graph` rather than silently warned about.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_new(s)
+    }
+}
+
+impl std::ops::Deref for EntityId {
+    type Target = str;
+
+    /// Dereference to the inner ID string slice.
+    ///
+    /// Allows `&entity_id` to coerce to `&str` transparently.
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 // ── Entity ────────────────────────────────────────────────────────────────────
 
 /// A node in the knowledge graph.
@@ -164,6 +205,24 @@ impl Entity {
     /// Return a reference to the property value for `key`, or `None` if absent.
     pub fn property_value(&self, key: &str) -> Option<&serde_json::Value> {
         self.properties.get(key)
+    }
+
+    /// Remove the property with the given key, returning its previous value.
+    ///
+    /// Returns `None` if the key was not present.  Allows incremental
+    /// property pruning without needing to reconstruct the entire entity.
+    pub fn remove_property(&mut self, key: &str) -> Option<serde_json::Value> {
+        self.properties.remove(key)
+    }
+
+    /// Return the number of properties stored on this entity.
+    pub fn property_count(&self) -> usize {
+        self.properties.len()
+    }
+
+    /// Return `true` if this entity has no properties.
+    pub fn properties_is_empty(&self) -> bool {
+        self.properties.is_empty()
     }
 }
 
@@ -2525,6 +2584,33 @@ impl GraphStore {
         Ok(pairs
             .into_iter()
             .filter_map(|(id, _)| inner.entities.get(id).cloned())
+            .collect())
+    }
+
+    /// Return a map of relationship type label → count across the entire graph.
+    ///
+    /// Useful for understanding the composition of a knowledge graph at a glance.
+    /// Returns an empty map when the graph has no relationships.
+    pub fn relationship_type_counts(&self) -> Result<HashMap<String, usize>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::relationship_type_counts");
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for rel in &inner.relationships {
+            *counts.entry(rel.kind.clone()).or_insert(0) += 1;
+        }
+        Ok(counts)
+    }
+
+    /// Return all entities that do **not** have a property with `key`.
+    ///
+    /// Useful for finding incomplete nodes that need a required attribute filled
+    /// in before they can participate in downstream graph queries.
+    pub fn entities_without_property(&self, key: &str) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entities_without_property");
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| !e.properties.contains_key(key))
+            .cloned()
             .collect())
     }
 }
@@ -5055,5 +5141,118 @@ mod tests {
         let g = GraphStore::new();
         g.add_entity(Entity::new("a", "N")).unwrap();
         assert!(g.neighbors_of(&EntityId::new("a")).unwrap().is_empty());
+    }
+
+    // ── Round 40: EntityId From/FromStr/Deref, Entity remove_property ─────────
+
+    #[test]
+    fn test_entity_id_from_string() {
+        let id = EntityId::from("node-1".to_owned());
+        assert_eq!(id.as_str(), "node-1");
+    }
+
+    #[test]
+    fn test_entity_id_from_str_ref() {
+        let id = EntityId::from("node-2");
+        assert_eq!(id.as_str(), "node-2");
+    }
+
+    #[test]
+    fn test_entity_id_from_str_parse_rejects_empty() {
+        let result: Result<EntityId, _> = "".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_entity_id_from_str_parse_accepts_nonempty() {
+        let id: EntityId = "alice".parse().unwrap();
+        assert_eq!(id.as_str(), "alice");
+    }
+
+    #[test]
+    fn test_entity_id_deref_to_str() {
+        let id = EntityId::new("deref-node");
+        let s: &str = &id;
+        assert_eq!(s, "deref-node");
+    }
+
+    #[test]
+    fn test_entity_id_deref_enables_str_methods() {
+        let id = EntityId::new("hello-world");
+        assert!(id.contains('-'));
+        assert_eq!(id.len(), 11);
+    }
+
+    #[test]
+    fn test_entity_remove_property_returns_value() {
+        let mut e = Entity::new("e1", "Person")
+            .with_property("age", serde_json::json!(30));
+        let removed = e.remove_property("age");
+        assert_eq!(removed, Some(serde_json::json!(30)));
+        assert!(!e.has_property("age"));
+    }
+
+    #[test]
+    fn test_entity_remove_property_returns_none_when_absent() {
+        let mut e = Entity::new("e2", "Person");
+        assert!(e.remove_property("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_entity_property_count() {
+        let e = Entity::new("e3", "X")
+            .with_property("a", serde_json::json!(1))
+            .with_property("b", serde_json::json!(2));
+        assert_eq!(e.property_count(), 2);
+    }
+
+    #[test]
+    fn test_entity_properties_is_empty_true_when_none() {
+        let e = Entity::new("e4", "X");
+        assert!(e.properties_is_empty());
+    }
+
+    #[test]
+    fn test_entity_properties_is_empty_false_when_has_props() {
+        let e = Entity::new("e5", "X").with_property("k", serde_json::json!("v"));
+        assert!(!e.properties_is_empty());
+    }
+
+    // ── Round 40 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_relationship_type_counts_returns_correct_map() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "KNOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "LIKES", 1.0)).unwrap();
+        let counts = g.relationship_type_counts().unwrap();
+        assert_eq!(counts.get("KNOWS"), Some(&2));
+        assert_eq!(counts.get("LIKES"), Some(&1));
+    }
+
+    #[test]
+    fn test_relationship_type_counts_empty_graph_returns_empty_map() {
+        let g = GraphStore::new();
+        assert!(g.relationship_type_counts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_entities_without_property_returns_nodes_missing_key() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N").with_property("age", serde_json::json!(30))).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        let result = g.entities_without_property("age").unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|e| !e.properties.contains_key("age")));
+    }
+
+    #[test]
+    fn test_entities_without_property_empty_when_all_have_key() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N").with_property("role", serde_json::json!("admin"))).unwrap();
+        assert!(g.entities_without_property("role").unwrap().is_empty());
     }
 }

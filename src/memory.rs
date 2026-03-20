@@ -1957,6 +1957,46 @@ impl EpisodicStore {
         }
         Ok(matched)
     }
+
+    /// Return the count of episodes for `agent_id` whose importance is strictly
+    /// above `threshold`.
+    ///
+    /// Returns `0` for unknown agents or when no episodes exceed the threshold.
+    pub fn episode_count_above_importance(
+        &self,
+        agent_id: &AgentId,
+        threshold: f32,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episode_count_above_importance");
+        let count = inner
+            .items
+            .get(agent_id)
+            .map_or(0, |items| items.iter().filter(|m| m.importance > threshold).count());
+        Ok(count)
+    }
+
+    /// Return all episodes for `agent_id` whose importance is strictly below
+    /// `threshold`, sorted by importance ascending (least important first).
+    ///
+    /// Returns an empty `Vec` for unknown agents or when all episodes meet the
+    /// threshold.
+    pub fn low_importance_episodes(
+        &self,
+        agent_id: &AgentId,
+        threshold: f32,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::low_importance_episodes");
+        let mut items: Vec<MemoryItem> = inner
+            .items
+            .get(agent_id)
+            .map_or_else(Vec::new, |items| {
+                items.iter().filter(|m| m.importance < threshold).cloned().collect()
+            });
+        items.sort_unstable_by(|a, b| {
+            a.importance.partial_cmp(&b.importance).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(items)
+    }
 }
 
 impl Default for EpisodicStore {
@@ -3281,6 +3321,22 @@ impl WorkingMemory {
             inner.map.insert(k, v);
         }
         Ok(())
+    }
+
+    /// Return all values whose content contains `substring` (case-sensitive),
+    /// in insertion order.
+    ///
+    /// Returns an empty `Vec` when no values match or the store is empty.
+    pub fn values_containing(&self, substring: &str) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::values_containing");
+        let result = inner
+            .order
+            .iter()
+            .filter_map(|k| {
+                inner.map.get(k).filter(|v| v.contains(substring)).cloned()
+            })
+            .collect();
+        Ok(result)
     }
 }
 
@@ -7146,5 +7202,62 @@ mod tests {
     fn test_working_memory_min_value_length_empty_returns_zero() {
         let wm = WorkingMemory::new(10).unwrap();
         assert_eq!(wm.min_value_length().unwrap(), 0);
+    }
+
+    // ── Round 40 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_episodic_store_episode_count_above_importance_counts_correctly() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "low", 0.2).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        store.add_episode(agent.clone(), "mid", 0.5).unwrap();
+        assert_eq!(store.episode_count_above_importance(&agent, 0.4).unwrap(), 2);
+        assert_eq!(store.episode_count_above_importance(&agent, 0.8).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_episodic_store_episode_count_above_importance_unknown_agent_returns_zero() {
+        let store = EpisodicStore::new();
+        assert_eq!(store.episode_count_above_importance(&AgentId::new("x"), 0.5).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_episodic_store_low_importance_episodes_sorted_ascending() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "mid", 0.5).unwrap();
+        store.add_episode(agent.clone(), "low", 0.1).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        let items = store.low_importance_episodes(&agent, 0.6).unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(items[0].importance <= items[1].importance);
+    }
+
+    #[test]
+    fn test_episodic_store_low_importance_episodes_empty_when_none_below_threshold() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        assert!(store.low_importance_episodes(&agent, 0.5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_working_memory_values_containing_returns_matching_values() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "hello world").unwrap();
+        wm.set("k2", "goodbye world").unwrap();
+        wm.set("k3", "something else").unwrap();
+        let result = wm.values_containing("world").unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|v| v.contains("world")));
+    }
+
+    #[test]
+    fn test_working_memory_values_containing_returns_empty_when_no_match() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "hello").unwrap();
+        assert!(wm.values_containing("xyz").unwrap().is_empty());
     }
 }
