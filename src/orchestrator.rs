@@ -159,6 +159,11 @@ impl RetryPolicy {
         Ok(self)
     }
 
+    /// Return the configured maximum number of attempts.
+    pub fn max_attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
     /// Return a copy of this policy with the base delay changed to `ms` milliseconds.
     ///
     /// # Errors
@@ -181,6 +186,13 @@ impl RetryPolicy {
         (1..=self.max_attempts)
             .map(|a| self.delay_for(a).as_millis() as u64)
             .sum()
+    }
+
+    /// Return the number of attempts still available after `attempt` have been made.
+    ///
+    /// Returns `0` once the budget is exhausted (`attempt >= max_attempts`).
+    pub fn attempts_remaining(&self, attempt: u32) -> u32 {
+        self.max_attempts.saturating_sub(attempt)
     }
 
     /// Return `true` if another attempt is permitted after `attempt` failures.
@@ -1240,6 +1252,16 @@ impl Pipeline {
         self.stages.iter().map(|s| s.name.as_str()).collect()
     }
 
+    /// Return the names of all stages as owned `String`s.
+    ///
+    /// Unlike [`stage_names`] this does not borrow `self`, making it easier to
+    /// use the result after `self` is moved or mutated.
+    ///
+    /// [`stage_names`]: Pipeline::stage_names
+    pub fn stage_names_owned(&self) -> Vec<String> {
+        self.stages.iter().map(|s| s.name.clone()).collect()
+    }
+
     /// Return the name of the stage at zero-based `index`, or `None` if out of bounds.
     pub fn get_stage_name_at(&self, index: usize) -> Option<&str> {
         self.stages.get(index).map(|s| s.name.as_str())
@@ -2086,5 +2108,28 @@ mod tests {
         let p = RetryPolicy::none();
         assert!(p.can_retry(0));
         assert!(!p.can_retry(1));
+    }
+
+    // ── Round 5: RetryPolicy::max_attempts / Pipeline::stage_names_owned ─────
+
+    #[test]
+    fn test_retry_policy_max_attempts_accessor() {
+        let p = RetryPolicy::exponential(7, 100).unwrap();
+        assert_eq!(p.max_attempts(), 7);
+    }
+
+    #[test]
+    fn test_pipeline_stage_names_owned_returns_strings() {
+        let p = Pipeline::new()
+            .add_stage("alpha", |s| Ok(s))
+            .add_stage("beta", |s| Ok(s));
+        let owned = p.stage_names_owned();
+        assert_eq!(owned, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn test_pipeline_stage_names_owned_empty_when_no_stages() {
+        let p = Pipeline::new();
+        assert!(p.stage_names_owned().is_empty());
     }
 }

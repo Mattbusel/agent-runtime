@@ -43,6 +43,36 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   only the model name; handy for A/B testing different models on the same config.
 - **`ToolSpec::with_name`** (`agent.rs`) — override the tool name after
   construction; mirrors the existing `with_description` builder method.
+---
+
+## [1.13.0] - 2026-03-20
+
+### Added
+
+- **`EpisodicStore::count_for`** (`memory.rs`) — return the number of episodes
+  stored for a given agent without triggering recall sorting or recall-count
+  increments; faster than `recall(agent, usize::MAX)?.len()`.
+- **`EpisodicStore::recall_by_tag`** (`memory.rs`) — recall episodes for an agent
+  that carry a specific tag, sorted by descending importance.
+- **`EpisodicStore::merge_from`** (`memory.rs`) — copy all episodes from another
+  store for a given agent, respecting per-agent capacity and eviction policies.
+- **`WorkingMemory::get_all_keys`** (`memory.rs`) — return all keys in insertion
+  order without their values; cheaper than a full `snapshot()` when only keys
+  are needed.
+- **`WorkingMemory::replace_all`** (`memory.rs`) — atomically replace all entries
+  with a new `HashMap`; capacity limits are enforced as entries are inserted.
+- **`SemanticStore::count`** (`memory.rs`) — alias for `len()` using conventional
+  collection naming; returns the total number of stored entries.
+- **`SemanticStore::remove`** (`memory.rs`) — delete the first entry with the given
+  key; returns `Ok(true)` if found and removed.
+- **`GraphStore::neighbor_ids`** (`graph.rs`) — return the IDs of all directly
+  reachable neighbours (outgoing-edge targets) without allocating full `Entity`
+  objects; cheaper than `neighbor_entities`.
+- **`RetryPolicy::max_attempts`** (`orchestrator.rs`) — read accessor for the
+  configured maximum attempt count; previously only available via `can_retry`.
+- **`Pipeline::stage_names_owned`** (`orchestrator.rs`) — return stage names as
+  owned `String`s; unlike `stage_names()` the result can be used after `self` is
+  moved or mutated.
 
 ---
 

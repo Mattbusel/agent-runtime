@@ -84,6 +84,11 @@ impl AgentSession {
         self.steps.len()
     }
 
+    /// Return `true` if the session has no recorded steps.
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+
     /// Return the final answer text from the last step, if available.
     ///
     /// Extracts the content after `FINAL_ANSWER` in the last step's `action` field.
@@ -188,9 +193,23 @@ impl AgentSession {
         self.steps.last()
     }
 
+    /// Return a reference to the first step taken, or `None` if there are no steps.
+    pub fn first_step(&self) -> Option<&ReActStep> {
+        self.steps.first()
+    }
+
     /// Return a reference to the step at zero-based index `idx`, or `None` if out of bounds.
     pub fn step_at(&self, idx: usize) -> Option<&ReActStep> {
         self.steps.get(idx)
+    }
+
+    /// Return steps whose observation contains `pattern` (case-insensitive).
+    pub fn observations_matching(&self, pattern: &str) -> Vec<&ReActStep> {
+        let lower = pattern.to_ascii_lowercase();
+        self.steps
+            .iter()
+            .filter(|s| s.observation.to_ascii_lowercase().contains(&lower))
+            .collect()
     }
 
     /// Collect all thought strings from every step, in order.
