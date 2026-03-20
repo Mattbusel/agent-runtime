@@ -3442,6 +3442,31 @@ impl GraphStore {
             .count())
     }
 
+    pub fn edges_to(&self, id: &EntityId) -> Result<Vec<Relationship>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::edges_to");
+        Ok(inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter())
+            .filter(|r| &r.to == id)
+            .cloned()
+            .collect())
+    }
+
+    pub fn entity_has_property_value(
+        &self,
+        id: &EntityId,
+        key: &str,
+        value: &str,
+    ) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entity_has_property_value");
+        Ok(inner
+            .entities
+            .get(id)
+            .and_then(|e| e.properties.get(key))
+            .map_or(false, |v| v == value))
+    }
+
     /// Return all outgoing `Relationship`s from the entity with the given `id`.
     ///
     /// Returns an empty `Vec` when the entity has no outgoing edges or does

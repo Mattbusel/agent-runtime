@@ -4738,6 +4738,16 @@ impl WorkingMemory {
             .collect())
     }
 
+    pub fn values_with_suffix(&self, suffix: &str) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::values_with_suffix");
+        Ok(inner
+            .map
+            .values()
+            .filter(|v| v.ends_with(suffix))
+            .cloned()
+            .collect())
+    }
+
     /// Return `true` if the value stored under `key` starts with `prefix`.
     ///
     /// Returns `false` when `key` is not present.
@@ -11486,5 +11496,63 @@ mod tests {
         store.add_episode_with_tags(agent.clone(), "only", 0.42, vec![]).unwrap();
         let max = store.max_episode_importance(&agent).unwrap();
         assert!((max.unwrap() - 0.42_f32).abs() < 1e-6);
+    }
+
+    // ── Round 64: episodes_in_range, agent_importance_range, values_with_suffix ──
+
+    #[test]
+    fn test_episodes_in_range_returns_filtered_episodes() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r64-ep-range");
+        store.add_episode_with_tags(agent.clone(), "low", 0.1, vec![]).unwrap();
+        store.add_episode_with_tags(agent.clone(), "mid", 0.5, vec![]).unwrap();
+        store.add_episode_with_tags(agent.clone(), "high", 0.9, vec![]).unwrap();
+        let results = store.episodes_in_range(&agent, 0.3, 0.7).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "mid");
+    }
+
+    #[test]
+    fn test_episodes_in_range_empty_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r64-ep-range-unknown");
+        assert!(store.episodes_in_range(&agent, 0.0, 1.0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_agent_importance_range_returns_min_max() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r64-imp-range");
+        store.add_episode_with_tags(agent.clone(), "a", 0.2, vec![]).unwrap();
+        store.add_episode_with_tags(agent.clone(), "b", 0.8, vec![]).unwrap();
+        let range = store.agent_importance_range(&agent).unwrap();
+        let (min, max) = range.unwrap();
+        assert!((min - 0.2_f32).abs() < 1e-6);
+        assert!((max - 0.8_f32).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_agent_importance_range_none_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r64-imp-range-unknown");
+        assert!(store.agent_importance_range(&agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_values_with_suffix_returns_matching() {
+        let wm = WorkingMemory::new();
+        wm.set("k1".into(), "hello world".into()).unwrap();
+        wm.set("k2".into(), "foo world".into()).unwrap();
+        wm.set("k3".into(), "bar xyz".into()).unwrap();
+        let mut vals = wm.values_with_suffix("world").unwrap();
+        vals.sort();
+        assert_eq!(vals, vec!["foo world", "hello world"]);
+    }
+
+    #[test]
+    fn test_values_with_suffix_empty_when_none_match() {
+        let wm = WorkingMemory::new();
+        wm.set("k1".into(), "hello".into()).unwrap();
+        assert!(wm.values_with_suffix("xyz").unwrap().is_empty());
     }
 }
