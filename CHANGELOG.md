@@ -11,6 +11,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.71.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::observation_above_bytes_count`** — count steps whose observation exceeds a byte threshold.
+- **`AgentSession::steps_with_both_thought_and_action`** — count steps with non-empty thought and action.
+- **`WorkingMemory::value_count_matching_prefix`** — count values that start with a given prefix.
+- **`EpisodicStore::count_episodes_in_window`** — count episodes whose timestamp falls in a time window.
+- **`RuntimeMetrics::agent_tool_count`** — number of distinct agents recorded in per-agent tool tracking.
+- **`GraphStore::is_connected`** — `true` if at least one direct edge exists between two entities.
+- **`Pipeline::stage_names_joined`** — join all stage names with a separator string.
+
+### Fixed
+
+- Removed duplicate `last_stage_name` definition in `orchestrator.rs` introduced by worktree agent.
+- Fixed `has_recorded_agent_calls` to use `per_agent_tool_calls_snapshot()` instead of non-existent field.
+- Fixed `test_avg_step_latency_ms_correct` to set `total_steps` counter before calling `avg_step_latency_ms`.
+
+---
+
 ## [1.70.0] - 2026-03-20
 
 ### Added
