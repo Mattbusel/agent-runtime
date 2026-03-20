@@ -4446,4 +4446,80 @@ mod tests {
         let avg = g.avg_in_degree().unwrap();
         assert!((avg - 2.0 / 3.0).abs() < 1e-9);
     }
+
+    // ── Round 26: has_entity ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_graph_store_has_entity_false_when_missing() {
+        let g = GraphStore::new();
+        let id = EntityId::new("nonexistent");
+        assert!(!g.has_entity(&id).unwrap());
+    }
+
+    #[test]
+    fn test_graph_store_has_entity_true_after_add() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("node-a", "Person")).unwrap();
+        let id = EntityId::new("node-a");
+        assert!(g.has_entity(&id).unwrap());
+    }
+
+    // ── Round 32: Entity::with_property, GraphStore::remove_relationship,
+    //             GraphStore::update_entity_property ─────────────────────────
+
+    #[test]
+    fn test_entity_with_property_stores_value() {
+        let e = Entity::new("e1", "Label")
+            .with_property("score", serde_json::json!(42));
+        assert_eq!(e.property_value("score"), Some(&serde_json::json!(42)));
+    }
+
+    #[test]
+    fn test_entity_with_property_chaining() {
+        let e = Entity::new("e2", "L")
+            .with_property("a", serde_json::json!(1))
+            .with_property("b", serde_json::json!(2));
+        assert!(e.has_property("a"));
+        assert!(e.has_property("b"));
+    }
+
+    #[test]
+    fn test_remove_relationship_succeeds_when_exists() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("x", "N")).unwrap();
+        g.add_entity(Entity::new("y", "N")).unwrap();
+        g.add_relationship(Relationship::new("x", "y", "link", 1.0)).unwrap();
+        g.remove_relationship(&EntityId::new("x"), &EntityId::new("y"), "link").unwrap();
+        assert_eq!(g.relationship_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_remove_relationship_errors_when_missing() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("x", "N")).unwrap();
+        g.add_entity(Entity::new("y", "N")).unwrap();
+        let result = g.remove_relationship(&EntityId::new("x"), &EntityId::new("y"), "ghost");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_update_entity_property_returns_true_when_entity_exists() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("node", "N")).unwrap();
+        let updated = g
+            .update_entity_property(&EntityId::new("node"), "color", serde_json::json!("red"))
+            .unwrap();
+        assert!(updated);
+        let entity = g.get_entity(&EntityId::new("node")).unwrap();
+        assert_eq!(entity.property_value("color"), Some(&serde_json::json!("red")));
+    }
+
+    #[test]
+    fn test_update_entity_property_returns_false_for_unknown_entity() {
+        let g = GraphStore::new();
+        let updated = g
+            .update_entity_property(&EntityId::new("ghost"), "key", serde_json::json!(1))
+            .unwrap();
+        assert!(!updated);
+    }
 }

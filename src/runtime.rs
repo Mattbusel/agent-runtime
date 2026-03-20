@@ -3563,4 +3563,61 @@ mod tests {
         let session = make_session(vec![], 0);
         assert!(session.action_at(5).is_none());
     }
+
+    // ── Round 26: has_graph_lookups / consecutive_same_action_at_end ──────────
+
+    #[test]
+    fn test_has_graph_lookups_false_when_zero() {
+        let session = make_session(vec![], 0);
+        assert!(!session.has_graph_lookups());
+    }
+
+    #[test]
+    fn test_has_graph_lookups_true_when_positive() {
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![],
+            memory_hits: 0,
+            graph_lookups: 5,
+            duration_ms: 0,
+            checkpoint_errors: vec![],
+        };
+        assert!(session.has_graph_lookups());
+    }
+
+    #[test]
+    fn test_consecutive_same_action_at_end_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.consecutive_same_action_at_end(), 0);
+    }
+
+    #[test]
+    fn test_consecutive_same_action_at_end_single_step() {
+        let steps = vec![make_step("t", "act", "obs")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.consecutive_same_action_at_end(), 0);
+    }
+
+    #[test]
+    fn test_consecutive_same_action_at_end_two_same_at_end() {
+        let steps = vec![
+            make_step("t", "other", "obs"),
+            make_step("t", "repeat", "obs"),
+            make_step("t", "repeat", "obs"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.consecutive_same_action_at_end(), 1);
+    }
+
+    #[test]
+    fn test_consecutive_same_action_at_end_all_same() {
+        let steps = vec![
+            make_step("t", "same", "obs"),
+            make_step("t", "same", "obs"),
+            make_step("t", "same", "obs"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.consecutive_same_action_at_end(), 2);
+    }
 }

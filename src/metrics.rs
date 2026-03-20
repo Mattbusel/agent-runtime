@@ -2182,4 +2182,43 @@ mod tests {
         let snap = m.snapshot();
         assert!(snap.total_sessions == 0); // unrelated sanity check
     }
+
+    // ── Round 26: has_errors / is_above_p99 ───────────────────────────────────
+
+    #[test]
+    fn test_metrics_snapshot_has_errors_false_when_clean() {
+        let snap = MetricsSnapshot::default();
+        assert!(!snap.has_errors());
+    }
+
+    #[test]
+    fn test_metrics_snapshot_has_errors_true_when_failed_tool_calls() {
+        let snap = MetricsSnapshot { failed_tool_calls: 2, ..Default::default() };
+        assert!(snap.has_errors());
+    }
+
+    #[test]
+    fn test_metrics_snapshot_has_errors_true_when_checkpoint_errors() {
+        let snap = MetricsSnapshot { checkpoint_errors: 1, ..Default::default() };
+        assert!(snap.has_errors());
+    }
+
+    #[test]
+    fn test_latency_histogram_is_above_p99_false_for_low_latency() {
+        let h = LatencyHistogram::default();
+        for _ in 0..200 {
+            h.record(50);
+        }
+        assert!(!h.is_above_p99(50));
+    }
+
+    #[test]
+    fn test_latency_histogram_is_above_p99_true_for_high_latency() {
+        let h = LatencyHistogram::default();
+        for _ in 0..200 {
+            h.record(50);
+        }
+        // p99 will be ~50ms; 10_000ms should be well above it
+        assert!(h.is_above_p99(10_000));
+    }
 }

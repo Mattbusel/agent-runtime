@@ -1664,6 +1664,20 @@ mod tests {
         }
     }
 
+    // ── Round 26: first_delay_ms ──────────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_first_delay_ms_equals_base_delay() {
+        let p = RetryPolicy::exponential(3, 200).unwrap();
+        assert_eq!(p.first_delay_ms(), p.base_delay_ms());
+    }
+
+    #[test]
+    fn test_retry_policy_first_delay_ms_constant_policy() {
+        let p = RetryPolicy::constant(4, 150).unwrap();
+        assert_eq!(p.first_delay_ms(), 150);
+    }
+
     // ── CircuitBreaker ────────────────────────────────────────────────────────
 
     #[test]

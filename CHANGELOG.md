@@ -11,6 +11,37 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.44.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::has_graph_lookups`** — returns `true` when the session
+  performed at least one graph lookup.
+- **`AgentSession::consecutive_same_action_at_end`** — counts how many trailing
+  steps repeat the last action (useful for loop-detection).
+- **`EpisodicStore::has_episodes`** — returns `true` if an agent has any stored
+  episodes.
+- **`SemanticStore::value_for`** — retrieves the stored value string for a key,
+  returning `None` when the key is absent.
+- **`WorkingMemory::count_above_value_length`** — counts entries whose value
+  exceeds a given byte length threshold.
+- **`MetricsSnapshot::has_errors`** — quick predicate: `true` when
+  `failed_tool_calls > 0` or `checkpoint_errors > 0`.
+- **`LatencyHistogram::is_above_p99`** — returns `true` when a given latency
+  exceeds the p99 bucket.
+- **`RetryPolicy::first_delay_ms`** — convenience alias for `base_delay_ms()`.
+- **`GraphStore::has_entity`** — returns `true` when an entity ID exists in the
+  graph.
+- **`ToolRegistry::tool_count_with_required_fields`** — counts tools that
+  declare at least one required field.
+
+### Tests
+
+- Full test coverage for all ten Round 26 methods across `runtime.rs`,
+  `memory.rs`, `metrics.rs`, `orchestrator.rs`, `graph.rs`, and `agent.rs`.
+
+---
+
 ## [1.43.0] - 2026-03-20
 
 ### Tests
