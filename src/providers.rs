@@ -74,6 +74,26 @@ impl<'a> CompletionOptions<'a> {
         self.stop_sequences = sequences;
         self
     }
+
+    /// Set the per-request timeout from a number of seconds.
+    pub fn with_timeout_secs(self, secs: u64) -> Self {
+        self.with_timeout(std::time::Duration::from_secs(secs))
+    }
+
+    /// Set the per-request timeout from a number of milliseconds.
+    pub fn with_timeout_ms(self, ms: u64) -> Self {
+        self.with_timeout(std::time::Duration::from_millis(ms))
+    }
+
+    /// Return `true` if at least one stop sequence has been configured.
+    pub fn has_stop_sequences(&self) -> bool {
+        !self.stop_sequences.is_empty()
+    }
+
+    /// Return the number of stop sequences configured.
+    pub fn stop_sequence_count(&self) -> usize {
+        self.stop_sequences.len()
+    }
 }
 
 // ── LlmProvider ───────────────────────────────────────────────────────────────

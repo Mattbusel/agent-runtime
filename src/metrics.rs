@@ -176,6 +176,16 @@ impl LatencyHistogram {
         self.percentile(0.99)
     }
 
+    /// Return the 75th-percentile latency in milliseconds.
+    pub fn p75(&self) -> u64 {
+        self.percentile(0.75)
+    }
+
+    /// Return the 90th-percentile latency in milliseconds.
+    pub fn p90(&self) -> u64 {
+        self.percentile(0.90)
+    }
+
     /// Reset all histogram counters to zero.
     pub fn reset(&self) {
         self.total_count.store(0, Ordering::Relaxed);

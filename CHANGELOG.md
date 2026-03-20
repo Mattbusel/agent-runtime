@@ -11,6 +11,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.17.0] - 2026-03-20
+
+### Added
+
+- **`LatencyHistogram::p75`** (`metrics.rs`) — 75th-percentile latency; fills
+  the gap between `p50` and `p95`.
+- **`LatencyHistogram::p90`** (`metrics.rs`) — 90th-percentile latency.
+- **`CompletionOptions::with_timeout_secs`** (`providers.rs`) — convenience
+  builder that accepts seconds; mirrors `AgentConfig::with_loop_timeout_secs`.
+- **`CompletionOptions::with_timeout_ms`** (`providers.rs`) — convenience
+  builder that accepts milliseconds.
+- **`CompletionOptions::has_stop_sequences`** (`providers.rs`) — returns `true`
+  when at least one stop sequence is configured.
+- **`CompletionOptions::stop_sequence_count`** (`providers.rs`) — number of
+  configured stop sequences.
+
+---
+
 ## [1.16.0] - 2026-03-20
 
 ### Added
