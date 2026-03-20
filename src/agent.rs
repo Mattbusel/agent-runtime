@@ -277,6 +277,12 @@ impl AgentConfig {
         self.with_loop_timeout(std::time::Duration::from_millis(ms))
     }
 
+    /// Set the maximum number of ReAct iterations.
+    pub fn with_max_iterations(mut self, n: usize) -> Self {
+        self.max_iterations = n;
+        self
+    }
+
     /// Set the model sampling temperature.
     pub fn with_temperature(mut self, t: f32) -> Self {
         self.temperature = Some(t);
@@ -890,6 +896,16 @@ impl ToolRegistry {
     /// Return the list of registered tool names.
     pub fn tool_names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Return all registered tool names as owned `String`s.
+    ///
+    /// Unlike [`tool_names`] this does not borrow `self`, making the result
+    /// usable after the registry is moved or mutated.
+    ///
+    /// [`tool_names`]: ToolRegistry::tool_names
+    pub fn tool_names_owned(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
     }
 
     /// Return the number of registered tools.
@@ -2642,5 +2658,33 @@ mod tests {
         let cloned = orig.clone_with_model("claude-3");
         assert_eq!(cloned.model, "claude-3");
         assert_eq!(cloned.max_iterations, 5);
+    }
+
+    // ── Round 19: more AgentConfig builder methods, Message::is_tool ─────────
+
+    #[test]
+    fn test_agent_config_with_loop_timeout_secs() {
+        let cfg = AgentConfig::new(5, "model").with_loop_timeout_secs(30);
+        assert_eq!(cfg.loop_timeout, Some(std::time::Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn test_agent_config_with_max_context_chars() {
+        let cfg = AgentConfig::new(5, "model").with_max_context_chars(4096);
+        assert_eq!(cfg.max_context_chars, Some(4096));
+    }
+
+    #[test]
+    fn test_agent_config_with_stop_sequences() {
+        let cfg = AgentConfig::new(5, "model")
+            .with_stop_sequences(vec!["STOP".to_string(), "END".to_string()]);
+        assert_eq!(cfg.stop_sequences, vec!["STOP", "END"]);
+    }
+
+    #[test]
+    fn test_message_is_tool_false_for_non_tool_roles() {
+        assert!(!Message::user("hi").is_tool());
+        assert!(!Message::assistant("reply").is_tool());
+        assert!(!Message::system("prompt").is_tool());
     }
 }

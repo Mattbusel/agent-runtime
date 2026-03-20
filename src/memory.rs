@@ -732,6 +732,27 @@ impl EpisodicStore {
         Ok(inner.items.get(agent_id).map_or(0, |v| v.len()))
     }
 
+    /// Remove all episodes stored for `agent_id`.
+    ///
+    /// Returns the number of episodes that were removed.
+    pub fn clear_for(&self, agent_id: &AgentId) -> Result<usize, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::clear_for");
+        let count = inner.items.remove(agent_id).map_or(0, |v| v.len());
+        Ok(count)
+    }
+
+    /// Return the sum of all importance scores for `agent_id`.
+    ///
+    /// Returns `0.0` if the agent has no stored episodes.
+    pub fn importance_sum(&self, agent_id: &AgentId) -> Result<f32, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::importance_sum");
+        let sum = inner
+            .items
+            .get(agent_id)
+            .map_or(0.0, |items| items.iter().map(|i| i.importance).sum());
+        Ok(sum)
+    }
+
     /// Recall up to `limit` episodes for `agent_id` that carry `tag`,
     /// sorted by descending importance.  `limit = 0` returns all matches.
     pub fn recall_by_tag(
@@ -1208,6 +1229,29 @@ impl EpisodicStore {
         Ok(count)
     }
 
+    /// Return the episode with the highest importance score for `agent_id`, or `None`
+    /// if the agent has no stored episodes.  Ties are broken in favour of the
+    /// later-inserted episode.
+    pub fn max_importance_episode(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::max_importance_episode");
+        let item = inner
+            .items
+            .get(agent_id)
+            .and_then(|v| {
+                v.iter()
+                    .max_by(|a, b| {
+                        a.importance
+                            .partial_cmp(&b.importance)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            })
+            .cloned();
+        Ok(item)
+    }
+
     /// Return the most recently inserted episode for `agent_id`, or `None`
     /// if the agent has no stored episodes.
     pub fn newest(
@@ -1625,6 +1669,23 @@ impl SemanticStore {
         self.list_keys()
     }
 
+    /// Update the stored value of the first entry whose key matches `key`.
+    ///
+    /// Returns `Ok(true)` if found and updated, `Ok(false)` if not found.
+    pub fn update_value(
+        &self,
+        key: &str,
+        new_value: impl Into<String>,
+    ) -> Result<bool, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "SemanticStore::update_value");
+        if let Some(entry) = inner.entries.iter_mut().find(|e| e.key == key) {
+            entry.value = new_value.into();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Update the tags of the first entry whose key matches `key`.
     ///
     /// Returns `Ok(true)` if found and updated, `Ok(false)` if not found.
@@ -1672,6 +1733,7 @@ impl SemanticStore {
         inner.entries.retain(|e| e.key != key);
         Ok(inner.entries.len() < before)
     }
+
 }
 
 impl Default for SemanticStore {
@@ -1988,6 +2050,34 @@ impl WorkingMemory {
             inner.map.keys().cloned().collect();
         inner.order.retain(|k| surviving.contains(k));
         Ok(before - inner.map.len())
+    }
+
+    /// Copy all entries from `other` into `self`.
+    ///
+    /// Entries from `other` are inserted in its insertion order.  Capacity
+    /// limits and eviction apply as if each entry were inserted individually
+    /// via [`set`].
+    ///
+    /// [`set`]: WorkingMemory::set
+    pub fn merge_from(&self, other: &WorkingMemory) -> Result<usize, AgentRuntimeError> {
+        let pairs: Vec<(String, String)> = {
+            let inner = recover_lock(other.inner.lock(), "WorkingMemory::merge_from(read)");
+            inner.order.iter().filter_map(|k| {
+                inner.map.get(k).map(|v| (k.clone(), v.clone()))
+            }).collect()
+        };
+        let count = pairs.len();
+        self.set_many(pairs)?;
+        Ok(count)
+    }
+
+    /// Return the number of entries for which `predicate(key, value)` returns `true`.
+    pub fn entry_count_satisfying<F>(&self, mut predicate: F) -> Result<usize, AgentRuntimeError>
+    where
+        F: FnMut(&str, &str) -> bool,
+    {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::entry_count_satisfying");
+        Ok(inner.map.iter().filter(|(k, v)| predicate(k.as_str(), v.as_str())).count())
     }
 
     /// Return all keys in insertion order.
@@ -3711,5 +3801,121 @@ mod tests {
         let store = EpisodicStore::new();
         let agent = AgentId::new("no-agent");
         assert_eq!(store.clear_agent(&agent).unwrap(), 0);
+    }
+
+    // ── Round 19: max_importance_episode, SemanticStore::update ──────────────
+
+    #[test]
+    fn test_episodic_max_importance_episode_returns_highest() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("agent-max");
+        store.add_episode(agent.clone(), "low", 0.2).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        store.add_episode(agent.clone(), "mid", 0.5).unwrap();
+        let top = store.max_importance_episode(&agent).unwrap().unwrap();
+        assert_eq!(top.content, "high");
+    }
+
+    #[test]
+    fn test_episodic_max_importance_episode_none_when_empty() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("empty-max");
+        assert!(store.max_importance_episode(&agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_semantic_store_update_replaces_value() {
+        let store = SemanticStore::new();
+        store.store("key1", "original", vec![]).unwrap();
+        let updated = store.update("key1", "new value").unwrap();
+        assert!(updated);
+        let retrieved = store.retrieve_by_key("key1").unwrap().unwrap();
+        assert_eq!(retrieved.0, "new value");
+    }
+
+    #[test]
+    fn test_semantic_store_update_returns_false_for_missing_key() {
+        let store = SemanticStore::new();
+        assert!(!store.update("missing", "value").unwrap());
+    }
+
+    // ── Round 6: EpisodicStore::clear_for / importance_sum ───────────────────
+
+    #[test]
+    fn test_episodic_clear_for_removes_all_episodes_for_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "e1", 0.5).unwrap();
+        store.add_episode(agent.clone(), "e2", 0.9).unwrap();
+        let removed = store.clear_for(&agent).unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(store.count_for(&agent).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_episodic_clear_for_returns_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("ghost");
+        assert_eq!(store.clear_for(&agent).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_episodic_importance_sum_correct() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "e1", 0.3).unwrap();
+        store.add_episode(agent.clone(), "e2", 0.5).unwrap();
+        let sum = store.importance_sum(&agent).unwrap();
+        assert!((sum - 0.8).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_episodic_importance_sum_zero_when_empty() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("empty");
+        assert_eq!(store.importance_sum(&agent).unwrap(), 0.0);
+    }
+
+    // ── Round 6: WorkingMemory::merge_from / entry_count_satisfying ──────────
+
+    #[test]
+    fn test_working_memory_merge_from_copies_entries() {
+        let src = WorkingMemory::new(10).unwrap();
+        src.set("x", "1").unwrap();
+        src.set("y", "2").unwrap();
+        let dst = WorkingMemory::new(10).unwrap();
+        let count = dst.merge_from(&src).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(dst.get("x").unwrap().unwrap(), "1");
+        assert_eq!(dst.get("y").unwrap().unwrap(), "2");
+    }
+
+    #[test]
+    fn test_working_memory_entry_count_satisfying_counts_matching() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("a", "hello").unwrap();
+        wm.set("b", "world").unwrap();
+        wm.set("c", "hello world").unwrap();
+        let count = wm
+            .entry_count_satisfying(|_, v| v.contains("hello"))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    // ── Round 6: SemanticStore::update_value ─────────────────────────────────
+
+    #[test]
+    fn test_semantic_update_value_replaces_stored_value() {
+        let store = SemanticStore::new();
+        store.store("k", "old", vec![]).unwrap();
+        assert!(store.update_value("k", "new").unwrap());
+        let pairs = store.retrieve(&[]).unwrap();
+        assert!(pairs.iter().any(|(_, v)| v == "new"));
+    }
+
+    #[test]
+    fn test_semantic_update_value_returns_false_when_missing() {
+        let store = SemanticStore::new();
+        assert!(!store.update_value("nope", "x").unwrap());
     }
 }

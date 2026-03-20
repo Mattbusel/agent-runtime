@@ -110,6 +110,41 @@ impl AgentRuntimeError {
     pub fn is_graph(&self) -> bool {
         matches!(self, Self::Graph(_))
     }
+
+    /// Return `true` if this is an `AgentLoop` error.
+    pub fn is_agent_loop(&self) -> bool {
+        matches!(self, Self::AgentLoop(_))
+    }
+
+    /// Return `true` if this is an `Orchestration` error.
+    pub fn is_orchestration(&self) -> bool {
+        matches!(self, Self::Orchestration(_))
+    }
+
+    /// Return `true` if this is a `Persistence` error.
+    pub fn is_persistence(&self) -> bool {
+        matches!(self, Self::Persistence(_))
+    }
+
+    /// Return `true` if this is a `NotConfigured` error.
+    pub fn is_not_configured(&self) -> bool {
+        matches!(self, Self::NotConfigured(_))
+    }
+
+    /// Return `true` if this is a `DeduplicationConflict` error.
+    pub fn is_deduplication_conflict(&self) -> bool {
+        matches!(self, Self::DeduplicationConflict { .. })
+    }
+
+    /// Return `true` if this error is likely transient and safe to retry.
+    ///
+    /// `Provider` and `Persistence` errors (e.g. network timeouts, I/O failures)
+    /// are classified as retryable.  Logic errors (`Memory`, `Graph`,
+    /// `Orchestration`, `AgentLoop`, `NotConfigured`, `Validation`,
+    /// `CircuitOpen`, `BackpressureShed`, `DeduplicationConflict`) are not.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::Provider(_) | Self::Persistence(_))
+    }
 }
 
 impl From<serde_json::Error> for AgentRuntimeError {
@@ -260,5 +295,67 @@ mod tests {
         let e = AgentRuntimeError::Graph("no such entity".into());
         assert!(e.is_graph());
         assert!(!e.is_memory());
+    }
+
+    // ── Round 19: untested predicates ────────────────────────────────────────
+
+    #[test]
+    fn test_is_persistence_true() {
+        let e = AgentRuntimeError::Persistence("disk full".into());
+        assert!(e.is_persistence());
+        assert!(!e.is_memory());
+    }
+
+    #[test]
+    fn test_is_not_configured_true() {
+        let e = AgentRuntimeError::NotConfigured("graph");
+        assert!(e.is_not_configured());
+        assert!(!e.is_persistence());
+    }
+
+    #[test]
+    fn test_is_deduplication_conflict_true() {
+        let e = AgentRuntimeError::DeduplicationConflict { key: "req-1".into() };
+        assert!(e.is_deduplication_conflict());
+        assert!(!e.is_circuit_open());
+    }
+
+    #[test]
+    fn test_is_retryable_true_for_provider() {
+        let e = AgentRuntimeError::Provider("503".into());
+        assert!(e.is_retryable());
+    }
+
+    #[test]
+    fn test_is_retryable_true_for_persistence() {
+        let e = AgentRuntimeError::Persistence("io error".into());
+        assert!(e.is_retryable());
+    }
+
+    #[test]
+    fn test_is_retryable_false_for_logic_errors() {
+        assert!(!AgentRuntimeError::Memory("x".into()).is_retryable());
+        assert!(!AgentRuntimeError::Graph("x".into()).is_retryable());
+        assert!(!AgentRuntimeError::Orchestration("x".into()).is_retryable());
+        assert!(!AgentRuntimeError::CircuitOpen { service: "s".into() }.is_retryable());
+    }
+
+    #[test]
+    fn test_from_serde_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{invalid}").unwrap_err();
+        let e = AgentRuntimeError::from(json_err);
+        assert!(matches!(e, AgentRuntimeError::AgentLoop(_)));
+    }
+
+    #[test]
+    fn test_provider_error_display() {
+        let e = AgentRuntimeError::Provider("rate limited".into());
+        assert!(e.to_string().contains("rate limited"));
+    }
+
+    #[test]
+    fn test_persistence_error_display() {
+        let e = AgentRuntimeError::Persistence("file not found".into());
+        assert!(e.to_string().contains("file not found"));
     }
 }

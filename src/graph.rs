@@ -1719,6 +1719,71 @@ impl GraphStore {
         }
         Ok(inner.relationships.len() as f64 / n as f64)
     }
+
+    /// Return the sum of all edge weights in the graph.
+    ///
+    /// Returns `0.0` for an empty graph or a graph with no relationships.
+    pub fn total_weight(&self) -> Result<f32, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "total_weight");
+        Ok(inner.relationships.iter().map(|r| r.weight).sum())
+    }
+
+    /// Return the maximum edge weight, or `None` if the graph has no edges.
+    pub fn max_edge_weight(&self) -> Result<Option<f32>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "max_edge_weight");
+        Ok(inner
+            .relationships
+            .iter()
+            .map(|r| r.weight)
+            .reduce(f32::max))
+    }
+
+    /// Return the minimum edge weight, or `None` if the graph has no edges.
+    pub fn min_edge_weight(&self) -> Result<Option<f32>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "min_edge_weight");
+        Ok(inner
+            .relationships
+            .iter()
+            .map(|r| r.weight)
+            .reduce(f32::min))
+    }
+
+    /// Return the entity with the highest out-degree (most outgoing edges),
+    /// or `None` if the graph is empty.
+    ///
+    /// If multiple entities share the maximum out-degree, the first one
+    /// encountered (in arbitrary hash-map iteration order) is returned.
+    pub fn max_out_degree_entity(&self) -> Result<Option<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "max_out_degree_entity");
+        let best = inner
+            .adjacency
+            .iter()
+            .max_by_key(|(_, rels)| rels.len())
+            .and_then(|(id, _)| inner.entities.get(id).cloned());
+        Ok(best)
+    }
+
+    /// Return all entities with out-degree = 0 (no outgoing edges).
+    ///
+    /// Leaf nodes (also called sink nodes in directed graphs) are entities
+    /// that have no outgoing relationships.  See also [`sink_nodes`] which
+    /// also counts nodes with no outgoing edges but filters differently.
+    ///
+    /// [`sink_nodes`]: GraphStore::sink_nodes
+    pub fn leaf_nodes(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "leaf_nodes");
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| {
+                inner
+                    .adjacency
+                    .get(&e.id)
+                    .map_or(true, |rels| rels.is_empty())
+            })
+            .cloned()
+            .collect())
+    }
 }
 
 impl Default for GraphStore {
@@ -2930,5 +2995,43 @@ mod tests {
         link(&g, "a", "b"); link(&g, "a", "c");
         let d = g.avg_degree().unwrap();
         assert!((d - 2.0/3.0).abs() < 1e-9);
+    }
+
+    // ── Round 19: total_weight, max/min_edge_weight ───────────────────────────
+
+    #[test]
+    fn test_total_weight_zero_for_empty_graph() {
+        let g = make_graph();
+        assert_eq!(g.total_weight().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_total_weight_sums_all_edges() {
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        link_w(&g, "a", "b", 2.0); link_w(&g, "b", "c", 3.5);
+        assert!((g.total_weight().unwrap() - 5.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_max_edge_weight_none_for_empty() {
+        let g = make_graph();
+        assert!(g.max_edge_weight().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_max_edge_weight_returns_largest() {
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        link_w(&g, "a", "b", 1.0); link_w(&g, "a", "c", 9.5);
+        assert!((g.max_edge_weight().unwrap().unwrap() - 9.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_min_edge_weight_returns_smallest() {
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        link_w(&g, "a", "b", 1.0); link_w(&g, "a", "c", 9.5);
+        assert!((g.min_edge_weight().unwrap().unwrap() - 1.0).abs() < 1e-6);
     }
 }
