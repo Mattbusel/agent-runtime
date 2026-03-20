@@ -1508,6 +1508,58 @@ impl AgentSession {
         thoughts as f64 / obs as f64
     }
 
+    /// Return all steps whose thought contains `substr` as a substring.
+    ///
+    /// Returns an empty `Vec` for an empty session or no matches.
+    pub fn steps_matching_thought(&self, substr: &str) -> Vec<&ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.thought.contains(substr))
+            .collect()
+    }
+
+    /// Return the median observation character count across all steps.
+    ///
+    /// Returns `0` for an empty session.  Uses the lower median when the step
+    /// count is even.
+    pub fn median_observation_chars(&self) -> usize {
+        if self.steps.is_empty() {
+            return 0;
+        }
+        let mut lens: Vec<usize> = self
+            .steps
+            .iter()
+            .map(|s| s.observation.chars().count())
+            .collect();
+        lens.sort_unstable();
+        lens[lens.len() / 2]
+    }
+
+    /// Return the cumulative sum of thought character counts, step by step.
+    ///
+    /// The *i*-th element is the total thought characters from step 0 through
+    /// step *i* inclusive.  Returns an empty `Vec` for an empty session.
+    pub fn cumulative_thought_chars(&self) -> Vec<usize> {
+        let mut total = 0usize;
+        self.steps
+            .iter()
+            .map(|s| {
+                total += s.thought.chars().count();
+                total
+            })
+            .collect()
+    }
+
+    /// Return the number of steps whose thought contains `substr`.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn count_steps_with_thought_containing(&self, substr: &str) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| s.thought.contains(substr))
+            .count()
+    }
+
     /// Return the smallest byte length of non-empty observation strings in this
     /// session.
     ///
@@ -1923,6 +1975,19 @@ impl AgentSession {
             .map(|s| s.thought.split_whitespace().count())
             .sum();
         total as f64 / self.steps.len() as f64
+    }
+
+    /// Return `true` if any step's observation contains at least one of the
+    /// provided `terms` (case-sensitive substring match).
+    ///
+    /// Returns `false` for an empty session or an empty `terms` slice.
+    pub fn observation_contains_any(&self, terms: &[&str]) -> bool {
+        if terms.is_empty() {
+            return false;
+        }
+        self.steps
+            .iter()
+            .any(|s| terms.iter().any(|t| s.observation.contains(t)))
     }
 }
 
@@ -6977,5 +7042,154 @@ mod tests {
     fn test_thought_observation_ratio_zero_for_empty_session() {
         let session = make_session(vec![], 0);
         assert_eq!(session.thought_observation_ratio(), 0.0);
+    }
+
+    // ── Round 51 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_non_empty_action_count_correct() {
+        let steps = vec![
+            make_step("t", "search", "o"),
+            make_step("t", "", "o"),
+            make_step("t", "write", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.non_empty_action_count(), 2);
+    }
+
+    #[test]
+    fn test_non_empty_action_count_zero_for_all_empty() {
+        let steps = vec![make_step("t", "", "o"), make_step("t", "", "o")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.non_empty_action_count(), 0);
+    }
+
+    #[test]
+    fn test_total_step_bytes_sums_all_fields() {
+        let steps = vec![make_step("abc", "de", "f")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_step_bytes(), 6); // 3 + 2 + 1
+    }
+
+    #[test]
+    fn test_total_step_bytes_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.total_step_bytes(), 0);
+    }
+
+    #[test]
+    fn test_last_thought_bytes_returns_last_step_thought() {
+        let steps = vec![
+            make_step("short", "a", "o"),
+            make_step("much longer thought", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.last_thought_bytes(), "much longer thought".len());
+    }
+
+    #[test]
+    fn test_last_thought_bytes_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.last_thought_bytes(), 0);
+    }
+
+    #[test]
+    fn test_first_observation_bytes_returns_first_step_observation() {
+        let steps = vec![
+            make_step("t", "a", "first obs"),
+            make_step("t", "a", "second obs is longer"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.first_observation_bytes(), "first obs".len());
+    }
+
+    #[test]
+    fn test_first_observation_bytes_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.first_observation_bytes(), 0);
+    }
+
+    // ── Round 58: steps_matching_thought, median_observation_chars, cumulative_thought_chars, count_steps_with_thought_containing ──
+
+    #[test]
+    fn test_steps_matching_thought_returns_correct_steps() {
+        let steps = vec![
+            make_step("I need to search", "a", "o"),
+            make_step("I found the answer", "a", "o"),
+            make_step("no match here", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_matching_thought("I").len(), 2);
+    }
+
+    #[test]
+    fn test_median_observation_chars_returns_middle_value() {
+        let steps = vec![
+            make_step("t", "a", "ab"),
+            make_step("t", "a", "abcde"),
+            make_step("t", "a", "abc"),
+        ];
+        let session = make_session(steps, 0);
+        // sorted: [2, 3, 5] → median at index 1 = 3
+        assert_eq!(session.median_observation_chars(), 3);
+    }
+
+    #[test]
+    fn test_median_observation_chars_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.median_observation_chars(), 0);
+    }
+
+    #[test]
+    fn test_cumulative_thought_chars_accumulates_correctly() {
+        let steps = vec![
+            make_step("ab", "a", "o"),
+            make_step("cde", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.cumulative_thought_chars(), vec![2, 5]);
+    }
+
+    #[test]
+    fn test_count_steps_with_thought_containing_counts_matches() {
+        let steps = vec![
+            make_step("call function foo", "a", "o"),
+            make_step("call function bar", "a", "o"),
+            make_step("nothing", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.count_steps_with_thought_containing("function"), 2);
+    }
+
+    // ── Round 57: observation_contains_any ───────────────────────────────────
+
+    #[test]
+    fn test_observation_contains_any_true_when_term_present() {
+        let steps = vec![
+            make_step("t", "a", "result: success"),
+            make_step("t", "a", "result: failure"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(session.observation_contains_any(&["success", "error"]));
+    }
+
+    #[test]
+    fn test_observation_contains_any_false_when_no_match() {
+        let steps = vec![make_step("t", "a", "nothing here")];
+        let session = make_session(steps, 0);
+        assert!(!session.observation_contains_any(&["success", "error"]));
+    }
+
+    #[test]
+    fn test_observation_contains_any_false_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(!session.observation_contains_any(&["anything"]));
+    }
+
+    #[test]
+    fn test_observation_contains_any_false_for_empty_terms() {
+        let steps = vec![make_step("t", "a", "something")];
+        let session = make_session(steps, 0);
+        assert!(!session.observation_contains_any(&[]));
     }
 }

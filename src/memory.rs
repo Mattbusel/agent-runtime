@@ -951,6 +951,63 @@ impl EpisodicStore {
             .map(|(id, _)| id))
     }
 
+    /// Return the episode with the highest importance score for `agent_id`,
+    /// or `None` when the agent has no episodes.
+    pub fn highest_importance_episode(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::highest_importance_episode");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|v| {
+                v.iter().max_by(|a, b| {
+                    a.importance
+                        .partial_cmp(&b.importance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            })
+            .cloned())
+    }
+
+    /// Return the average number of whitespace-delimited words per episode
+    /// content string for `agent_id`.
+    ///
+    /// Returns `0.0` when the agent has no episodes.
+    pub fn avg_episode_content_words(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::avg_episode_content_words");
+        let items = match inner.items.get(agent_id) {
+            Some(v) if !v.is_empty() => v,
+            _ => return Ok(0.0),
+        };
+        let total: usize = items
+            .iter()
+            .map(|m| m.content.split_whitespace().count())
+            .sum();
+        Ok(total as f64 / items.len() as f64)
+    }
+
+    /// Return `true` if two or more episodes for `agent_id` share identical
+    /// content strings.
+    ///
+    /// Returns `false` for an unknown agent or one with fewer than 2 episodes.
+    pub fn has_duplicate_content(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::has_duplicate_content");
+        let items = match inner.items.get(agent_id) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        let mut seen = std::collections::HashSet::new();
+        Ok(items.iter().any(|m| !seen.insert(m.content.as_str())))
+    }
+
     /// Return the number of episodes stored for the given agent.
     ///
     /// Returns `0` if the agent has no recorded episodes.
@@ -2349,6 +2406,26 @@ impl EpisodicStore {
             .items
             .get(agent_id)
             .map_or(0, |items| items.iter().map(|m| m.content.len()).sum()))
+    }
+
+    /// Return the total number of whitespace-separated words across all episode
+    /// content strings for `agent_id`.
+    ///
+    /// Returns `0` for unknown agents or agents with no episodes.
+    pub fn total_content_words(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::total_content_words");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or(0, |items| {
+                items
+                    .iter()
+                    .map(|m| m.content.split_whitespace().count())
+                    .sum()
+            }))
     }
 
     /// Return all episodes for `agent_id` whose importance is strictly below
@@ -4182,6 +4259,17 @@ impl WorkingMemory {
     pub fn count_values_equal_to(&self, val: &str) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::count_values_equal_to");
         Ok(inner.map.values().filter(|v| v.as_str() == val).count())
+    }
+
+    /// Return `true` if the value stored under `key` starts with `prefix`.
+    ///
+    /// Returns `false` when `key` is not present.
+    pub fn value_starts_with(&self, key: &str, prefix: &str) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::value_starts_with");
+        Ok(inner
+            .map
+            .get(key)
+            .map_or(false, |v| v.starts_with(prefix)))
     }
 
     /// Return a histogram of value byte lengths bucketed by `bucket_size`.
@@ -10170,5 +10258,137 @@ mod tests {
         let wm = WorkingMemory::new(10).unwrap();
         wm.set("k", "v").unwrap();
         assert_eq!(wm.count_values_equal_to("missing").unwrap(), 0);
+    }
+
+    // ── Round 57: has_episodes_for_agent, all_values_non_empty ────────────────
+
+    #[test]
+    fn test_has_episodes_for_agent_true_after_adding_episode() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("agent-r57");
+        store.add_episode_with_tags(agent.clone(), "content", 0.5_f32, vec![]).unwrap();
+        assert!(store.has_episodes_for_agent(&agent).unwrap());
+    }
+
+    #[test]
+    fn test_has_episodes_for_agent_false_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("nobody-r57");
+        assert!(!store.has_episodes_for_agent(&agent).unwrap());
+    }
+
+    #[test]
+    fn test_all_values_non_empty_true_for_non_empty_values() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("a", "hello").unwrap();
+        wm.set("b", "world").unwrap();
+        assert!(wm.all_values_non_empty().unwrap());
+    }
+
+    #[test]
+    fn test_all_values_non_empty_false_when_empty_value_present() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("a", "hello").unwrap();
+        wm.set("b", "").unwrap();
+        assert!(!wm.all_values_non_empty().unwrap());
+    }
+
+    #[test]
+    fn test_all_values_non_empty_true_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(wm.all_values_non_empty().unwrap());
+    }
+
+    // ── Round 58: highest_importance_episode, avg_episode_content_words, has_duplicate_content, value_starts_with ──
+
+    #[test]
+    fn test_highest_importance_episode_returns_max() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r58-hie-1");
+        store.add_episode(agent.clone(), "low", 0.2).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        let top = store.highest_importance_episode(&agent).unwrap();
+        assert_eq!(top.unwrap().importance, 0.9);
+    }
+
+    #[test]
+    fn test_highest_importance_episode_none_for_empty_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r58-hie-unknown");
+        assert!(store.highest_importance_episode(&agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_avg_episode_content_words_returns_mean() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r58-aecw-1");
+        store.add_episode(agent.clone(), "one two", 0.5).unwrap();
+        store.add_episode(agent.clone(), "a b c d", 0.5).unwrap();
+        let avg = store.avg_episode_content_words(&agent).unwrap();
+        assert_eq!(avg, 3.0);
+    }
+
+    #[test]
+    fn test_has_duplicate_content_true_when_duplicates_exist() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r58-hdc-1");
+        store.add_episode(agent.clone(), "same content", 0.5).unwrap();
+        store.add_episode(agent.clone(), "same content", 0.7).unwrap();
+        assert!(store.has_duplicate_content(&agent).unwrap());
+    }
+
+    #[test]
+    fn test_has_duplicate_content_false_when_all_unique() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r58-hdc-2");
+        store.add_episode(agent.clone(), "first", 0.5).unwrap();
+        store.add_episode(agent.clone(), "second", 0.5).unwrap();
+        assert!(!store.has_duplicate_content(&agent).unwrap());
+    }
+
+    #[test]
+    fn test_value_starts_with_true_when_value_has_prefix() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("url", "https://example.com").unwrap();
+        assert!(wm.value_starts_with("url", "https://").unwrap());
+    }
+
+    #[test]
+    fn test_value_starts_with_false_when_key_absent() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(!wm.value_starts_with("missing", "https://").unwrap());
+    }
+
+    // ── Round 51 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_value_with_max_bytes_returns_longest_value() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "hi").unwrap();
+        wm.set("k2", "hello world").unwrap();
+        wm.set("k3", "ok").unwrap();
+        assert_eq!(wm.value_with_max_bytes().unwrap(), Some("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_value_with_max_bytes_none_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.value_with_max_bytes().unwrap(), None);
+    }
+
+    #[test]
+    fn test_total_content_words_returns_total_word_count() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r51-words-1");
+        store.add_episode(agent.clone(), "hello world", 0.5).unwrap();
+        store.add_episode(agent.clone(), "one two three", 0.5).unwrap();
+        assert_eq!(store.total_content_words(&agent).unwrap(), 5);
+    }
+
+    #[test]
+    fn test_total_content_words_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r51-words-unknown");
+        assert_eq!(store.total_content_words(&agent).unwrap(), 0);
     }
 }

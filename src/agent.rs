@@ -297,6 +297,16 @@ impl ReActStep {
     pub fn action_is_empty(&self) -> bool {
         self.action.trim().is_empty()
     }
+
+    /// Return the total number of words across `thought`, `action`, and
+    /// `observation`, counted by whitespace splitting.
+    ///
+    /// Useful for estimating the token cost of a complete ReAct step.
+    pub fn total_word_count(&self) -> usize {
+        self.thought.split_whitespace().count()
+            + self.action.split_whitespace().count()
+            + self.observation.split_whitespace().count()
+    }
 }
 
 /// Configuration for the ReAct agent loop.
@@ -687,6 +697,15 @@ impl AgentConfig {
     /// Useful as a termination guard in agent loop implementations.
     pub fn exceeds_iteration_limit(&self, steps_done: usize) -> bool {
         steps_done >= self.max_iterations
+    }
+
+    /// Return `true` if a token budget is configured via either `max_tokens`
+    /// or `max_context_chars`.
+    ///
+    /// When `false` the agent will not enforce a token ceiling, which may
+    /// cause silent overruns for very long conversations.
+    pub fn token_budget_configured(&self) -> bool {
+        self.max_tokens.is_some() || self.max_context_chars.is_some()
     }
 }
 
@@ -5066,5 +5085,37 @@ mod tests {
         let cfg = AgentConfig::new(5, "m");
         assert!(!cfg.exceeds_iteration_limit(4));
         assert!(!cfg.exceeds_iteration_limit(0));
+    }
+
+    // ── Round 57 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_total_word_count_sums_all_fields() {
+        let step = ReActStep::new("one two", "three", "four five six");
+        assert_eq!(step.total_word_count(), 6);
+    }
+
+    #[test]
+    fn test_total_word_count_zero_for_empty_step() {
+        let step = ReActStep::new("", "", "");
+        assert_eq!(step.total_word_count(), 0);
+    }
+
+    #[test]
+    fn test_token_budget_configured_true_when_max_tokens_set() {
+        let cfg = AgentConfig::new(3, "m").with_max_tokens(100);
+        assert!(cfg.token_budget_configured());
+    }
+
+    #[test]
+    fn test_token_budget_configured_true_when_max_context_chars_set() {
+        let cfg = AgentConfig::new(3, "m").with_max_context_chars(200);
+        assert!(cfg.token_budget_configured());
+    }
+
+    #[test]
+    fn test_token_budget_configured_false_when_neither_set() {
+        let cfg = AgentConfig::new(3, "m");
+        assert!(!cfg.token_budget_configured());
     }
 }

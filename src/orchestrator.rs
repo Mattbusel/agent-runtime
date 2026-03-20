@@ -2170,12 +2170,29 @@ impl Pipeline {
         self.stages.iter().position(|s| s.name == name)
     }
 
+    /// Return `true` if the pipeline has no stages.
+    ///
+    /// Equivalent to `stage_count() == 0`.
+    pub fn has_no_stages(&self) -> bool {
+        self.stages.is_empty()
+    }
+
     /// Return `true` if **all** stage names start with `prefix`.
     ///
     /// Returns `true` for an empty pipeline (vacuously true) and for an empty
     /// `prefix` string (all strings start with "").
     pub fn all_stage_names_start_with(&self, prefix: &str) -> bool {
         self.stages.iter().all(|s| s.name.starts_with(prefix))
+    }
+
+    /// Return `true` if any stage in the pipeline has exactly the given
+    /// `name`.
+    ///
+    /// Unlike [`Pipeline::has_stage_with_name_containing`] this checks for an
+    /// exact match, and unlike [`Pipeline::contains_all_stages`] it accepts a
+    /// single name without requiring slice syntax.
+    pub fn any_stage_has_name(&self, name: &str) -> bool {
+        self.stages.iter().any(|s| s.name == name)
     }
 
 }
@@ -4621,5 +4638,42 @@ mod tests {
     fn test_all_stage_names_start_with_true_for_empty_pipeline() {
         let p = Pipeline::new();
         assert!(p.all_stage_names_start_with("anything"));
+    }
+
+    // ── Round 51 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_has_no_stages_true_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.has_no_stages());
+    }
+
+    #[test]
+    fn test_has_no_stages_false_after_adding_stage() {
+        let p = Pipeline::new().add_stage("s", |s: String| Ok(s));
+        assert!(!p.has_no_stages());
+    }
+
+    // ── Round 57: any_stage_has_name ─────────────────────────────────────────
+
+    #[test]
+    fn test_any_stage_has_name_true_for_existing_stage() {
+        let p = Pipeline::new()
+            .add_stage("alpha", |s: String| Ok(s))
+            .add_stage("beta", |s: String| Ok(s));
+        assert!(p.any_stage_has_name("alpha"));
+        assert!(p.any_stage_has_name("beta"));
+    }
+
+    #[test]
+    fn test_any_stage_has_name_false_for_missing_stage() {
+        let p = Pipeline::new().add_stage("alpha", |s: String| Ok(s));
+        assert!(!p.any_stage_has_name("gamma"));
+    }
+
+    #[test]
+    fn test_any_stage_has_name_false_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(!p.any_stage_has_name("anything"));
     }
 }

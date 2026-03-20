@@ -1036,6 +1036,27 @@ impl MetricsSnapshot {
         names.sort_unstable();
         names
     }
+
+    /// Return the failure ratio for a specific tool: `failures / calls`.
+    ///
+    /// Returns `0.0` if the tool has never been called or is unknown, avoiding
+    /// division-by-zero.  A ratio of `1.0` means every invocation failed.
+    pub fn failure_ratio_for_tool(&self, name: &str) -> f64 {
+        let calls = self.tool_call_count(name);
+        if calls == 0 {
+            return 0.0;
+        }
+        self.tool_failure_count(name) as f64 / calls as f64
+    }
+
+    /// Return `true` if any registered tool has a call count strictly above
+    /// `threshold`.
+    ///
+    /// Useful for detecting hotspot tools that may be responsible for
+    /// disproportionate load.
+    pub fn any_tool_exceeds_calls(&self, threshold: u64) -> bool {
+        self.per_tool_calls.values().any(|&c| c > threshold)
+    }
 }
 
 impl std::fmt::Display for MetricsSnapshot {
@@ -1667,6 +1688,16 @@ impl RuntimeMetrics {
             .map(|(name, _)| name)
     }
 
+    /// Return the total number of times `name` has been called.
+    ///
+    /// Returns `0` when the tool has never been called.
+    pub fn tool_call_count_for(&self, name: &str) -> u64 {
+        self.per_tool_calls_snapshot()
+            .get(name)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Return the top `n` tools by total call count, sorted descending.
     ///
     /// Returns fewer than `n` entries if fewer tools have been called.
@@ -1743,6 +1774,13 @@ impl RuntimeMetrics {
             return 0.0;
         }
         self.total_sessions.load(Ordering::Relaxed) as f64 / steps as f64
+    }
+
+    /// Return `true` if any step-latency samples have been recorded.
+    ///
+    /// Useful for guard-checking before using latency percentile methods.
+    pub fn has_latency_data(&self) -> bool {
+        self.total_steps.load(Ordering::Relaxed) > 0
     }
 
     /// Capture a snapshot of global counters as plain integers.
@@ -4288,5 +4326,77 @@ mod tests {
     fn test_tool_with_highest_failure_rate_none_when_no_calls() {
         let m = RuntimeMetrics::new();
         assert!(m.tool_with_highest_failure_rate().is_none());
+    }
+
+    // ── Round 51 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_has_latency_data_true_after_step() {
+        use std::sync::atomic::Ordering;
+        let m = RuntimeMetrics::new();
+        m.total_steps.store(1, Ordering::Relaxed);
+        assert!(m.has_latency_data());
+    }
+
+    #[test]
+    fn test_has_latency_data_false_for_new_metrics() {
+        let m = RuntimeMetrics::new();
+        assert!(!m.has_latency_data());
+    }
+
+    // ── Round 57: failure_ratio_for_tool, any_tool_exceeds_calls ─────────────
+
+    #[test]
+    fn test_failure_ratio_for_tool_correct_ratio() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        m.record_tool_call("search");
+        m.record_tool_failure("search");
+        let snap = m.snapshot();
+        assert!((snap.failure_ratio_for_tool("search") - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_failure_ratio_for_tool_zero_for_unknown_tool() {
+        let m = RuntimeMetrics::new();
+        let snap = m.snapshot();
+        assert_eq!(snap.failure_ratio_for_tool("unknown"), 0.0);
+    }
+
+    #[test]
+    fn test_any_tool_exceeds_calls_true_when_above_threshold() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("a");
+        m.record_tool_call("a");
+        m.record_tool_call("a");
+        let snap = m.snapshot();
+        assert!(snap.any_tool_exceeds_calls(2));
+    }
+
+    #[test]
+    fn test_any_tool_exceeds_calls_false_when_all_at_or_below_threshold() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("a");
+        m.record_tool_call("a");
+        let snap = m.snapshot();
+        assert!(!snap.any_tool_exceeds_calls(2));
+    }
+
+    // ── Round 58: tool_call_count_for ─────────────────────────────────────
+    #[test]
+    fn test_tool_call_count_for_returns_correct_count() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("grep");
+        m.record_tool_call("grep");
+        m.record_tool_call("grep");
+        let snap = m.snapshot();
+        assert_eq!(snap.tool_call_count_for("grep"), 3);
+    }
+
+    #[test]
+    fn test_tool_call_count_for_returns_zero_for_unknown_tool() {
+        let m = RuntimeMetrics::new();
+        let snap = m.snapshot();
+        assert_eq!(snap.tool_call_count_for("nonexistent"), 0);
     }
 }

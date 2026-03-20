@@ -3347,6 +3347,24 @@ impl GraphStore {
     }
 
     /// Return all entities whose out-degree is at least `min_degree`.
+    /// Return all entities that have zero outgoing edges (sink nodes).
+    ///
+    /// Returns an empty `Vec` for an empty graph.
+    pub fn nodes_with_no_outgoing(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::nodes_with_no_outgoing");
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| {
+                inner
+                    .adjacency
+                    .get(&e.id)
+                    .map_or(true, |rels| rels.is_empty())
+            })
+            .cloned()
+            .collect())
+    }
+
     ///
     /// Entities with no outgoing edges have an out-degree of 0 and are
     /// excluded unless `min_degree` is 0.  Returns an empty `Vec` for an
@@ -3529,6 +3547,23 @@ impl GraphStore {
             .filter(|r| r.kind == kind)
             .count();
         Ok(count)
+    }
+
+    /// Return the number of outgoing relationships from `entity_id`.
+    ///
+    /// Returns `0` when the entity has no outgoing edges or does not exist.
+    pub fn relationship_count_for_entity(
+        &self,
+        entity_id: &EntityId,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(
+            self.inner.lock(),
+            "GraphStore::relationship_count_for_entity",
+        );
+        Ok(inner
+            .adjacency
+            .get(entity_id)
+            .map_or(0, |rels| rels.len()))
     }
 
     /// Return all entities that have at least one **incoming** relationship
@@ -7637,5 +7672,91 @@ mod tests {
         let g = GraphStore::new();
         let id = EntityId("x".to_string());
         assert_eq!(g.entity_degree_ratio(&id).unwrap(), 0.0);
+    }
+
+    // ── Round 57 (extra): entity_has_outgoing_edge, count_nodes_with_self_loop ─
+
+    #[test]
+    fn test_entity_has_outgoing_edge_true_when_edge_exists() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "k", 1.0)).unwrap();
+        let id = EntityId("a".to_string());
+        assert!(g.entity_has_outgoing_edge(&id).unwrap());
+    }
+
+    #[test]
+    fn test_entity_has_outgoing_edge_false_for_sink_node() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "k", 1.0)).unwrap();
+        let id = EntityId("b".to_string());
+        assert!(!g.entity_has_outgoing_edge(&id).unwrap());
+    }
+
+    #[test]
+    fn test_count_nodes_with_self_loop_counts_correctly() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "a", "self", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "a", "fwd", 1.0)).unwrap();
+        assert_eq!(g.count_nodes_with_self_loop().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_count_nodes_with_self_loop_zero_for_no_loops() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "k", 1.0)).unwrap();
+        assert_eq!(g.count_nodes_with_self_loop().unwrap(), 0);
+    }
+
+    // ── Round 51 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_relationship_count_for_entity_correct() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("hub", "N")).unwrap();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("hub", "a", "E", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("hub", "b", "E", 1.0)).unwrap();
+        let hub_id = EntityId("hub".to_string());
+        assert_eq!(g.relationship_count_for_entity(&hub_id).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_relationship_count_for_entity_zero_for_unknown() {
+        let g = GraphStore::new();
+        let id = EntityId("nobody".to_string());
+        assert_eq!(g.relationship_count_for_entity(&id).unwrap(), 0);
+    }
+
+    // ── Round 58: nodes_with_no_outgoing ──────────────────────────────────────
+
+    #[test]
+    fn test_nodes_with_no_outgoing_returns_sink_nodes() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("src", "N")).unwrap();
+        g.add_entity(Entity::new("sink", "N")).unwrap();
+        g.add_entity(Entity::new("iso", "N")).unwrap();
+        g.add_relationship(Relationship::new("src", "sink", "E", 1.0)).unwrap();
+        let sinks = g.nodes_with_no_outgoing().unwrap();
+        let ids: Vec<&str> = sinks.iter().map(|e| e.id.as_str()).collect();
+        assert!(ids.contains(&"sink"));
+        assert!(ids.contains(&"iso"));
+        assert!(!ids.contains(&"src"));
+    }
+
+    #[test]
+    fn test_nodes_with_no_outgoing_all_for_graph_with_no_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        assert_eq!(g.nodes_with_no_outgoing().unwrap().len(), 2);
     }
 }
