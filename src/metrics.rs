@@ -1938,4 +1938,133 @@ mod tests {
         }
         assert_eq!(m.p50_latency_ms(), m.step_latency.p50());
     }
+
+    // ── Round 25: histogram p25/p75/p90/min, has_data; snapshot helpers ───────
+
+    #[test]
+    fn test_latency_histogram_has_data_false_when_empty() {
+        let h = LatencyHistogram::default();
+        assert!(!h.has_data());
+    }
+
+    #[test]
+    fn test_latency_histogram_has_data_true_after_record() {
+        let h = LatencyHistogram::default();
+        h.record(100);
+        assert!(h.has_data());
+    }
+
+    #[test]
+    fn test_latency_histogram_min_ms_none_when_empty() {
+        let h = LatencyHistogram::default();
+        assert_eq!(h.min_ms(), None);
+    }
+
+    #[test]
+    fn test_latency_histogram_min_ms_some_after_record() {
+        let h = LatencyHistogram::default();
+        h.record(50);
+        assert!(h.min_ms().is_some());
+    }
+
+    #[test]
+    fn test_latency_histogram_p25_lte_p75() {
+        let h = LatencyHistogram::default();
+        for ms in [10_u64, 50, 100, 200, 500, 1000, 2000, 5000] {
+            h.record(ms);
+        }
+        assert!(h.p25() <= h.p75());
+    }
+
+    #[test]
+    fn test_latency_histogram_p90_between_p50_and_p99() {
+        let h = LatencyHistogram::default();
+        for ms in [10_u64, 50, 100, 200, 500] {
+            h.record(ms);
+        }
+        assert!(h.p50() <= h.p90());
+        assert!(h.p90() <= h.p99());
+    }
+
+    #[test]
+    fn test_metrics_snapshot_tool_success_count_correct() {
+        let snap = MetricsSnapshot {
+            per_tool_calls: [("search".to_string(), 10u64)].into(),
+            per_tool_failures: [("search".to_string(), 3u64)].into(),
+            ..Default::default()
+        };
+        assert_eq!(snap.tool_success_count("search"), 7);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_tool_success_count_zero_for_unknown_tool() {
+        let snap = MetricsSnapshot::default();
+        assert_eq!(snap.tool_success_count("unknown"), 0);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_tool_failure_rate_correct_ratio() {
+        let snap = MetricsSnapshot {
+            per_tool_calls: [("lookup".to_string(), 4u64)].into(),
+            per_tool_failures: [("lookup".to_string(), 1u64)].into(),
+            ..Default::default()
+        };
+        assert!((snap.tool_failure_rate("lookup") - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_tool_failure_rate_zero_for_unknown_tool() {
+        let snap = MetricsSnapshot::default();
+        assert!((snap.tool_failure_rate("none") - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_total_successful_tool_calls() {
+        let snap = MetricsSnapshot {
+            total_tool_calls: 20,
+            failed_tool_calls: 5,
+            ..Default::default()
+        };
+        assert_eq!(snap.total_successful_tool_calls(), 15);
+    }
+
+    #[test]
+    fn test_runtime_metrics_per_tool_calls_snapshot_increments() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        m.record_tool_call("search");
+        m.record_tool_call("lookup");
+        let snap = m.per_tool_calls_snapshot();
+        assert_eq!(snap.get("search"), Some(&2));
+        assert_eq!(snap.get("lookup"), Some(&1));
+    }
+
+    #[test]
+    fn test_runtime_metrics_per_tool_failures_snapshot() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        m.record_tool_failure("search");
+        let snap = m.per_tool_failures_snapshot();
+        assert_eq!(snap.get("search"), Some(&1));
+    }
+
+    #[test]
+    fn test_runtime_metrics_record_agent_tool_call_tracked() {
+        let m = RuntimeMetrics::new();
+        m.record_agent_tool_call("agent-1", "search");
+        m.record_agent_tool_call("agent-1", "search");
+        let snap = m.per_agent_tool_calls_snapshot();
+        assert_eq!(snap.get("agent-1").and_then(|t| t.get("search")), Some(&2));
+    }
+
+    #[test]
+    fn test_runtime_metrics_per_agent_tool_failures_snapshot() {
+        let m = RuntimeMetrics::new();
+        m.record_agent_tool_failure("agent-2", "lookup");
+        let snap = m.per_agent_tool_failures_snapshot();
+        assert_eq!(
+            snap.get("agent-2").and_then(|t| t.get("lookup")),
+            Some(&1)
+        );
+    }
 }
