@@ -11,6 +11,32 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.21.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::has_action`** (`runtime.rs`) — `true` if any step used the
+  named action; replaces manual iteration over `action_sequence()`.
+- **`AgentSession::thought_at`** (`runtime.rs`) — return the thought string at a
+  given step index, or `None` if out of bounds.
+- **`EpisodicStore::recall_top_n`** (`memory.rs`) — retrieve the `n`
+  highest-importance episodes for an agent in descending order.
+- **`EpisodicStore::filter_by_importance`** (`memory.rs`) — return all episodes
+  whose importance falls within an inclusive `[min, max]` range.
+- **`WorkingMemory::update_many`** (`memory.rs`) — batch-set multiple key/value
+  pairs in one call; returns the count of updated entries.
+- **`SemanticStore::entry_count_with_embedding`** (`memory.rs`) — count entries
+  that have a non-empty embedding vector stored.
+- **`GraphStore::weakly_connected`** (`graph.rs`) — `true` when the graph has at
+  most one weakly-connected component (treats edges as undirected).
+- **`RetryPolicy::is_no_retry`** (`orchestrator.rs`) — `true` when
+  `max_attempts ≤ 1`; allows hot-path short-circuiting without inspecting the
+  full policy.
+- **`ToolRegistry::filter_tools`** (`agent.rs`) — return references to all
+  registered `ToolSpec`s matching a caller-supplied predicate.
+
+---
+
 ## [1.20.0] - 2026-03-20
 
 ### Added

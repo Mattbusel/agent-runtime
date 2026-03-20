@@ -2273,6 +2273,14 @@ impl WorkingMemory {
         self.capacity
     }
 
+    /// Return the current fill ratio as `len / capacity`.
+    ///
+    /// Returns a value in `[0.0, 1.0]`.  `1.0` means the memory is full and
+    /// the next insert will evict the oldest entry.
+    pub fn fill_ratio(&self) -> Result<f64, AgentRuntimeError> {
+        Ok(self.len()? as f64 / self.capacity as f64)
+    }
+
     /// Remove all entries for which `predicate(key, value)` returns `false`.
     ///
     /// Preserves insertion order of the surviving entries.
@@ -4388,14 +4396,14 @@ mod tests {
     #[test]
     fn test_update_many_returns_zero_for_empty_iter() {
         let wm = WorkingMemory::new(5).unwrap();
-        let updated = wm.update_many(vec![]).unwrap();
+        let updated = wm.update_many(Vec::<(String, String)>::new()).unwrap();
         assert_eq!(updated, 0);
     }
 
     #[test]
     fn test_entry_count_with_embedding_counts_only_embedded_entries() {
         let store = SemanticStore::new();
-        store.store("has_emb", "v1", vec![0.1, 0.2]).unwrap();
+        store.store_with_embedding("has_emb", "v1", vec![], vec![0.1_f32, 0.2_f32]).unwrap();
         store.store("no_emb", "v2", vec![]).unwrap();
         assert_eq!(store.entry_count_with_embedding().unwrap(), 1);
     }

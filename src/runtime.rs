@@ -203,6 +203,16 @@ impl AgentSession {
         self.steps.get(idx)
     }
 
+    /// Return the observation string at step `idx`, or `None` if out of bounds.
+    pub fn observation_at(&self, idx: usize) -> Option<&str> {
+        self.steps.get(idx).map(|s| s.observation.as_str())
+    }
+
+    /// Return the action string at step `idx`, or `None` if out of bounds.
+    pub fn action_at(&self, idx: usize) -> Option<&str> {
+        self.steps.get(idx).map(|s| s.action.as_str())
+    }
+
     /// Return steps whose observation contains `pattern` (case-insensitive).
     pub fn observations_matching(&self, pattern: &str) -> Vec<&ReActStep> {
         let lower = pattern.to_ascii_lowercase();
@@ -219,6 +229,16 @@ impl AgentSession {
             .iter()
             .filter(|s| s.thought.to_ascii_lowercase().contains(&lower))
             .collect()
+    }
+
+    /// Return `true` if any step in this session used `action_name`.
+    pub fn has_action(&self, action_name: &str) -> bool {
+        self.steps.iter().any(|s| s.action == action_name)
+    }
+
+    /// Return the thought string at step `idx`, or `None` if out of bounds.
+    pub fn thought_at(&self, idx: usize) -> Option<&str> {
+        self.steps.get(idx).map(|s| s.thought.as_str())
     }
 
     /// Return all per-step durations in milliseconds, in order.
@@ -2148,5 +2168,44 @@ mod tests {
             0,
         );
         assert_eq!(session.action_sequence(), vec!["search", "FINAL_ANSWER"]);
+    }
+
+    // ── Round 9: has_action / thought_at ─────────────────────────────────────
+
+    #[test]
+    fn test_has_action_returns_true_for_present_action() {
+        let session = make_session(
+            vec![ReActStep::new("t", "search", "r")],
+            0,
+        );
+        assert!(session.has_action("search"));
+    }
+
+    #[test]
+    fn test_has_action_returns_false_for_absent_action() {
+        let session = make_session(
+            vec![ReActStep::new("t", "search", "r")],
+            0,
+        );
+        assert!(!session.has_action("compute"));
+    }
+
+    #[test]
+    fn test_thought_at_returns_thought_for_valid_index() {
+        let session = make_session(
+            vec![
+                ReActStep::new("first thought", "a1", "r1"),
+                ReActStep::new("second thought", "a2", "r2"),
+            ],
+            0,
+        );
+        assert_eq!(session.thought_at(0), Some("first thought"));
+        assert_eq!(session.thought_at(1), Some("second thought"));
+    }
+
+    #[test]
+    fn test_thought_at_returns_none_for_out_of_bounds_index() {
+        let session = make_session(vec![ReActStep::new("t", "a", "r")], 0);
+        assert!(session.thought_at(99).is_none());
     }
 }

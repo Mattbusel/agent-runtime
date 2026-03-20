@@ -1179,6 +1179,17 @@ impl GraphStore {
         Ok(components)
     }
 
+    /// Return `true` if the graph is weakly connected (i.e. has at most one
+    /// connected component when all edges are treated as undirected).
+    ///
+    /// An empty graph is considered weakly connected by convention.
+    ///
+    /// # Errors
+    /// Propagates any lock-poisoning error from [`connected_components`].
+    pub fn weakly_connected(&self) -> Result<bool, AgentRuntimeError> {
+        Ok(self.connected_components()? <= 1)
+    }
+
     /// Return all entities that have no outgoing edges (out-degree == 0).
     ///
     /// In a DAG these are the leaf nodes. Useful for identifying terminal
@@ -1856,6 +1867,20 @@ impl GraphStore {
             .adjacency
             .iter()
             .max_by_key(|(_, rels)| rels.len())
+            .and_then(|(id, _)| inner.entities.get(id).cloned());
+        Ok(best)
+    }
+
+    /// Return the entity with the most incoming edges (highest in-degree).
+    ///
+    /// Uses the reverse adjacency index for O(V) computation.
+    /// Returns `None` for an empty graph or a graph with no edges.
+    pub fn max_in_degree_entity(&self) -> Result<Option<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "max_in_degree_entity");
+        let best = inner
+            .reverse_adjacency
+            .iter()
+            .max_by_key(|(_, srcs)| srcs.len())
             .and_then(|(id, _)| inner.entities.get(id).cloned());
         Ok(best)
     }
@@ -2732,6 +2757,38 @@ mod tests {
     fn test_connected_components_empty_graph() {
         let g = GraphStore::new();
         assert_eq!(g.connected_components().unwrap(), 0);
+    }
+
+    // ── Round 9: weakly_connected ─────────────────────────────────────────────
+
+    #[test]
+    fn test_weakly_connected_true_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(g.weakly_connected().unwrap());
+    }
+
+    #[test]
+    fn test_weakly_connected_true_for_single_node() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        assert!(g.weakly_connected().unwrap());
+    }
+
+    #[test]
+    fn test_weakly_connected_true_when_all_nodes_connected() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        assert!(g.weakly_connected().unwrap());
+    }
+
+    #[test]
+    fn test_weakly_connected_false_when_nodes_isolated() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        assert!(!g.weakly_connected().unwrap());
     }
 
     #[test]

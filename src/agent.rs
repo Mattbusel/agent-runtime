@@ -913,6 +913,18 @@ impl ToolRegistry {
         self.tools.values().collect()
     }
 
+    /// Return references to all `ToolSpec`s that satisfy the given predicate.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use llm_agent_runtime::agent::ToolRegistry;
+    /// let registry = ToolRegistry::new();
+    /// let long_desc: Vec<_> = registry.filter_tools(|s| s.description.len() > 20);
+    /// ```
+    pub fn filter_tools<F: Fn(&ToolSpec) -> bool>(&self, pred: F) -> Vec<&ToolSpec> {
+        self.tools.values().filter(|s| pred(s)).collect()
+    }
+
     /// Rename a registered tool from `old_name` to `new_name`.
     ///
     /// The tool's `name` field and its registry key are both updated.
@@ -2767,5 +2779,34 @@ mod tests {
     fn test_rename_tool_returns_false_for_unknown_name() {
         let mut reg = ToolRegistry::new();
         assert!(!reg.rename_tool("ghost", "other"));
+    }
+
+    // ── Round 9: filter_tools ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_filter_tools_returns_matching_specs() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("short_desc", "hi", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("long_desc", "a longer description here", |_| serde_json::json!({})));
+        let long_ones = reg.filter_tools(|s| s.description.len() > 10);
+        assert_eq!(long_ones.len(), 1);
+        assert_eq!(long_ones[0].name, "long_desc");
+    }
+
+    #[test]
+    fn test_filter_tools_returns_empty_when_none_match() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "desc", |_| serde_json::json!({})));
+        let none: Vec<_> = reg.filter_tools(|_| false);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn test_filter_tools_returns_all_when_predicate_always_true() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("a", "d1", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("b", "d2", |_| serde_json::json!({})));
+        let all = reg.filter_tools(|_| true);
+        assert_eq!(all.len(), 2);
     }
 }
