@@ -1181,6 +1181,16 @@ impl ToolRegistry {
     pub fn unregister_all(&mut self) {
         self.tools.clear();
     }
+
+    /// Return the names of tools whose description contains `keyword` (case-insensitive).
+    pub fn tool_names_with_keyword(&self, keyword: &str) -> Vec<&str> {
+        let kw = keyword.to_ascii_lowercase();
+        self.tools
+            .values()
+            .filter(|s| s.description.to_ascii_lowercase().contains(&kw))
+            .map(|s| s.name.as_str())
+            .collect()
+    }
 }
 
 // ── ReActLoop ─────────────────────────────────────────────────────────────────
@@ -3615,5 +3625,23 @@ mod tests {
         assert_eq!(reg.tool_count(), 2);
         reg.unregister_all();
         assert_eq!(reg.tool_count(), 0);
+    }
+
+    #[test]
+    fn test_tool_names_with_keyword_returns_matching_tool_names() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("search", "search the web for info", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("db", "query database records", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("web-fetch", "fetch a WEB page", |_| serde_json::json!({})));
+        let mut names = reg.tool_names_with_keyword("web");
+        names.sort_unstable();
+        assert_eq!(names, vec!["search", "web-fetch"]);
+    }
+
+    #[test]
+    fn test_tool_names_with_keyword_no_match_returns_empty() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t", "some tool", |_| serde_json::json!({})));
+        assert!(reg.tool_names_with_keyword("missing").is_empty());
     }
 }

@@ -343,6 +343,18 @@ impl LatencyHistogram {
             .map(|(&bound, _)| bound)
     }
 
+    /// Return the upper-bound of the largest bucket with at least one recorded sample.
+    ///
+    /// Returns `None` if the histogram is empty.
+    pub fn max_occupied_ms(&self) -> Option<u64> {
+        Self::BOUNDS
+            .iter()
+            .zip(self.buckets.iter())
+            .rev()
+            .find(|(_, b)| b.load(std::sync::atomic::Ordering::Relaxed) > 0)
+            .map(|(&bound, _)| bound)
+    }
+
     /// Return `true` if all recorded samples fall into exactly one bucket.
     ///
     /// An empty histogram is considered uniform.
@@ -644,6 +656,11 @@ impl MetricsSnapshot {
             return 0.0;
         }
         self.total_tool_calls as f64 / self.total_steps as f64
+    }
+
+    /// Return `true` if any tool-call failures have been recorded.
+    pub fn has_failures(&self) -> bool {
+        self.failed_tool_calls > 0
     }
 }
 
@@ -2494,5 +2511,34 @@ mod tests {
     fn test_latency_histogram_min_occupied_ms_empty_returns_none() {
         let h = LatencyHistogram::default();
         assert_eq!(h.min_occupied_ms(), None);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_has_failures_true_when_failures_exist() {
+        let snap = MetricsSnapshot {
+            failed_tool_calls: 1,
+            ..Default::default()
+        };
+        assert!(snap.has_failures());
+    }
+
+    #[test]
+    fn test_metrics_snapshot_has_failures_false_when_no_failures() {
+        let snap = MetricsSnapshot::default();
+        assert!(!snap.has_failures());
+    }
+
+    #[test]
+    fn test_latency_histogram_max_occupied_ms_returns_largest_occupied_bucket() {
+        let h = LatencyHistogram::default();
+        h.record(5);   // ≤5ms bucket
+        h.record(200); // ≤500ms bucket
+        assert_eq!(h.max_occupied_ms(), Some(500));
+    }
+
+    #[test]
+    fn test_latency_histogram_max_occupied_ms_empty_returns_none() {
+        let h = LatencyHistogram::default();
+        assert_eq!(h.max_occupied_ms(), None);
     }
 }

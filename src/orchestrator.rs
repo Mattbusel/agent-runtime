@@ -1596,6 +1596,15 @@ impl Pipeline {
         self.stages.clear();
     }
 
+    /// Return the number of stages whose name contains `keyword` (case-insensitive).
+    pub fn count_stages_matching(&self, keyword: &str) -> usize {
+        let kw = keyword.to_ascii_lowercase();
+        self.stages
+            .iter()
+            .filter(|s| s.name.to_ascii_lowercase().contains(&kw))
+            .count()
+    }
+
     /// Swap the positions of two stages by name.
     ///
     /// Returns `true` if both stages were found and swapped.  Returns `false`
@@ -3269,5 +3278,22 @@ mod tests {
     fn test_backoff_factor_constant_returns_one() {
         let p = RetryPolicy::constant(3, 100).unwrap();
         assert!((p.backoff_factor() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_pipeline_count_stages_matching_counts_by_keyword() {
+        let p = Pipeline::new()
+            .add_stage("normalize-text", |s| Ok(s))
+            .add_stage("text-trim", |s| Ok(s))
+            .add_stage("embed", |s| Ok(s));
+        assert_eq!(p.count_stages_matching("text"), 2);
+        assert_eq!(p.count_stages_matching("embed"), 1);
+        assert_eq!(p.count_stages_matching("missing"), 0);
+    }
+
+    #[test]
+    fn test_pipeline_count_stages_matching_case_insensitive() {
+        let p = Pipeline::new().add_stage("TEXT-CLEAN", |s| Ok(s));
+        assert_eq!(p.count_stages_matching("text"), 1);
     }
 }

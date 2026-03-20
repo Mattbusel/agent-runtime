@@ -11,6 +11,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.51.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::has_final_answer`** — returns true if any step's action begins with `FINAL_ANSWER`.
+- **`AgentSession::avg_action_length`** — mean byte length of all step action strings.
+- **`EpisodicStore::episode_count_for`** — number of episodes stored for a specific agent.
+- **`SemanticStore::unique_tags`** — sorted list of distinct tags across all entries.
+- **`WorkingMemory::count_matching_prefix`** — count of keys starting with a given prefix.
+- **`MetricsSnapshot::has_failures`** — true if any tool-call failures have been recorded.
+- **`LatencyHistogram::max_occupied_ms`** — bound of the largest bucket with at least one sample.
+- **`Pipeline::count_stages_matching`** — count of pipeline stages whose name contains a keyword.
+- **`GraphStore::outgoing_count_for`** — number of outbound edges from a given entity.
+- **`ToolRegistry::tool_names_with_keyword`** — names of tools whose description contains a keyword.
+
+---
+
 ## [1.50.0] - 2026-03-20
 
 ### Added

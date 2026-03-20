@@ -769,6 +769,14 @@ impl EpisodicStore {
         Ok(inner.items.values().map(|v| v.len()).sum())
     }
 
+    /// Return the number of episodes stored for the given agent.
+    ///
+    /// Returns `0` if the agent has no recorded episodes.
+    pub fn episode_count_for(&self, agent_id: &AgentId) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episode_count_for");
+        Ok(inner.items.get(agent_id).map_or(0, |v| v.len()))
+    }
+
     /// Return the `AgentId` of the agent with the most stored episodes, or
     /// `None` if the store is empty.
     pub fn agent_with_most_episodes(&self) -> Result<Option<AgentId>, AgentRuntimeError> {
@@ -2049,6 +2057,20 @@ impl SemanticStore {
         Ok(tags.into_iter().collect())
     }
 
+    /// Return a sorted list of every distinct tag appearing across all entries.
+    pub fn unique_tags(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::unique_tags");
+        let mut tags: Vec<String> = inner
+            .entries
+            .iter()
+            .flat_map(|e| e.tags.iter().cloned())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        tags.sort_unstable();
+        Ok(tags)
+    }
+
     /// Return the number of distinct tags across all stored entries.
     ///
     /// Equivalent to `list_tags()?.len()` but avoids allocating the full tag list.
@@ -2872,6 +2894,12 @@ impl WorkingMemory {
             .values()
             .max_by_key(|v| v.len())
             .map(|v| v.clone()))
+    }
+
+    /// Return the number of keys that start with the given prefix.
+    pub fn count_matching_prefix(&self, prefix: &str) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::count_matching_prefix");
+        Ok(inner.map.keys().filter(|k| k.starts_with(prefix)).count())
     }
 
     /// Return a list of `(key, value_byte_length)` pairs for all entries.
@@ -6460,5 +6488,45 @@ mod tests {
         wm.set("a", "1").unwrap();
         wm.set("b", "2").unwrap();
         assert_eq!(wm.entry_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_episode_count_for_returns_correct_count() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "e1", 0.5).unwrap();
+        store.add_episode(agent.clone(), "e2", 0.5).unwrap();
+        assert_eq!(store.episode_count_for(&agent).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_episode_count_for_unknown_agent_returns_zero() {
+        let store = EpisodicStore::new();
+        assert_eq!(store.episode_count_for(&AgentId::new("x")).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_semantic_store_unique_tags_returns_sorted_distinct_tags() {
+        let store = SemanticStore::new();
+        store.store("k1", "v1", vec!["b".to_string(), "a".to_string()]).unwrap();
+        store.store("k2", "v2", vec!["a".to_string(), "c".to_string()]).unwrap();
+        assert_eq!(store.unique_tags().unwrap(), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_semantic_store_unique_tags_empty_returns_empty() {
+        let store = SemanticStore::new();
+        assert!(store.unique_tags().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_working_memory_count_matching_prefix_counts_correctly() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("user:a", "1").unwrap();
+        wm.set("user:b", "2").unwrap();
+        wm.set("other", "3").unwrap();
+        assert_eq!(wm.count_matching_prefix("user:").unwrap(), 2);
+        assert_eq!(wm.count_matching_prefix("other").unwrap(), 1);
+        assert_eq!(wm.count_matching_prefix("none").unwrap(), 0);
     }
 }

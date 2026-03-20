@@ -665,6 +665,24 @@ impl AgentSession {
         self.steps.iter().filter(|s| s.thought.len() > threshold).count()
     }
 
+    /// Return `true` if any step's action begins with `"FINAL_ANSWER"` (case-insensitive).
+    pub fn has_final_answer(&self) -> bool {
+        self.steps
+            .iter()
+            .any(|s| s.action.to_ascii_uppercase().starts_with("FINAL_ANSWER"))
+    }
+
+    /// Return the mean byte length of all step action strings.
+    ///
+    /// Returns `0.0` for empty sessions.
+    pub fn avg_action_length(&self) -> f64 {
+        if self.steps.is_empty() {
+            return 0.0;
+        }
+        let total: usize = self.steps.iter().map(|s| s.action.len()).sum();
+        total as f64 / self.steps.len() as f64
+    }
+
     /// Return `true` if any tool-call steps had error observations.
     pub fn has_tool_failures(&self) -> bool {
         self.failed_tool_call_count() > 0
@@ -3854,5 +3872,38 @@ mod tests {
         let session = make_session(steps, 0);
         // "hi" (2) <= 5, "a longer thought here" (21) > 5, "medium thought" (13) > 5
         assert_eq!(session.steps_above_thought_length(5), 2);
+    }
+
+    #[test]
+    fn test_has_final_answer_true_when_step_has_final_answer_action() {
+        let steps = vec![
+            make_step("think", "search", "result"),
+            make_step("done", "FINAL_ANSWER: 42", ""),
+        ];
+        let session = make_session(steps, 0);
+        assert!(session.has_final_answer());
+    }
+
+    #[test]
+    fn test_has_final_answer_false_when_no_final_answer_step() {
+        let steps = vec![make_step("think", "search", "result")];
+        let session = make_session(steps, 0);
+        assert!(!session.has_final_answer());
+    }
+
+    #[test]
+    fn test_avg_action_length_correct_mean() {
+        let steps = vec![
+            make_step("t", "ab", "o"),    // 2
+            make_step("t", "abcd", "o"),  // 4
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.avg_action_length() - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_action_length_empty_returns_zero() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.avg_action_length(), 0.0);
     }
 }
