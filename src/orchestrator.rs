@@ -1163,6 +1163,14 @@ impl BackpressureGuard {
         self.soft_capacity
     }
 
+    /// Return `true` if a soft capacity limit has been configured.
+    ///
+    /// Equivalent to `self.soft_limit().is_some()` but more readable at call
+    /// sites that only need a boolean check.
+    pub fn is_soft_limited(&self) -> bool {
+        self.soft_capacity.is_some()
+    }
+
     /// Return the current depth.
     pub fn depth(&self) -> Result<usize, AgentRuntimeError> {
         let depth = timed_lock(&self.inner, "BackpressureGuard::depth");
@@ -2428,5 +2436,22 @@ mod tests {
     fn test_is_exponential_false_for_none_policy() {
         let p = RetryPolicy::none();
         assert!(!p.is_exponential());
+    }
+
+    // ── Round 11: BackpressureGuard::is_soft_limited ──────────────────────────
+
+    #[test]
+    fn test_is_soft_limited_false_without_soft_limit() {
+        let g = BackpressureGuard::new(10).unwrap();
+        assert!(!g.is_soft_limited());
+    }
+
+    #[test]
+    fn test_is_soft_limited_true_when_soft_limit_set() {
+        let g = BackpressureGuard::new(10)
+            .unwrap()
+            .with_soft_limit(5)
+            .unwrap();
+        assert!(g.is_soft_limited());
     }
 }

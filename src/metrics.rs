@@ -565,6 +565,19 @@ impl RuntimeMetrics {
         self.failed_tool_calls.load(Ordering::Relaxed)
     }
 
+    /// Return the fraction of tool calls that succeeded (i.e. did not fail).
+    ///
+    /// Returns `1.0` if no tool calls have been recorded yet (vacuously all
+    /// succeeded) and a value in `[0.0, 1.0]` once calls have been made.
+    pub fn tool_success_rate(&self) -> f64 {
+        let total = self.total_tool_calls();
+        if total == 0 {
+            return 1.0;
+        }
+        let failed = self.failed_tool_calls();
+        1.0 - (failed as f64 / total as f64)
+    }
+
     /// Return the total number of requests shed due to backpressure.
     pub fn backpressure_shed_count(&self) -> u64 {
         self.backpressure_shed_count.load(Ordering::Relaxed)
@@ -1407,5 +1420,36 @@ mod tests {
         h.record(5);
         // All samples in the same bucket → std_dev ≈ 0
         assert!(h.std_dev_ms() < 1.0);
+    }
+
+    // ── Round 11: RuntimeMetrics::tool_success_rate ───────────────────────────
+
+    #[test]
+    fn test_tool_success_rate_one_when_no_calls() {
+        let m = RuntimeMetrics::new();
+        assert!((m.tool_success_rate() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_tool_success_rate_one_when_no_failures() {
+        let m = RuntimeMetrics::new();
+        m.total_tool_calls.fetch_add(10, Ordering::Relaxed);
+        assert!((m.tool_success_rate() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_tool_success_rate_half_when_half_fail() {
+        let m = RuntimeMetrics::new();
+        m.total_tool_calls.fetch_add(10, Ordering::Relaxed);
+        m.failed_tool_calls.fetch_add(5, Ordering::Relaxed);
+        assert!((m.tool_success_rate() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_tool_success_rate_zero_when_all_fail() {
+        let m = RuntimeMetrics::new();
+        m.total_tool_calls.fetch_add(4, Ordering::Relaxed);
+        m.failed_tool_calls.fetch_add(4, Ordering::Relaxed);
+        assert!(m.tool_success_rate().abs() < 1e-9);
     }
 }

@@ -11,6 +11,29 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.25.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::avg_step_duration_ms`** (`runtime.rs`) — arithmetic mean of
+  all step durations; `0.0` for sessions with no steps.
+- **`AgentSession::longest_step`** (`runtime.rs`) — step reference with the
+  largest `step_duration_ms`; useful for hotspot analysis.
+- **`AgentSession::shortest_step`** (`runtime.rs`) — step reference with the
+  smallest `step_duration_ms`; complements `longest_step`.
+- **`EpisodicStore::most_recent`** (`memory.rs`) — return the most recently
+  stored episode for an agent (last-inserted); `None` if none exist.
+- **`WorkingMemory::contains_all`** (`memory.rs`) — `true` when every key in
+  the iterator is present; vacuously `true` for an empty iterator.
+- **`WorkingMemory::has_any_key`** (`memory.rs`) — `true` when at least one key
+  in the iterator is present; `false` for an empty iterator.
+- **`BackpressureGuard::is_soft_limited`** (`orchestrator.rs`) — `true` when a
+  soft capacity has been configured; more readable than `soft_limit().is_some()`.
+- **`RuntimeMetrics::tool_success_rate`** (`metrics.rs`) — fraction of tool
+  calls that did not fail; `1.0` when no calls have been recorded.
+
+---
+
 ## [1.24.0] - 2026-03-20
 
 ### Added

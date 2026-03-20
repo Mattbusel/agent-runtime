@@ -274,6 +274,32 @@ impl AgentSession {
         self.steps.iter().map(|s| s.step_duration_ms).sum()
     }
 
+    /// Return the arithmetic mean step duration in milliseconds.
+    ///
+    /// Returns `0.0` for sessions with no steps.
+    pub fn avg_step_duration_ms(&self) -> f64 {
+        if self.steps.is_empty() {
+            return 0.0;
+        }
+        self.total_latency_ms() as f64 / self.steps.len() as f64
+    }
+
+    /// Return a reference to the step with the largest `step_duration_ms`.
+    ///
+    /// Returns `None` if the session has no steps.  When multiple steps share
+    /// the maximum duration the first one (lowest index) is returned.
+    pub fn longest_step(&self) -> Option<&crate::agent::ReActStep> {
+        self.steps.iter().max_by_key(|s| s.step_duration_ms)
+    }
+
+    /// Return a reference to the step with the smallest `step_duration_ms`.
+    ///
+    /// Returns `None` if the session has no steps.  When multiple steps share
+    /// the minimum duration the first one (lowest index) is returned.
+    pub fn shortest_step(&self) -> Option<&crate::agent::ReActStep> {
+        self.steps.iter().min_by_key(|s| s.step_duration_ms)
+    }
+
     /// Return the sequence of action names taken, in step order.
     ///
     /// Unlike `all_actions()` this returns owned `String`s so the result can
@@ -2299,5 +2325,57 @@ mod tests {
     fn test_unique_tools_used_empty_for_no_steps() {
         let session = make_session(vec![], 0);
         assert!(session.unique_tools_used().is_empty());
+    }
+
+    // ── Round 11: avg_step_duration_ms / longest_step / shortest_step ─────────
+
+    #[test]
+    fn test_avg_step_duration_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!((session.avg_step_duration_ms() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_step_duration_single_step() {
+        let mut step = ReActStep::new("t", "a", "r");
+        step.step_duration_ms = 100;
+        let session = make_session(vec![step], 0);
+        assert!((session.avg_step_duration_ms() - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_step_duration_multiple_steps() {
+        let mut s1 = ReActStep::new("t1", "a", "r");
+        s1.step_duration_ms = 100;
+        let mut s2 = ReActStep::new("t2", "b", "r");
+        s2.step_duration_ms = 200;
+        let session = make_session(vec![s1, s2], 0);
+        assert!((session.avg_step_duration_ms() - 150.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_longest_step_returns_step_with_max_duration() {
+        let mut s1 = ReActStep::new("t1", "a", "r");
+        s1.step_duration_ms = 50;
+        let mut s2 = ReActStep::new("t2", "b", "r");
+        s2.step_duration_ms = 200;
+        let session = make_session(vec![s1, s2], 0);
+        assert_eq!(session.longest_step().map(|s| s.step_duration_ms), Some(200));
+    }
+
+    #[test]
+    fn test_longest_step_returns_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.longest_step().is_none());
+    }
+
+    #[test]
+    fn test_shortest_step_returns_step_with_min_duration() {
+        let mut s1 = ReActStep::new("t1", "a", "r");
+        s1.step_duration_ms = 50;
+        let mut s2 = ReActStep::new("t2", "b", "r");
+        s2.step_duration_ms = 200;
+        let session = make_session(vec![s1, s2], 0);
+        assert_eq!(session.shortest_step().map(|s| s.step_duration_ms), Some(50));
     }
 }

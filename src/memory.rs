@@ -88,6 +88,16 @@ impl MemoryItem {
         let elapsed = now.signed_duration_since(self.timestamp);
         elapsed.num_milliseconds().max(0) as f64 / 3_600_000.0
     }
+
+    /// Return `true` if this memory item has the given tag.
+    pub fn has_tag(&self, tag: &str) -> bool {
+        self.tags.iter().any(|t| t == tag)
+    }
+
+    /// Return the approximate number of whitespace-separated words in the content.
+    pub fn word_count(&self) -> usize {
+        self.content.split_whitespace().count()
+    }
 }
 
 impl std::fmt::Display for MemoryItem {
@@ -730,6 +740,14 @@ impl EpisodicStore {
     pub fn count_for(&self, agent_id: &AgentId) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "EpisodicStore::count_for");
         Ok(inner.items.get(agent_id).map_or(0, |v| v.len()))
+    }
+
+    /// Return `true` if the store contains at least one episode for `agent_id`.
+    ///
+    /// Cheaper than `count_for(agent_id)? > 0` because no heap allocation occurs.
+    pub fn has_agent(&self, agent_id: &AgentId) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::has_agent");
+        Ok(inner.items.get(agent_id).map_or(false, |v| !v.is_empty()))
     }
 
     /// Return all agent IDs that have at least one stored episode, sorted.
