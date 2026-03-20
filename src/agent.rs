@@ -1216,6 +1216,16 @@ impl ToolRegistry {
         self.tools.values().filter(|s| s.has_required_fields()).count()
     }
 
+    /// Return the number of registered tools that have at least one attached validator.
+    ///
+    /// Complements [`tool_count_with_required_fields`]; a tool can have validators
+    /// without any required field declarations (for cross-field or range checks).
+    ///
+    /// [`tool_count_with_required_fields`]: ToolRegistry::tool_count_with_required_fields
+    pub fn tool_count_with_validators(&self) -> usize {
+        self.tools.values().filter(|s| s.has_validators()).count()
+    }
+
     /// Return the names of all registered tools, sorted alphabetically.
     pub fn names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self.tools.keys().map(|k| k.as_str()).collect();
@@ -1340,6 +1350,16 @@ impl ToolRegistry {
     /// contribute to a prompt when all descriptions are serialized together.
     pub fn total_description_bytes(&self) -> usize {
         self.tools.values().map(|s| s.description.len()).sum()
+    }
+
+    /// Return the byte length of the shortest tool description, or `0` if the
+    /// registry is empty.
+    pub fn shortest_description_length(&self) -> usize {
+        self.tools
+            .values()
+            .map(|s| s.description.len())
+            .min()
+            .unwrap_or(0)
     }
 }
 
@@ -4004,5 +4024,63 @@ mod tests {
         let original = AgentConfig::new(5, "claude-3");
         let _cloned = original.clone_with_max_iterations(10);
         assert_eq!(original.max_iterations, 5);
+    }
+
+    // ── Round 41: Message Display and From tuples ─────────────────────────────
+
+    #[test]
+    fn test_message_display_user_role() {
+        let m = Message::user("hello world");
+        assert_eq!(m.to_string(), "user: hello world");
+    }
+
+    #[test]
+    fn test_message_display_assistant_role() {
+        let m = Message::assistant("I can help");
+        assert_eq!(m.to_string(), "assistant: I can help");
+    }
+
+    #[test]
+    fn test_message_display_system_role() {
+        let m = Message::system("Be helpful");
+        assert_eq!(m.to_string(), "system: Be helpful");
+    }
+
+    #[test]
+    fn test_message_from_role_string_tuple() {
+        let m = Message::from((Role::User, "hello".to_owned()));
+        assert_eq!(m.role, Role::User);
+        assert_eq!(m.content, "hello");
+    }
+
+    #[test]
+    fn test_message_from_role_str_ref_tuple() {
+        let m = Message::from((Role::Assistant, "ok"));
+        assert_eq!(m.role, Role::Assistant);
+        assert_eq!(m.content, "ok");
+    }
+
+    #[test]
+    fn test_message_into_from_system_tuple() {
+        let m: Message = (Role::System, "sys prompt").into();
+        assert!(m.is_system());
+        assert_eq!(m.content(), "sys prompt");
+    }
+
+    // ── Round 41 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tool_registry_shortest_description_length_returns_min_bytes() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("a", "hello world", |_| serde_json::json!({}))); // 11
+        reg.register(ToolSpec::new("b", "hi", |_| serde_json::json!({}))); // 2
+        reg.register(ToolSpec::new("c", "greetings!", |_| serde_json::json!({}))); // 10
+        assert_eq!(reg.shortest_description_length(), 2);
+    }
+
+    #[test]
+    fn test_tool_registry_shortest_description_length_empty_returns_zero() {
+        let reg = ToolRegistry::new();
+        assert_eq!(reg.shortest_description_length(), 0);
     }
 }

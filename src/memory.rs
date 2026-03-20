@@ -7381,4 +7381,109 @@ mod tests {
         let keys = store.keys_with_prefix("").unwrap();
         assert_eq!(keys, vec!["a", "b"]);
     }
+
+    // ── Round 41 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_episodic_store_episodes_sorted_by_timestamp_oldest_first() {
+        use std::thread::sleep;
+        use std::time::Duration;
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "first", 0.5).unwrap();
+        sleep(Duration::from_millis(2));
+        store.add_episode(agent.clone(), "second", 0.5).unwrap();
+        let items = store.episodes_sorted_by_timestamp(&agent).unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(items[0].timestamp <= items[1].timestamp);
+    }
+
+    #[test]
+    fn test_episodic_store_episodes_sorted_by_timestamp_unknown_agent_empty() {
+        let store = EpisodicStore::new();
+        assert!(store.episodes_sorted_by_timestamp(&AgentId::new("unknown")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_working_memory_keys_sorted_returns_alphabetical_order() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("banana", "b").unwrap();
+        wm.set("apple", "a").unwrap();
+        wm.set("cherry", "c").unwrap();
+        assert_eq!(wm.keys_sorted().unwrap(), vec!["apple", "banana", "cherry"]);
+    }
+
+    #[test]
+    fn test_working_memory_keys_sorted_empty_returns_empty() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(wm.keys_sorted().unwrap().is_empty());
+    }
+
+    // ── Round 41: MemoryItem tag management + predicates ─────────────────────
+
+    #[test]
+    fn test_memory_item_content_len_returns_byte_length() {
+        let item = MemoryItem::new(AgentId::new("a"), "hello", 0.5, vec![]);
+        assert_eq!(item.content_len(), 5);
+    }
+
+    #[test]
+    fn test_memory_item_tag_count_returns_count() {
+        let item = MemoryItem::new(AgentId::new("a"), "x", 0.5, vec!["t1".into(), "t2".into()]);
+        assert_eq!(item.tag_count(), 2);
+    }
+
+    #[test]
+    fn test_memory_item_tag_count_zero_when_no_tags() {
+        let item = MemoryItem::new(AgentId::new("a"), "x", 0.5, vec![]);
+        assert_eq!(item.tag_count(), 0);
+    }
+
+    #[test]
+    fn test_memory_item_add_tag_adds_new_tag() {
+        let mut item = MemoryItem::new(AgentId::new("a"), "x", 0.5, vec![]);
+        assert!(item.add_tag("rust"));
+        assert!(item.has_tag("rust"));
+        assert_eq!(item.tag_count(), 1);
+    }
+
+    #[test]
+    fn test_memory_item_add_tag_returns_false_for_duplicate() {
+        let mut item = MemoryItem::new(AgentId::new("a"), "x", 0.5, vec!["rust".into()]);
+        assert!(!item.add_tag("rust"));
+        assert_eq!(item.tag_count(), 1);
+    }
+
+    #[test]
+    fn test_memory_item_remove_tag_removes_existing_tag() {
+        let mut item = MemoryItem::new(AgentId::new("a"), "x", 0.5, vec!["rust".into()]);
+        assert!(item.remove_tag("rust"));
+        assert!(!item.has_tag("rust"));
+        assert_eq!(item.tag_count(), 0);
+    }
+
+    #[test]
+    fn test_memory_item_remove_tag_returns_false_when_not_present() {
+        let mut item = MemoryItem::new(AgentId::new("a"), "x", 0.5, vec![]);
+        assert!(!item.remove_tag("missing"));
+    }
+
+    #[test]
+    fn test_memory_item_is_high_importance_true_above_threshold() {
+        let item = MemoryItem::new(AgentId::new("a"), "x", 0.9, vec![]);
+        assert!(item.is_high_importance(0.7));
+    }
+
+    #[test]
+    fn test_memory_item_is_high_importance_false_at_threshold() {
+        // strictly greater than — equal to threshold is NOT high importance
+        let item = MemoryItem::new(AgentId::new("a"), "x", 0.7, vec![]);
+        assert!(!item.is_high_importance(0.7));
+    }
+
+    #[test]
+    fn test_memory_item_is_high_importance_false_below_threshold() {
+        let item = MemoryItem::new(AgentId::new("a"), "x", 0.3, vec![]);
+        assert!(!item.is_high_importance(0.5));
+    }
 }

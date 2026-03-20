@@ -1683,6 +1683,71 @@ impl Pipeline {
         })
     }
 
+    /// Return a human-readable description of this pipeline.
+    ///
+    /// Format: `"Pipeline[{n} stage(s): stage1 → stage2 → ...]"`.
+    /// Returns `"Pipeline[empty]"` when no stages have been added.
+    ///
+    /// Intended for logging and debugging — not a stable serialization format.
+    pub fn description(&self) -> String {
+        if self.stages.is_empty() {
+            return "Pipeline[empty]".to_owned();
+        }
+        let names = self
+            .stages
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" → ");
+        let n = self.stages.len();
+        let plural = if n == 1 { "stage" } else { "stages" };
+        format!("Pipeline[{n} {plural}: {names}]")
+    }
+
+    /// Return `true` if every stage in the pipeline has a unique name.
+    ///
+    /// Duplicate stage names can lead to ambiguous lookups with `stage_index`
+    /// and `has_stage`.  Use this predicate to assert pipeline integrity
+    /// during construction.
+    pub fn has_unique_stage_names(&self) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        self.stages.iter().all(|s| seen.insert(s.name.as_str()))
+    }
+
+    /// Return stage names sorted in ascending lexicographic order.
+    ///
+    /// Unlike [`stage_names`], which returns names in insertion order, this
+    /// always produces a stable sort regardless of the order stages were added.
+    ///
+    /// [`stage_names`]: Pipeline::stage_names
+    pub fn stage_names_sorted(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.stages.iter().map(|s| s.name.as_str()).collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// Return the name of the stage with the most bytes, or `None` for an empty pipeline.
+    ///
+    /// When multiple stages share the maximum byte length, the first one in
+    /// insertion order is returned.
+    pub fn longest_stage_name(&self) -> Option<&str> {
+        self.stages
+            .iter()
+            .max_by_key(|s| s.name.len())
+            .map(|s| s.name.as_str())
+    }
+
+    /// Return the name of the stage with the fewest bytes, or `None` for an empty pipeline.
+    ///
+    /// When multiple stages share the minimum byte length, the first one in
+    /// insertion order is returned.
+    pub fn shortest_stage_name(&self) -> Option<&str> {
+        self.stages
+            .iter()
+            .min_by_key(|s| s.name.len())
+            .map(|s| s.name.as_str())
+    }
+
 }
 
 impl Default for Pipeline {
@@ -3324,5 +3389,52 @@ mod tests {
         let guard = BackpressureGuard::new(10).unwrap();
         guard.try_acquire().unwrap();
         assert!(!guard.over_soft_limit().unwrap());
+    }
+
+    // ── Round 41: Pipeline::description, has_unique_stage_names ──────────────
+
+    #[test]
+    fn test_pipeline_description_empty() {
+        let p = Pipeline::new();
+        assert_eq!(p.description(), "Pipeline[empty]");
+    }
+
+    #[test]
+    fn test_pipeline_description_single_stage() {
+        let p = Pipeline::new().add_stage("trim", |s: String| Ok(s.trim().to_owned()));
+        assert_eq!(p.description(), "Pipeline[1 stage: trim]");
+    }
+
+    #[test]
+    fn test_pipeline_description_multiple_stages() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("b", |s: String| Ok(s))
+            .add_stage("c", |s: String| Ok(s));
+        let desc = p.description();
+        assert!(desc.contains("3 stages"));
+        assert!(desc.contains("a → b → c"));
+    }
+
+    #[test]
+    fn test_pipeline_has_unique_stage_names_true_when_all_unique() {
+        let p = Pipeline::new()
+            .add_stage("x", |s: String| Ok(s))
+            .add_stage("y", |s: String| Ok(s));
+        assert!(p.has_unique_stage_names());
+    }
+
+    #[test]
+    fn test_pipeline_has_unique_stage_names_false_when_duplicate() {
+        let p = Pipeline::new()
+            .add_stage("dup", |s: String| Ok(s))
+            .add_stage("dup", |s: String| Ok(s));
+        assert!(!p.has_unique_stage_names());
+    }
+
+    #[test]
+    fn test_pipeline_has_unique_stage_names_true_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.has_unique_stage_names());
     }
 }
