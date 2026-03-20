@@ -307,6 +307,16 @@ impl ReActStep {
             + self.action.split_whitespace().count()
             + self.observation.split_whitespace().count()
     }
+
+    /// Return `true` if all three fields — `thought`, `action`, and
+    /// `observation` — are non-empty.
+    ///
+    /// A "complete" step is one where the model has produced a thought, taken
+    /// an action, and received an observation.  Incomplete steps (missing any
+    /// field) typically indicate a parsing failure or an in-progress cycle.
+    pub fn is_complete(&self) -> bool {
+        !self.thought.is_empty() && !self.action.is_empty() && !self.observation.is_empty()
+    }
 }
 
 /// Configuration for the ReAct agent loop.
@@ -706,6 +716,14 @@ impl AgentConfig {
     /// cause silent overruns for very long conversations.
     pub fn token_budget_configured(&self) -> bool {
         self.max_tokens.is_some() || self.max_context_chars.is_some()
+    }
+
+    /// Return `max_tokens` if set, or `default` otherwise.
+    ///
+    /// Convenience helper for callers that always need a concrete token limit
+    /// and want to fall back to a safe default when none has been configured.
+    pub fn max_tokens_or_default(&self, default: usize) -> usize {
+        self.max_tokens.unwrap_or(default)
     }
 }
 
@@ -5117,5 +5135,37 @@ mod tests {
     fn test_token_budget_configured_false_when_neither_set() {
         let cfg = AgentConfig::new(3, "m");
         assert!(!cfg.token_budget_configured());
+    }
+
+    // ── Round 58 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_complete_true_when_all_fields_nonempty() {
+        let step = ReActStep::new("thought", "action", "observation");
+        assert!(step.is_complete());
+    }
+
+    #[test]
+    fn test_is_complete_false_when_observation_empty() {
+        let step = ReActStep::new("thought", "action", "");
+        assert!(!step.is_complete());
+    }
+
+    #[test]
+    fn test_is_complete_false_when_action_empty() {
+        let step = ReActStep::new("thought", "", "obs");
+        assert!(!step.is_complete());
+    }
+
+    #[test]
+    fn test_max_tokens_or_default_returns_value_when_set() {
+        let cfg = AgentConfig::new(3, "m").with_max_tokens(512);
+        assert_eq!(cfg.max_tokens_or_default(100), 512);
+    }
+
+    #[test]
+    fn test_max_tokens_or_default_returns_default_when_unset() {
+        let cfg = AgentConfig::new(3, "m");
+        assert_eq!(cfg.max_tokens_or_default(256), 256);
     }
 }
