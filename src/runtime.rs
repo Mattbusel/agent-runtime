@@ -259,6 +259,18 @@ impl AgentSession {
         self.steps.iter().map(|s| s.observation.as_str()).collect()
     }
 
+    /// Return the thought string from the first step, or `None` if the session
+    /// has no steps.
+    pub fn first_thought(&self) -> Option<&str> {
+        self.steps.first().map(|s| s.thought.as_str())
+    }
+
+    /// Return the thought string from the last step, or `None` if the session
+    /// has no steps.
+    pub fn last_thought(&self) -> Option<&str> {
+        self.steps.last().map(|s| s.thought.as_str())
+    }
+
     /// Return all per-step durations in milliseconds, in order.
     ///
     /// Useful for computing custom percentiles or detecting slow outlier steps.
@@ -390,6 +402,11 @@ impl AgentSession {
     /// missing from storage, but the session itself completed successfully.
     pub fn has_checkpoint_errors(&self) -> bool {
         !self.checkpoint_errors.is_empty()
+    }
+
+    /// Return the number of checkpoint errors recorded during this session.
+    pub fn checkpoint_error_count(&self) -> usize {
+        self.checkpoint_errors.len()
     }
 
     /// Return the number of knowledge-graph lookups performed during this session.

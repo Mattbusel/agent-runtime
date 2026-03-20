@@ -758,6 +758,22 @@ impl RuntimeMetrics {
         self.active_sessions.load(Ordering::Relaxed) > 0
     }
 
+    /// Return the 50th-percentile (median) step latency in milliseconds.
+    ///
+    /// Delegates to [`LatencyHistogram::p50`] on the histogram tracked by
+    /// this `RuntimeMetrics` instance.  Returns `0` if no steps have been recorded.
+    pub fn step_latency_p50(&self) -> u64 {
+        self.step_latency.p50()
+    }
+
+    /// Return the 99th-percentile step latency in milliseconds.
+    ///
+    /// Delegates to [`LatencyHistogram::p99`].  Returns `0` if no steps have
+    /// been recorded.
+    pub fn step_latency_p99(&self) -> u64 {
+        self.step_latency.p99()
+    }
+
     /// Return the top `n` tools by total call count, sorted descending.
     ///
     /// Returns fewer than `n` entries if fewer tools have been called.

@@ -426,6 +426,16 @@ impl AgentConfig {
     pub fn is_single_shot(&self) -> bool {
         self.max_iterations == 1
     }
+
+    /// Return `true` if a sampling temperature has been configured.
+    pub fn has_temperature(&self) -> bool {
+        self.temperature.is_some()
+    }
+
+    /// Return `true` if a per-inference request timeout has been configured.
+    pub fn has_request_timeout(&self) -> bool {
+        self.request_timeout.is_some()
+    }
 }
 
 // ── ToolSpec ──────────────────────────────────────────────────────────────────

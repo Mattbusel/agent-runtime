@@ -81,6 +81,18 @@ impl EntityId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Return `true` if the inner ID string is empty.
+    ///
+    /// Note: `EntityId::new` warns (debug: asserts) against empty IDs.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Return `true` if the inner ID string starts with `prefix`.
+    pub fn starts_with(&self, prefix: &str) -> bool {
+        self.0.starts_with(prefix)
+    }
 }
 
 impl AsRef<str> for EntityId {
@@ -142,6 +154,11 @@ impl Entity {
     pub fn with_property(mut self, key: impl Into<String>, value: Value) -> Self {
         self.properties.insert(key.into(), value);
         self
+    }
+
+    /// Return `true` if the entity has a property with the given key.
+    pub fn has_property(&self, key: &str) -> bool {
+        self.properties.contains_key(key)
     }
 }
 
@@ -711,6 +728,44 @@ impl GraphStore {
             .unwrap_or(0))
     }
 
+    /// Return the out-degree (number of outgoing edges) for the given entity.
+    ///
+    /// Returns `0` if the entity does not exist or has no outgoing edges.
+    pub fn out_degree_for(&self, entity_id: &EntityId) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "out_degree_for");
+        Ok(inner
+            .adjacency
+            .get(entity_id)
+            .map(|v| v.len())
+            .unwrap_or(0))
+    }
+
+    /// Return all entities that have a directed edge pointing **to** `entity_id`
+    /// (its predecessors in the directed graph).
+    ///
+    /// Returns an empty `Vec` if the entity has no incoming edges or does not
+    /// exist.
+    pub fn predecessors(&self, entity_id: &EntityId) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "predecessors");
+        let ids = inner
+            .reverse_adjacency
+            .get(entity_id)
+            .cloned()
+            .unwrap_or_default();
+        Ok(ids
+            .iter()
+            .filter_map(|id| inner.entities.get(id).cloned())
+            .collect())
+    }
+
+    /// Return `true` if the entity has no incoming edges (in-degree == 0).
+    ///
+    /// In a DAG, source nodes (roots) have no predecessors.  Returns `false`
+    /// if the entity does not exist.
+    pub fn is_source(&self, entity_id: &EntityId) -> Result<bool, AgentRuntimeError> {
+        Ok(self.in_degree_for(entity_id)? == 0)
+    }
+
     /// Return the number of relationships in the graph.
     ///
     /// Alias for [`relationship_count`] using graph-theory terminology.
@@ -766,6 +821,20 @@ impl GraphStore {
         }
         let e = inner.relationships.len() as f64;
         Ok(e / (v as f64 * (v - 1) as f64))
+    }
+
+    /// Return all distinct entity label strings present in the graph, sorted.
+    pub fn entity_labels(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "entity_labels");
+        let mut labels: Vec<String> = inner
+            .entities
+            .values()
+            .map(|e| e.label.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        labels.sort_unstable();
+        Ok(labels)
     }
 
     /// Return all distinct relationship kind strings present in the graph, sorted.
@@ -3445,5 +3514,56 @@ mod tests {
     fn test_in_degree_for_returns_zero_for_unknown_entity() {
         let g = GraphStore::new();
         assert_eq!(g.in_degree_for(&EntityId::new("ghost")).unwrap(), 0);
+    }
+
+    // ── Round 12: EntityId::is_empty/starts_with, Entity::has_property, entity_labels, step_latency_p50/p99 ──
+
+    #[test]
+    fn test_entity_id_is_empty_false_for_nonempty() {
+        let id = EntityId::new("node-1");
+        assert!(!id.is_empty());
+    }
+
+    #[test]
+    fn test_entity_id_starts_with_matches_prefix() {
+        let id = EntityId::new("concept-42");
+        assert!(id.starts_with("concept-"));
+        assert!(!id.starts_with("entity-"));
+    }
+
+    #[test]
+    fn test_entity_id_starts_with_empty_always_true() {
+        let id = EntityId::new("anything");
+        assert!(id.starts_with(""));
+    }
+
+    #[test]
+    fn test_entity_has_property_returns_true_when_present() {
+        let e = Entity::new("e", "Node")
+            .with_property("color", serde_json::json!("blue"));
+        assert!(e.has_property("color"));
+        assert!(!e.has_property("size"));
+    }
+
+    #[test]
+    fn test_entity_has_property_false_when_no_properties() {
+        let e = Entity::new("e", "Node");
+        assert!(!e.has_property("any"));
+    }
+
+    #[test]
+    fn test_entity_labels_returns_distinct_sorted_labels() {
+        let g = make_graph();
+        g.add_entity(Entity::new("a", "Person")).unwrap();
+        g.add_entity(Entity::new("b", "Concept")).unwrap();
+        g.add_entity(Entity::new("c", "Person")).unwrap();
+        let labels = g.entity_labels().unwrap();
+        assert_eq!(labels, vec!["Concept", "Person"]);
+    }
+
+    #[test]
+    fn test_entity_labels_empty_for_empty_graph() {
+        let g = make_graph();
+        assert!(g.entity_labels().unwrap().is_empty());
     }
 }

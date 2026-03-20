@@ -11,6 +11,36 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.26.0] - 2026-03-20
+
+### Added
+
+- **`EntityId::is_empty`** / **`EntityId::starts_with`** (`graph.rs`) — predicate
+  helpers consistent with `AgentId` and `MemoryId`; `starts_with` is useful for
+  namespace-based entity lookup.
+- **`Entity::has_property`** (`graph.rs`) — `true` when the entity's property map
+  contains the given key; avoids accessing the raw `HashMap` at call sites.
+- **`GraphStore::entity_labels`** (`graph.rs`) — return all distinct entity label
+  strings present in the graph, sorted; complements `relationship_kinds`.
+- **`MemoryItem::has_tag`** (`memory.rs`) — `true` when the memory item's tag
+  list contains the given tag string.
+- **`MemoryItem::word_count`** (`memory.rs`) — approximate whitespace-separated
+  word count of the memory content.
+- **`EpisodicStore::has_agent`** (`memory.rs`) — `true` when the store contains
+  at least one episode for the given agent; cheaper than `count_for(id)? > 0`.
+- **`AgentConfig::has_temperature`** (`agent.rs`) — `true` when a sampling
+  temperature has been configured.
+- **`AgentConfig::has_request_timeout`** (`agent.rs`) — `true` when a
+  per-inference timeout has been configured.
+- **`RuntimeMetrics::step_latency_p50`** / **`step_latency_p99`** (`metrics.rs`) —
+  expose median and 99th-percentile step latency directly without accessing the
+  histogram field.
+- **`AgentSession::checkpoint_error_count`** (`runtime.rs`) — count of
+  checkpoint errors recorded during the session; companion to
+  `has_checkpoint_errors`.
+
+---
+
 ## [1.25.0] - 2026-03-20
 
 ### Added
