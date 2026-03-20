@@ -325,6 +325,16 @@ impl AgentConfig {
         self
     }
 
+    /// Clone this config with only the `model` field changed.
+    ///
+    /// Useful when the same configuration is shared across multiple agents that
+    /// differ only in the model used for inference.
+    pub fn clone_with_model(&self, model: impl Into<String>) -> Self {
+        let mut copy = self.clone();
+        copy.model = model.into();
+        copy
+    }
+
     /// Set stop sequences for inference requests.
     ///
     /// The model will stop generating when it produces any of these strings.
@@ -2460,6 +2470,14 @@ mod tests {
         loop_.register_tool(ToolSpec::new("t1", "desc", |_| serde_json::json!("ok")));
         loop_.register_tool(ToolSpec::new("t2", "desc", |_| serde_json::json!("ok")));
         assert_eq!(loop_.tool_count(), 2);
+    }
+
+    #[test]
+    fn test_tool_registry_has_tool_returns_true_when_registered() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("my-tool", "desc", |_| serde_json::json!("ok")));
+        assert!(reg.has_tool("my-tool"));
+        assert!(!reg.has_tool("other-tool"));
     }
 
     // ── Round 3: AgentConfig::validate ───────────────────────────────────────

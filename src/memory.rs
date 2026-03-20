@@ -637,6 +637,92 @@ impl EpisodicStore {
         Ok(id)
     }
 
+    /// Add an episode with associated tags.
+    ///
+    /// Convenience wrapper around [`add_episode`] that accepts a tag list in the
+    /// same call.  Episode capacity eviction follows the same rules as `add_episode`.
+    ///
+    /// [`add_episode`]: EpisodicStore::add_episode
+    #[tracing::instrument(skip(self))]
+    pub fn add_episode_with_tags(
+        &self,
+        agent_id: AgentId,
+        content: impl Into<String> + std::fmt::Debug,
+        importance: f32,
+        tags: Vec<String>,
+    ) -> Result<MemoryId, AgentRuntimeError> {
+        let item = MemoryItem::new(agent_id.clone(), content, importance, tags);
+        let id = item.id.clone();
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::add_episode_with_tags");
+        inner.purge_stale(&agent_id);
+        let cap = inner.per_agent_capacity;
+        let eviction_policy = inner.eviction_policy.clone();
+        let agent_items = inner.items.entry(agent_id).or_default();
+        agent_items.push(item);
+        if let Some(cap) = cap {
+            evict_if_over_capacity(agent_items, cap, &eviction_policy);
+        }
+        Ok(id)
+    }
+
+    /// Remove a specific episode by its `MemoryId`.
+    ///
+    /// Returns `Ok(true)` if the episode was found and removed, `Ok(false)` if
+    /// no episode with that `id` exists for `agent_id`.
+    pub fn remove_by_id(
+        &self,
+        agent_id: &AgentId,
+        id: &MemoryId,
+    ) -> Result<bool, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::remove_by_id");
+        if let Some(items) = inner.items.get_mut(agent_id) {
+            if let Some(pos) = items.iter().position(|i| &i.id == id) {
+                items.remove(pos);
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Update the `tags` of an episode identified by its `MemoryId`.
+    ///
+    /// Returns `Ok(true)` if found and updated, `Ok(false)` otherwise.
+    pub fn update_tags_by_id(
+        &self,
+        agent_id: &AgentId,
+        id: &MemoryId,
+        new_tags: Vec<String>,
+    ) -> Result<bool, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::update_tags_by_id");
+        if let Some(items) = inner.items.get_mut(agent_id) {
+            if let Some(item) = items.iter_mut().find(|i| &i.id == id) {
+                item.tags = new_tags;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Return the highest importance score across all episodes for `agent_id`.
+    ///
+    /// Returns `None` if the agent has no stored episodes.
+    pub fn max_importance_for(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<f32>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::max_importance_for");
+        let max = inner
+            .items
+            .get(agent_id)
+            .and_then(|items| {
+                items
+                    .iter()
+                    .map(|i| i.importance)
+                    .reduce(f32::max)
+            });
+        Ok(max)
+    }
+
     /// Add an episode with an explicit timestamp.
     #[tracing::instrument(skip(self))]
     pub fn add_episode_at(
@@ -1451,6 +1537,17 @@ impl SemanticStore {
         Ok(distinct.len())
     }
 
+    /// Return all entry keys that contain `tag` (case-sensitive).
+    pub fn keys_with_tag(&self, tag: &str) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::keys_with_tag");
+        Ok(inner
+            .entries
+            .iter()
+            .filter(|e| e.tags.iter().any(|t| t.as_str() == tag))
+            .map(|e| e.key.clone())
+            .collect())
+    }
+
     /// Return all stored entry keys in insertion order.
     ///
     /// Duplicate keys (if any) will appear multiple times.
@@ -1770,6 +1867,19 @@ impl WorkingMemory {
             .filter_map(|k| inner.map.get(k).map(|v| (k.clone(), v.clone())))
             .collect();
         Ok(entries)
+    }
+
+    /// Remove and return the oldest entry (first inserted that is still present).
+    ///
+    /// Returns `None` if the memory is empty.
+    pub fn pop_oldest(&self) -> Result<Option<(String, String)>, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "WorkingMemory::pop_oldest");
+        if let Some(key) = inner.order.pop_front() {
+            let value = inner.map.remove(&key).unwrap_or_default();
+            Ok(Some((key, value)))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Return the maximum number of entries this store can hold.

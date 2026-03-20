@@ -538,6 +538,21 @@ impl CircuitBreaker {
         matches!(self.state(), Ok(CircuitState::HalfOpen))
     }
 
+    /// Return the configured consecutive-failure threshold.
+    ///
+    /// The circuit opens when `failure_count()` reaches this value.
+    pub fn threshold(&self) -> u32 {
+        self.threshold
+    }
+
+    /// Return the configured recovery window duration.
+    ///
+    /// After the circuit has been `Open` for this long, it transitions to
+    /// `HalfOpen` and allows the next call through as a recovery probe.
+    pub fn recovery_window(&self) -> std::time::Duration {
+        self.recovery_window
+    }
+
     /// Force the circuit back to `Closed` state, resetting all failure counters.
     ///
     /// Useful for tests and manual operator recovery.  Under normal operation
@@ -1214,6 +1229,11 @@ impl Pipeline {
     /// Return the names of all stages in execution order.
     pub fn stage_names(&self) -> Vec<&str> {
         self.stages.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    /// Return the name of the stage at zero-based `index`, or `None` if out of bounds.
+    pub fn get_stage_name_at(&self, index: usize) -> Option<&str> {
+        self.stages.get(index).map(|s| s.name.as_str())
     }
 
     /// Remove the first stage whose name equals `name`.
@@ -1935,6 +1955,26 @@ mod tests {
         let p = Pipeline::new()
             .with_error_handler(|_stage, _err| "recovered".to_string());
         assert!(p.has_error_handler());
+    }
+
+    #[test]
+    fn test_backpressure_reset_clears_depth() {
+        let g = BackpressureGuard::new(5).unwrap();
+        g.try_acquire().unwrap();
+        g.try_acquire().unwrap();
+        assert_eq!(g.depth().unwrap(), 2);
+        g.reset();
+        assert_eq!(g.depth().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_deduplicator_in_flight_keys_returns_started_keys() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check("key-a", Duration::from_secs(60)).unwrap();
+        d.check("key-b", Duration::from_secs(60)).unwrap();
+        let mut keys = d.in_flight_keys().unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["key-a", "key-b"]);
     }
 
     // ── Round 3: new methods ──────────────────────────────────────────────────

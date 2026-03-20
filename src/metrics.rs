@@ -184,6 +184,22 @@ impl LatencyHistogram {
             bucket.store(0, Ordering::Relaxed);
         }
     }
+
+    /// Return the total sum of all recorded latency samples in milliseconds.
+    ///
+    /// Equivalent to `mean_ms() * count()` but avoids floating-point arithmetic.
+    pub fn sum_ms(&self) -> u64 {
+        self.total_sum_ms.load(Ordering::Relaxed)
+    }
+
+    /// Reset all histogram counters to zero.
+    ///
+    /// Alias for [`reset`] using more conventional naming.
+    ///
+    /// [`reset`]: LatencyHistogram::reset
+    pub fn clear(&self) {
+        self.reset();
+    }
 }
 
 impl MetricsSnapshot {
@@ -272,6 +288,13 @@ impl MetricsSnapshot {
     /// Returns `0` if no failures have been recorded for that tool name.
     pub fn tool_failure_count(&self, name: &str) -> u64 {
         self.per_tool_failures.get(name).copied().unwrap_or(0)
+    }
+
+    /// Return a sorted list of tool names that have at least one recorded call.
+    pub fn tool_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.per_tool_calls.keys().map(|s| s.as_str()).collect();
+        names.sort_unstable();
+        names
     }
 
     /// Return `true` if all counters are zero (no activity has been recorded).
@@ -621,6 +644,20 @@ impl RuntimeMetrics {
     /// Returns fewer than `n` entries if fewer tools have been called.
     pub fn top_tools_by_calls(&self, n: usize) -> Vec<(String, u64)> {
         let snap = self.per_tool_calls_snapshot();
+        let mut pairs: Vec<(String, u64)> = snap.into_iter().collect();
+        pairs.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        pairs.truncate(n);
+        pairs
+    }
+
+    /// Return the top `n` tools by total failure count, sorted descending.
+    ///
+    /// Analogous to [`top_tools_by_calls`]; returns fewer than `n` entries if
+    /// fewer tools have recorded failures.
+    ///
+    /// [`top_tools_by_calls`]: RuntimeMetrics::top_tools_by_calls
+    pub fn top_tools_by_failures(&self, n: usize) -> Vec<(String, u64)> {
+        let snap = self.per_tool_failures_snapshot();
         let mut pairs: Vec<(String, u64)> = snap.into_iter().collect();
         pairs.sort_unstable_by(|a, b| b.1.cmp(&a.1));
         pairs.truncate(n);
@@ -1077,5 +1114,25 @@ mod tests {
         let snap = m.snapshot();
         assert_eq!(snap.tool_failure_count("t"), 1);
         assert_eq!(snap.tool_failure_count("other"), 0);
+    }
+
+    #[test]
+    fn test_latency_histogram_clear_resets_counts() {
+        let h = LatencyHistogram::default();
+        h.record(10);
+        h.record(20);
+        assert_eq!(h.count(), 2);
+        h.clear();
+        assert_eq!(h.count(), 0);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_tool_names_sorted() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("zebra");
+        m.record_tool_call("alpha");
+        m.record_tool_call("mango");
+        let snap = m.snapshot();
+        assert_eq!(snap.tool_names(), vec!["alpha", "mango", "zebra"]);
     }
 }
