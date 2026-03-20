@@ -1186,6 +1186,71 @@ impl GraphStore {
             .unwrap_or(0))
     }
 
+    /// Return the minimum out-degree across all entities, or `0` for empty graphs.
+    ///
+    /// This counts only entities that are registered in the graph.  An entity
+    /// with no outgoing edges has out-degree 0 and contributes to the minimum.
+    pub fn min_out_degree(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "min_out_degree");
+        Ok(inner
+            .adjacency
+            .values()
+            .map(|v| v.len())
+            .min()
+            .unwrap_or(0))
+    }
+
+    /// Return the minimum in-degree across all entities, or `0` for empty graphs.
+    ///
+    /// An entity with no incoming edges has in-degree 0 and contributes to the
+    /// minimum.  Source nodes (those with no predecessors) always have in-degree 0.
+    pub fn min_in_degree(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "min_in_degree");
+        // Count in-degree from the reverse adjacency index, but also include
+        // entities whose in-degree is 0 (they may be absent from reverse_adjacency).
+        let min_from_reverse = inner
+            .reverse_adjacency
+            .values()
+            .map(|v| v.len())
+            .min()
+            .unwrap_or(0);
+        // If any entity has no entry in reverse_adjacency its in-degree is 0.
+        let has_zero_in_degree = inner
+            .entities
+            .keys()
+            .any(|id| !inner.reverse_adjacency.contains_key(id));
+        if has_zero_in_degree {
+            Ok(0)
+        } else {
+            Ok(min_from_reverse)
+        }
+    }
+
+    /// Return the distinct relationship kinds that originate **from** `id`,
+    /// sorted lexicographically.
+    ///
+    /// Returns an empty `Vec` if the entity has no outgoing edges or does not
+    /// exist.
+    pub fn relationship_kinds_from(
+        &self,
+        id: &EntityId,
+    ) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "relationship_kinds_from");
+        let mut kinds: Vec<String> = inner
+            .adjacency
+            .get(id)
+            .map(|rels| {
+                rels.iter()
+                    .map(|r| r.kind.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default();
+        kinds.sort_unstable();
+        Ok(kinds)
+    }
+
     /// Return `(min_weight, max_weight, mean_weight)` across all relationships.
     ///
     /// Returns `None` if the graph has no relationships.

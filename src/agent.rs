@@ -203,6 +203,13 @@ impl ReActStep {
         self.observation.is_empty()
     }
 
+    /// Return the approximate number of whitespace-separated words in the thought string.
+    ///
+    /// Returns `0` for steps with an empty thought.
+    pub fn thought_word_count(&self) -> usize {
+        self.thought.split_whitespace().count()
+    }
+
     /// Return a concise single-line summary of this step.
     ///
     /// Format: `"[{kind}] thought={thought_preview} action={action_preview} obs={obs_preview}"`
@@ -3913,5 +3920,21 @@ mod tests {
         let step = ReActStep::new("", "", "");
         let s = step.summary();
         assert!(s.contains("[TOOL]"));
+    }
+
+    // ── Round 40 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tool_registry_total_description_bytes_sums_correctly() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("a", "hello", |_| serde_json::json!({}))); // 5 bytes
+        reg.register(ToolSpec::new("b", "world!", |_| serde_json::json!({}))); // 6 bytes
+        assert_eq!(reg.total_description_bytes(), 11);
+    }
+
+    #[test]
+    fn test_tool_registry_total_description_bytes_empty_returns_zero() {
+        let reg = ToolRegistry::new();
+        assert_eq!(reg.total_description_bytes(), 0);
     }
 }

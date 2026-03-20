@@ -2605,6 +2605,22 @@ impl SemanticStore {
         Ok(keys)
     }
 
+    /// Return all stored keys whose string representation starts with `prefix`,
+    /// in ascending sorted order.
+    ///
+    /// Returns an empty `Vec` if no keys share the prefix.
+    pub fn keys_with_prefix(&self, prefix: &str) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::keys_with_prefix");
+        let mut keys: Vec<String> = inner
+            .entries
+            .iter()
+            .filter(|e| e.key.starts_with(prefix))
+            .map(|e| e.key.clone())
+            .collect();
+        keys.sort_unstable();
+        Ok(keys)
+    }
+
     /// Return the total number of stored entries.
     pub fn len(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::len");
