@@ -129,7 +129,7 @@ compile-time typestate builder that prevents misconfiguration at zero runtime co
 
 ```toml
 [dependencies]
-llm-agent-runtime = "1.58"
+llm-agent-runtime = "1.74"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -396,6 +396,53 @@ introspection methods:
 | `observation_contains_count(s)` | `usize` | Steps whose observation contains `s` |
 | `count_nonempty_thoughts()` | `usize` | Steps with a non-empty thought string |
 | `steps_above_thought_length(n)` | `usize` | Steps whose thought exceeds `n` bytes |
+| `unique_action_count()` | `usize` | Number of distinct action strings used |
+| `thought_char_counts()` | `Vec<usize>` | Unicode char count for each thought |
+| `observation_char_counts()` | `Vec<usize>` | Unicode char count for each observation |
+| `steps_with_observation_containing(s)` | `Vec<usize>` | Indices of steps whose observation contains `s` |
+| `is_empty()` | `bool` | `true` when the session has no steps |
+| `all_unique_thoughts()` | `Vec<&str>` | Deduplicated thought strings (insertion order) |
+| `step_at_index(i)` | `Option<&ReActStep>` | The step at the given zero-based index |
+| `thought_contains_all(terms)` | `usize` | Steps whose thought contains every term in the slice |
+| `action_contains_any(terms)` | `usize` | Steps whose action contains at least one term |
+| `max_thought_chars()` | `usize` | Largest Unicode char count across all thoughts |
+| `min_thought_chars()` | `usize` | Smallest Unicode char count across all thoughts |
+| `avg_action_chars()` | `f64` | Mean Unicode char count across all actions |
+| `avg_observation_chars()` | `f64` | Mean Unicode char count across all observations |
+| `step_with_longest_action()` | `Option<usize>` | Index of the step with the longest action |
+| `action_ends_with(suffix)` | `usize` | Steps whose action ends with the given suffix |
+| `thought_ends_with(suffix)` | `usize` | Steps whose thought ends with the given suffix |
+| `has_step_with_both(t, a)` | `bool` | Whether any step contains both thought `t` and action `a` |
+| `thought_word_counts()` | `Vec<usize>` | Whitespace-delimited word count for each thought |
+| `steps_sorted_by_thought_len()` | `Vec<usize>` | Step indices sorted by ascending thought length |
+| `steps_with_thought_longer_than(n)` | `Vec<usize>` | Indices of steps with thought longer than `n` chars |
+| `steps_with_action_containing(s)` | `Vec<usize>` | Indices of steps whose action contains `s` |
+| `observation_max_chars()` | `usize` | Largest Unicode char count across all observations |
+| `observation_min_chars()` | `usize` | Smallest non-zero Unicode char count across observations |
+| `action_word_counts()` | `Vec<usize>` | Whitespace-delimited word count for each action |
+| `thought_avg_chars()` | `f64` | Mean Unicode char count across all thoughts |
+| `thought_byte_range()` | `(usize, usize)` | `(min, max)` byte lengths across all thoughts |
+
+### `RuntimeMetrics` live methods
+
+Called directly on `Arc<RuntimeMetrics>` for real-time access without snapshotting:
+
+| Method | Return | Description |
+|---|---|---|
+| `total_steps()` | `u64` | Total ReAct steps recorded |
+| `total_sessions()` | `u64` | Total completed sessions |
+| `top_called_tool()` | `Option<String>` | Tool with the highest total call count |
+| `avg_step_latency_ms()` | `f64` | Mean step latency across all recorded latencies |
+| `distinct_tools_called()` | `usize` | Number of distinct tools with ≥1 call |
+| `agent_tool_call_count(agent)` | `u64` | Total tool calls attributed to `agent` |
+| `failure_rate_for(tool)` | `f64` | Per-tool failure rate (0.0–1.0) |
+| `tool_calls_per_session()` | `f64` | Mean tool calls per completed session |
+| `failure_free_tools()` | `Vec<String>` | Sorted names of tools with zero failures |
+| `checkpoint_errors_count()` | `u64` | Total checkpoint save errors |
+| `agents_with_failures()` | `Vec<String>` | Agent IDs with ≥1 recorded tool failure |
+| `total_agent_failures()` | `u64` | Sum of all per-agent tool failures |
+| `per_step_tool_call_rate()` | `f64` | Total tool calls divided by total steps |
+| `agents_with_no_failures()` | `Vec<String>` | Sorted agent IDs with calls but zero failures |
 
 ### `MetricsSnapshot`
 
@@ -438,6 +485,28 @@ Beyond the core `add_episode` / `recall` / `clear` API:
 | `high_importance_count(agent, t)` | Episodes with importance > `t` |
 | `episodes_by_importance(agent)` | Content strings sorted by descending importance |
 | `content_contains_count(agent, s)` | Episodes whose content contains substring `s` |
+| `episodes_with_importance_above(agent, t)` | Episodes whose importance exceeds `t` |
+| `agent_episode_importance_sum(agent)` | Sum of importance scores for an agent |
+| `episodes_min_importance(agent)` | Minimum importance across an agent's episodes |
+| `episode_min_content_words(agent)` | Lowest word count across an agent's episodes |
+| `episode_max_content_words(agent)` | Highest word count across an agent's episodes |
+| `total_items()` | Total episode count across all agents |
+| `all_episodes(agent)` | All `MemoryItem`s for an agent in insertion order |
+| `min_episode_count()` | Lowest per-agent episode count (excluding empty agents) |
+| `episodes_in_range(agent, min, max)` | Episodes with importance between `min` and `max` inclusive |
+| `agent_importance_range(agent)` | `Some((min, max))` importance values, or `None` if no episodes |
+| `max_episode_importance(agent)` | Maximum importance across an agent's episodes |
+
+### `WorkingMemory` helpers
+
+| Method | Description |
+|---|---|
+| `value_char_count(key)` | Unicode char count of the value stored under `key` |
+| `keys_longer_than(n)` | Keys whose string length exceeds `n` bytes |
+| `keys_shorter_than(n)` | Keys whose string length is less than `n` bytes |
+| `count_keys_below_bytes(n)` | Number of keys shorter than `n` bytes |
+| `values_with_prefix(prefix)` | Values whose string representation starts with `prefix` |
+| `values_with_suffix(suffix)` | Values whose string representation ends with `suffix` |
 
 ### `SemanticStore` helpers
 
@@ -464,6 +533,7 @@ Beyond graph construction and traversal:
 | `relationship_kind_count()` | Number of distinct relationship kinds |
 | `relationship_count_between(a, b)` | Directed relationships from `a` to `b` |
 | `edges_from(id)` | All `Relationship` objects originating from an entity |
+| `edges_to(id)` | All `Relationship` objects pointing to an entity |
 | `neighbors_of(id)` | Sorted `EntityId`s reachable in one hop |
 | `entities_with_self_loops()` | Entities where `from == to` |
 | `bidirectional_count()` | Pairs with edges in both directions |
@@ -472,6 +542,16 @@ Beyond graph construction and traversal:
 | `avg_relationship_weight()` | Mean weight of all relationships |
 | `avg_out_degree()` | Mean number of outgoing relationships per entity |
 | `avg_in_degree()` | Mean number of incoming relationships per entity |
+| `in_degree_of(id)` | In-degree of a specific entity |
+| `total_weight_for_kind(kind)` | Sum of weights across all edges with a given kind |
+| `entity_ids_with_label(label)` | Entity IDs whose label equals `label` |
+| `labels_unique_count()` | Number of distinct entity labels |
+| `relationships_from(id)` | All outgoing `Relationship`s for an entity |
+| `cycle_count()` | Number of distinct cycles in the graph |
+| `entities_with_property_key(key)` | Entities that have a property named `key` |
+| `entity_properties_count(key)` | Count of entities that have property `key` |
+| `entity_has_property_value(id, key, val)` | Whether an entity's property `key` equals `val` |
+| `all_entities_have_properties()` | `true` when every entity has at least one property |
 
 ### `ToolRegistry`
 
@@ -567,7 +647,7 @@ cargo build --release --all-features
 
 1. Fork the repository and create a descriptive feature branch.
 2. Add tests for every new public function, struct, and trait. The project maintains over
-   1,460 tests across all modules and targets a minimum 1:1 test-to-production line ratio.
+   2,600 tests across all modules and targets a minimum 1:1 test-to-production line ratio.
 3. All production paths must be panic-free. Use `Result` for every fallible operation.
    Clippy denies `unwrap_used`, `expect_used`, `panic`, and `todo` in `src/`.
 4. Run `cargo test --all-features` and `cargo clippy --all-features -- -D warnings` with
