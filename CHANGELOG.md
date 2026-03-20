@@ -11,6 +11,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.45.0] - 2026-03-20
+
+### Tests
+
+- **`Entity::with_property`** — stores value and supports chaining.
+- **`GraphStore::remove_relationship`** — removes edge successfully; errors
+  when edge not found.
+- **`GraphStore::update_entity_property`** — returns `true` and updates for
+  existing entity; returns `false` for unknown entity.
+
+6 new tests in `graph.rs`.
+
+---
+
 ## [1.44.0] - 2026-03-20
 
 ### Added
