@@ -581,6 +581,32 @@ impl AgentConfig {
     pub fn model(&self) -> &str {
         &self.model
     }
+
+    /// Return the loop-level timeout in milliseconds, or `0` if no timeout is
+    /// configured.
+    ///
+    /// This is the `loop_timeout` field expressed as milliseconds.  Useful for
+    /// budget-calculation code that needs a uniform numeric representation of
+    /// the timeout budget.
+    pub fn loop_timeout_ms(&self) -> u64 {
+        self.loop_timeout
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Return the total wall-clock budget for all iterations in milliseconds.
+    ///
+    /// Computed as `loop_timeout_ms + max_iterations * request_timeout_ms`,
+    /// where a missing timeout contributes `0`.  This is a *rough upper bound*
+    /// — actual latency depends on model response times and tool execution.
+    pub fn total_timeout_ms(&self) -> u64 {
+        let loop_ms = self.loop_timeout_ms();
+        let req_ms = self
+            .request_timeout
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        loop_ms.saturating_add(self.max_iterations as u64 * req_ms)
+    }
 }
 
 // ── ToolSpec ──────────────────────────────────────────────────────────────────
@@ -1419,6 +1445,17 @@ impl ToolRegistry {
             .values()
             .filter(|s| s.required_fields.is_empty())
             .collect()
+    }
+
+    /// Return the average number of required fields per registered tool.
+    ///
+    /// Returns `0.0` for an empty registry.
+    pub fn avg_required_fields_count(&self) -> f64 {
+        if self.tools.is_empty() {
+            return 0.0;
+        }
+        let total: usize = self.tools.values().map(|s| s.required_fields.len()).sum();
+        total as f64 / self.tools.len() as f64
     }
 
     /// Return a reference to the `ToolSpec` with the most required fields.
@@ -4376,5 +4413,25 @@ mod tests {
     fn test_tools_without_required_fields_empty_for_empty_registry() {
         let reg = ToolRegistry::new();
         assert!(reg.tools_without_required_fields().is_empty());
+    }
+
+    // ── Round 47: avg_required_fields_count ───────────────────────────────────
+
+    #[test]
+    fn test_avg_required_fields_count_computes_mean() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "d", |_| serde_json::json!({})));
+        reg.register(
+            ToolSpec::new("t2", "d", |_| serde_json::json!({}))
+                .with_required_fields(vec!["a".to_string(), "b".to_string()]),
+        );
+        // 0 + 2 = 2 total, 2 tools → avg = 1.0
+        assert!((reg.avg_required_fields_count() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_required_fields_count_zero_for_empty_registry() {
+        let reg = ToolRegistry::new();
+        assert_eq!(reg.avg_required_fields_count(), 0.0);
     }
 }

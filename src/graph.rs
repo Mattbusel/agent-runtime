@@ -3086,6 +3086,31 @@ impl GraphStore {
         );
         Ok(inner.entities.values().filter(|e| e.label.starts_with(prefix)).count())
     }
+
+    /// Return the sum of all relationship weights in the graph.
+    ///
+    /// Returns `0.0` for an empty graph or when there are no relationships.
+    pub fn relationship_weight_sum(&self) -> Result<f32, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::relationship_weight_sum");
+        Ok(inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter())
+            .map(|r| r.weight)
+            .sum())
+    }
+
+    /// Return a frequency map of entity label → count.
+    ///
+    /// Returns an empty map for an empty graph.
+    pub fn label_frequency(&self) -> Result<std::collections::HashMap<String, usize>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::label_frequency");
+        let mut freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for entity in inner.entities.values() {
+            *freq.entry(entity.label.clone()).or_insert(0) += 1;
+        }
+        Ok(freq)
+    }
 }
 
 impl Default for GraphStore {
@@ -6301,5 +6326,39 @@ mod tests {
         let g = GraphStore::new();
         add(&g, "x");
         assert_eq!(g.entity_count_by_label_prefix("Alien").unwrap(), 0);
+    }
+
+    // ── Round 47: relationship_weight_sum, label_frequency ────────────────────
+
+    #[test]
+    fn test_relationship_weight_sum_sums_all_weights() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        g.add_relationship(Relationship::new("a", "b", "E", 2.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "E", 3.0)).unwrap();
+        assert!((g.relationship_weight_sum().unwrap() - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_relationship_weight_sum_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.relationship_weight_sum().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_label_frequency_counts_labels() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Person")).unwrap();
+        g.add_entity(Entity::new("b", "Person")).unwrap();
+        g.add_entity(Entity::new("c", "Node")).unwrap();
+        let freq = g.label_frequency().unwrap();
+        assert_eq!(*freq.get("Person").unwrap(), 2);
+        assert_eq!(*freq.get("Node").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_label_frequency_empty_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(g.label_frequency().unwrap().is_empty());
     }
 }

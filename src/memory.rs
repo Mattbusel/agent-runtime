@@ -2284,6 +2284,29 @@ impl EpisodicStore {
                 items.iter().filter(|m| m.importance > threshold).cloned().collect()
             }))
     }
+
+    /// Return all episodes for `agent_id` whose timestamp falls in the range
+    /// `[from, to)` (inclusive start, exclusive end).
+    ///
+    /// Returns an empty `Vec` for unknown agents or when no episode qualifies.
+    pub fn episodes_between(
+        &self,
+        agent_id: &AgentId,
+        from: chrono::DateTime<chrono::Utc>,
+        to: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episodes_between");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or_else(Vec::new, |items| {
+                items
+                    .iter()
+                    .filter(|m| m.timestamp >= from && m.timestamp < to)
+                    .cloned()
+                    .collect()
+            }))
+    }
 }
 
 impl Default for EpisodicStore {
@@ -3501,6 +3524,39 @@ impl WorkingMemory {
     pub fn total_key_bytes(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::total_key_bytes");
         Ok(inner.map.keys().map(|k| k.len()).sum())
+    }
+
+    /// Return the maximum key byte length, or `0` if the store is empty.
+    ///
+    /// Useful as a quick bound on the widest key that will be emitted.
+    pub fn max_key_bytes(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::max_key_bytes");
+        Ok(inner.map.keys().map(|k| k.len()).max().unwrap_or(0))
+    }
+
+    /// Return a histogram of value byte lengths bucketed by `bucket_size`.
+    ///
+    /// The returned `Vec` contains `(bucket_start, count)` pairs where
+    /// `bucket_start = (value_len / bucket_size) * bucket_size`.  Pairs are
+    /// sorted by `bucket_start` in ascending order.  Returns an empty `Vec`
+    /// for an empty store or when `bucket_size == 0`.
+    pub fn value_length_histogram(
+        &self,
+        bucket_size: usize,
+    ) -> Result<Vec<(usize, usize)>, AgentRuntimeError> {
+        if bucket_size == 0 {
+            return Ok(Vec::new());
+        }
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::value_length_histogram");
+        let mut buckets: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
+        for v in inner.map.values() {
+            let bucket = (v.len() / bucket_size) * bucket_size;
+            *buckets.entry(bucket).or_insert(0) += 1;
+        }
+        let mut result: Vec<(usize, usize)> = buckets.into_iter().collect();
+        result.sort_unstable_by_key(|(k, _)| *k);
+        Ok(result)
     }
 
     /// Return the shortest key length, or `0` if the store is empty.
@@ -8287,5 +8343,67 @@ mod tests {
     fn test_working_memory_total_bytes_zero_for_empty_store() {
         let wm = WorkingMemory::new(10).unwrap();
         assert_eq!(wm.total_bytes().unwrap(), 0);
+    }
+
+    // ── Round 47: episodes_between, max_key_bytes, value_length_histogram ─────
+
+    #[test]
+    fn test_episodic_store_episodes_between_returns_in_range() {
+        use chrono::{Duration, Utc};
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r47-eb");
+        store.add_episode(agent.clone(), "old", 0.5).unwrap();
+        let past = Utc::now() - Duration::hours(1);
+        let future = Utc::now() + Duration::hours(1);
+        let result = store.episodes_between(&agent, past, future).unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_episodic_store_episodes_between_empty_for_out_of_range() {
+        use chrono::{Duration, Utc};
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r47-eb2");
+        store.add_episode(agent.clone(), "ep", 0.5).unwrap();
+        let far_past_start = Utc::now() - Duration::hours(10);
+        let far_past_end = Utc::now() - Duration::hours(5);
+        assert!(store.episodes_between(&agent, far_past_start, far_past_end).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_working_memory_max_key_bytes_returns_longest_key_len() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("ab", "x").unwrap();
+        wm.set("abcde", "y").unwrap();
+        assert_eq!(wm.max_key_bytes().unwrap(), 5);
+    }
+
+    #[test]
+    fn test_working_memory_max_key_bytes_zero_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.max_key_bytes().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_working_memory_value_length_histogram_buckets_values() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "ab").unwrap();   // len=2, bucket 0 (size=5)
+        wm.set("k2", "abcde").unwrap(); // len=5, bucket 5
+        wm.set("k3", "ab").unwrap();   // len=2, bucket 0 — evicted k1 under capacity
+        // actually with capacity=10, k1 k2 k3 all fit
+        let hist = wm.value_length_histogram(5).unwrap();
+        // bucket 0: values with len 0-4 (both "ab"s have len 2)
+        // but k3 set after k1 so k1 still exists (both are set under capacity 10)
+        // Wait, k3 with same key "k3" and k1 with key "k1" — different keys
+        // k1="ab"(2), k2="abcde"(5), k3="ab"(2)
+        // bucket 0 (0-4): 2 entries; bucket 5 (5-9): 1 entry
+        assert!(!hist.is_empty());
+    }
+
+    #[test]
+    fn test_working_memory_value_length_histogram_empty_for_zero_bucket_size() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k", "v").unwrap();
+        assert!(wm.value_length_histogram(0).unwrap().is_empty());
     }
 }

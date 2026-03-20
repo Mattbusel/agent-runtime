@@ -1411,6 +1411,20 @@ impl RuntimeMetrics {
             + self.checkpoint_errors.load(Ordering::Relaxed)
     }
 
+    /// Return all tool names recorded in the call counter that contain
+    /// `substr` as a substring (case-sensitive).
+    ///
+    /// Returns an empty `Vec` when no matching tool names are found.
+    pub fn tool_names_containing(&self, substr: &str) -> Vec<String> {
+        let snap = self.per_tool_calls_snapshot();
+        let mut names: Vec<String> = snap
+            .into_keys()
+            .filter(|name| name.contains(substr))
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
     /// Return the top `n` tools by total call count, sorted descending.
     ///
     /// Returns fewer than `n` entries if fewer tools have been called.
@@ -3499,5 +3513,25 @@ mod tests {
     fn test_total_errors_zero_when_no_errors() {
         let m = RuntimeMetrics::default();
         assert_eq!(m.total_errors(), 0);
+    }
+
+    // ── Round 47: tool_names_containing ───────────────────────────────────────
+
+    #[test]
+    fn test_tool_names_containing_returns_matching_names() {
+        let m = RuntimeMetrics::default();
+        m.record_tool_call("search_web");
+        m.record_tool_call("search_db");
+        m.record_tool_call("write_file");
+        let mut names = m.tool_names_containing("search");
+        names.sort_unstable();
+        assert_eq!(names, vec!["search_db", "search_web"]);
+    }
+
+    #[test]
+    fn test_tool_names_containing_empty_when_no_match() {
+        let m = RuntimeMetrics::default();
+        m.record_tool_call("read");
+        assert!(m.tool_names_containing("write").is_empty());
     }
 }

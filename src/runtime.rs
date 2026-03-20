@@ -1180,6 +1180,32 @@ impl AgentSession {
             .collect()
     }
 
+    /// Return the steps in the half-open index range `[start, end)`.
+    ///
+    /// Both bounds are clamped to `[0, step_count]`.  Returns an empty `Vec`
+    /// when `start >= end` or the session has no steps.
+    pub fn steps_between(&self, start: usize, end: usize) -> Vec<&ReActStep> {
+        let clamped_end = end.min(self.steps.len());
+        if start >= clamped_end {
+            return Vec::new();
+        }
+        self.steps[start..clamped_end].iter().collect()
+    }
+
+    /// Return references to steps whose thought string duplicates an earlier
+    /// step's thought.
+    ///
+    /// The first occurrence of each thought is not included; only the
+    /// subsequent duplicates are returned.  Useful for detecting repetitive
+    /// reasoning loops.
+    pub fn steps_with_duplicate_thoughts(&self) -> Vec<&ReActStep> {
+        let mut seen = std::collections::HashSet::new();
+        self.steps
+            .iter()
+            .filter(|s| !seen.insert(s.thought.as_str()))
+            .collect()
+    }
+
     /// Return the 0-based index of the first `FINAL_ANSWER` step, or `None` if
     /// no such step exists in the session.
     ///
@@ -5307,5 +5333,52 @@ mod tests {
     fn test_steps_above_action_bytes_empty_for_empty_session() {
         let session = make_session(vec![], 0);
         assert!(session.steps_above_action_bytes(0).is_empty());
+    }
+
+    // ── Round 47: steps_between, steps_with_duplicate_thoughts ────────────────
+
+    #[test]
+    fn test_steps_between_returns_subslice() {
+        let steps = vec![
+            make_step("t", "a", "o"),
+            make_step("t", "b", "o"),
+            make_step("t", "c", "o"),
+            make_step("t", "d", "o"),
+        ];
+        let session = make_session(steps, 0);
+        let between = session.steps_between(1, 3);
+        assert_eq!(between.len(), 2);
+        assert_eq!(between[0].action, "b");
+        assert_eq!(between[1].action, "c");
+    }
+
+    #[test]
+    fn test_steps_between_empty_when_start_ge_end() {
+        let steps = vec![make_step("t", "a", "o"), make_step("t", "b", "o")];
+        let session = make_session(steps, 0);
+        assert!(session.steps_between(2, 1).is_empty());
+    }
+
+    #[test]
+    fn test_steps_with_duplicate_thoughts_returns_duplicates_only() {
+        let steps = vec![
+            make_step("alpha", "a", "o"),
+            make_step("beta", "b", "o"),
+            make_step("alpha", "c", "o"), // duplicate of first
+        ];
+        let session = make_session(steps, 0);
+        let dupes = session.steps_with_duplicate_thoughts();
+        assert_eq!(dupes.len(), 1);
+        assert_eq!(dupes[0].action, "c");
+    }
+
+    #[test]
+    fn test_steps_with_duplicate_thoughts_empty_when_all_unique() {
+        let steps = vec![
+            make_step("t1", "a", "o"),
+            make_step("t2", "b", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(session.steps_with_duplicate_thoughts().is_empty());
     }
 }

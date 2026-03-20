@@ -1982,6 +1982,18 @@ impl Pipeline {
         self.stages.is_empty()
     }
 
+    /// Return all stage names whose name starts with `prefix`.
+    ///
+    /// Returned names preserve pipeline order.  Returns an empty `Vec` when
+    /// no stage name has the given prefix or the pipeline is empty.
+    pub fn stage_names_with_prefix<'a>(&'a self, prefix: &str) -> Vec<&'a str> {
+        self.stages
+            .iter()
+            .filter(|s| s.name.starts_with(prefix))
+            .map(|s| s.name.as_str())
+            .collect()
+    }
+
     /// Return the position of the stage named `name` counted from the end of
     /// the pipeline (0 = last stage, 1 = second-to-last, …).
     ///
@@ -4067,5 +4079,23 @@ mod tests {
     fn test_pipeline_is_empty_false_after_adding_stage() {
         let p = Pipeline::new().add_stage("a", |s: String| Ok(s));
         assert!(!p.pipeline_is_empty());
+    }
+
+    // ── Round 47: stage_names_with_prefix ─────────────────────────────────────
+
+    #[test]
+    fn test_stage_names_with_prefix_returns_matching_stages() {
+        let p = Pipeline::new()
+            .add_stage("validate_input", |s: String| Ok(s))
+            .add_stage("transform_data", |s: String| Ok(s))
+            .add_stage("validate_output", |s: String| Ok(s));
+        let names = p.stage_names_with_prefix("validate");
+        assert_eq!(names, vec!["validate_input", "validate_output"]);
+    }
+
+    #[test]
+    fn test_stage_names_with_prefix_empty_when_no_match() {
+        let p = Pipeline::new().add_stage("transform", |s: String| Ok(s));
+        assert!(p.stage_names_with_prefix("validate").is_empty());
     }
 }
