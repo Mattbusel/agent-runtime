@@ -1148,6 +1148,17 @@ impl EpisodicStore {
         Ok((count, min, max, mean))
     }
 
+    /// Return the oldest (first-inserted) episode for `agent_id`, or `None`
+    /// if the agent has no stored episodes.
+    pub fn oldest(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::oldest");
+        let item = inner.items.get(agent_id).and_then(|v| v.first()).cloned();
+        Ok(item)
+    }
+
     /// Return the total number of stored episodes across all agents.
     pub fn len(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "EpisodicStore::len");
@@ -3254,5 +3265,168 @@ mod tests {
     fn test_working_memory_capacity_matches_constructor() {
         let wm = WorkingMemory::new(7).unwrap();
         assert_eq!(wm.capacity(), 7);
+    }
+
+    // ── Round 4: EpisodicStore new helpers ───────────────────────────────────
+
+    #[test]
+    fn test_add_episode_with_tags_stores_and_recalls() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let id = store
+            .add_episode_with_tags(agent.clone(), "tagged", 0.8, vec!["t1".to_string(), "t2".to_string()])
+            .unwrap();
+        let item = store.recall_by_id(&agent, &id).unwrap().unwrap();
+        assert_eq!(item.content, "tagged");
+        assert_eq!(item.tags, vec!["t1", "t2"]);
+    }
+
+    #[test]
+    fn test_remove_by_id_deletes_episode() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let id = store.add_episode(agent.clone(), "to-delete", 0.5).unwrap();
+        assert!(store.remove_by_id(&agent, &id).unwrap());
+        assert!(store.recall_by_id(&agent, &id).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_remove_by_id_returns_false_for_missing() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let fake = MemoryId::new("does-not-exist");
+        assert!(!store.remove_by_id(&agent, &fake).unwrap());
+    }
+
+    #[test]
+    fn test_update_tags_by_id_replaces_tags() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let id = store
+            .add_episode_with_tags(agent.clone(), "x", 0.5, vec!["old".to_string()])
+            .unwrap();
+        let updated = store
+            .update_tags_by_id(&agent, &id, vec!["new1".to_string(), "new2".to_string()])
+            .unwrap();
+        assert!(updated);
+        let item = store.recall_by_id(&agent, &id).unwrap().unwrap();
+        assert_eq!(item.tags, vec!["new1", "new2"]);
+    }
+
+    #[test]
+    fn test_update_tags_by_id_returns_false_for_missing() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let fake = MemoryId::new("nope");
+        assert!(!store.update_tags_by_id(&agent, &fake, vec![]).unwrap());
+    }
+
+    #[test]
+    fn test_max_importance_for_returns_highest() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "low", 0.2).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        store.add_episode(agent.clone(), "mid", 0.5).unwrap();
+        let max = store.max_importance_for(&agent).unwrap().unwrap();
+        assert!((max - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_max_importance_for_returns_none_when_empty() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("empty");
+        assert!(store.max_importance_for(&agent).unwrap().is_none());
+    }
+
+    // ── Round 4: WorkingMemory::snapshot / pop_oldest ────────────────────────
+
+    #[test]
+    fn test_working_memory_snapshot_returns_all_entries() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "v1").unwrap();
+        wm.set("k2", "v2").unwrap();
+        let snap = wm.snapshot().unwrap();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap.get("k1").unwrap(), "v1");
+        assert_eq!(snap.get("k2").unwrap(), "v2");
+    }
+
+    #[test]
+    fn test_working_memory_pop_oldest_removes_first_inserted() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("first", "1").unwrap();
+        wm.set("second", "2").unwrap();
+        let popped = wm.pop_oldest().unwrap().unwrap();
+        assert_eq!(popped.0, "first");
+        assert_eq!(popped.1, "1");
+        assert_eq!(wm.len().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_working_memory_pop_oldest_returns_none_when_empty() {
+        let wm = WorkingMemory::new(5).unwrap();
+        assert!(wm.pop_oldest().unwrap().is_none());
+    }
+
+    // ── Round 4: SemanticStore::keys_with_tag ────────────────────────────────
+
+    #[test]
+    fn test_semantic_store_keys_with_tag_returns_matching() {
+        let store = SemanticStore::new();
+        store
+            .store("doc1", "content one", vec!["alpha".to_string(), "beta".to_string()])
+            .unwrap();
+        store
+            .store("doc2", "content two", vec!["alpha".to_string()])
+            .unwrap();
+        store
+            .store("doc3", "content three", vec!["gamma".to_string()])
+            .unwrap();
+        let mut keys = store.keys_with_tag("alpha").unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["doc1", "doc2"]);
+    }
+
+    #[test]
+    fn test_semantic_store_keys_with_tag_empty_when_no_match() {
+        let store = SemanticStore::new();
+        store
+            .store("doc1", "content", vec!["x".to_string()])
+            .unwrap();
+        let keys = store.keys_with_tag("z").unwrap();
+        assert!(keys.is_empty());
+    }
+
+    // ── Round 16: oldest, get_or_default ─────────────────────────────────────
+
+    #[test]
+    fn test_episodic_oldest_returns_first_inserted() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("agent-oldest");
+        store.add_episode(agent.clone(), "first episode", 0.5).unwrap();
+        store.add_episode(agent.clone(), "second episode", 0.9).unwrap();
+        let oldest = store.oldest(&agent).unwrap().unwrap();
+        assert_eq!(oldest.content, "first episode");
+    }
+
+    #[test]
+    fn test_episodic_oldest_none_when_no_episodes() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("no-episodes");
+        assert!(store.oldest(&agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_working_memory_get_or_default_returns_value_when_present() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("key", "value").unwrap();
+        assert_eq!(wm.get_or_default("key", "fallback").unwrap(), "value");
+    }
+
+    #[test]
+    fn test_working_memory_get_or_default_returns_default_when_absent() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.get_or_default("missing", "fallback").unwrap(), "fallback");
     }
 }

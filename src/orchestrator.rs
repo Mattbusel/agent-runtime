@@ -183,6 +183,15 @@ impl RetryPolicy {
             .sum()
     }
 
+    /// Return `true` if another attempt is permitted after `attempt` failures.
+    ///
+    /// `attempt` is the number of attempts already made (0-based: `0` means
+    /// no attempt has been made yet).  Returns `false` once the budget is
+    /// exhausted (i.e. `attempt >= max_attempts`).
+    pub fn can_retry(&self, attempt: u32) -> bool {
+        attempt < self.max_attempts
+    }
+
     /// Compute the delay before the given attempt number (1-based).
     ///
     /// - [`RetryKind::Exponential`]: `base_delay * 2^(attempt-1)`, capped at `MAX_RETRY_DELAY`.
@@ -2028,5 +2037,54 @@ mod tests {
             .add_stage("b", |s| Ok(s));
         p.clear();
         assert!(p.is_empty());
+    }
+
+    // ── Round 4: CircuitBreaker accessors / Pipeline::get_stage_name_at ──────
+
+    #[test]
+    fn test_circuit_breaker_threshold_accessor() {
+        let cb = CircuitBreaker::new("svc", 5, Duration::from_secs(30)).unwrap();
+        assert_eq!(cb.threshold(), 5);
+    }
+
+    #[test]
+    fn test_circuit_breaker_recovery_window_accessor() {
+        let window = Duration::from_secs(45);
+        let cb = CircuitBreaker::new("svc", 3, window).unwrap();
+        assert_eq!(cb.recovery_window(), window);
+    }
+
+    #[test]
+    fn test_pipeline_get_stage_name_at_returns_correct_names() {
+        let p = Pipeline::new()
+            .add_stage("first", |s| Ok(s))
+            .add_stage("second", |s| Ok(s));
+        assert_eq!(p.get_stage_name_at(0), Some("first"));
+        assert_eq!(p.get_stage_name_at(1), Some("second"));
+        assert_eq!(p.get_stage_name_at(2), None);
+    }
+
+    // ── Round 16: can_retry ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_can_retry_within_budget() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(p.can_retry(0));
+        assert!(p.can_retry(1));
+        assert!(p.can_retry(2));
+    }
+
+    #[test]
+    fn test_retry_policy_can_retry_false_when_exhausted() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(!p.can_retry(3));
+        assert!(!p.can_retry(99));
+    }
+
+    #[test]
+    fn test_retry_policy_none_only_allows_first_attempt() {
+        let p = RetryPolicy::none();
+        assert!(p.can_retry(0));
+        assert!(!p.can_retry(1));
     }
 }

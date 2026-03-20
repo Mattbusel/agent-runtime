@@ -200,6 +200,7 @@ impl LatencyHistogram {
     pub fn clear(&self) {
         self.reset();
     }
+
 }
 
 impl MetricsSnapshot {
@@ -295,6 +296,16 @@ impl MetricsSnapshot {
         let mut names: Vec<&str> = self.per_tool_calls.keys().map(|s| s.as_str()).collect();
         names.sort_unstable();
         names
+    }
+
+    /// Return the overall tool-call failure rate as a value in `[0.0, 1.0]`.
+    ///
+    /// Returns `0.0` if no tool calls have been recorded.
+    pub fn failure_rate(&self) -> f64 {
+        if self.total_tool_calls == 0 {
+            return 0.0;
+        }
+        self.failed_tool_calls as f64 / self.total_tool_calls as f64
     }
 
     /// Return `true` if all counters are zero (no activity has been recorded).
@@ -1134,5 +1145,48 @@ mod tests {
         m.record_tool_call("mango");
         let snap = m.snapshot();
         assert_eq!(snap.tool_names(), vec!["alpha", "mango", "zebra"]);
+    }
+
+    // ── Round 4: top_tools_by_failures / LatencyHistogram::sum_ms ────────────
+
+    #[test]
+    fn test_top_tools_by_failures_returns_top_n_descending() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_failure("a");
+        m.record_tool_failure("a");
+        m.record_tool_failure("a");
+        m.record_tool_failure("b");
+        m.record_tool_failure("b");
+        m.record_tool_failure("c");
+        let top2 = m.top_tools_by_failures(2);
+        assert_eq!(top2.len(), 2);
+        assert_eq!(top2[0].0, "a");
+        assert_eq!(top2[0].1, 3);
+        assert_eq!(top2[1].0, "b");
+        assert_eq!(top2[1].1, 2);
+    }
+
+    #[test]
+    fn test_top_tools_by_failures_n_larger_than_tools() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_failure("only");
+        let top = m.top_tools_by_failures(10);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].0, "only");
+    }
+
+    #[test]
+    fn test_latency_histogram_sum_ms_accumulates() {
+        let h = LatencyHistogram::default();
+        h.record(100);
+        h.record(200);
+        h.record(300);
+        assert_eq!(h.sum_ms(), 600);
+    }
+
+    #[test]
+    fn test_latency_histogram_sum_ms_zero_when_empty() {
+        let h = LatencyHistogram::default();
+        assert_eq!(h.sum_ms(), 0);
     }
 }

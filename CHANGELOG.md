@@ -11,6 +11,41 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.12.0] - 2026-03-20
+
+### Added
+
+- **`EpisodicStore::add_episode_with_tags`** (`memory.rs`) — create an episode
+  with explicit tags in a single call; combines `add_episode` + `update_tags_by_id`.
+- **`EpisodicStore::remove_by_id`** (`memory.rs`) — delete a specific episode by
+  `MemoryId`; returns `Ok(true)` if found and removed, `Ok(false)` if absent.
+- **`EpisodicStore::update_tags_by_id`** (`memory.rs`) — replace the tag list of
+  an existing episode; returns `Ok(true/false)` like other by-id mutators.
+- **`EpisodicStore::max_importance_for`** (`memory.rs`) — return the highest
+  importance score for a given agent, or `None` if no episodes exist.
+- **`WorkingMemory::snapshot`** (`memory.rs`) — return a `HashMap<String,String>`
+  clone of all current entries; useful for serialization and debugging.
+- **`WorkingMemory::pop_oldest`** (`memory.rs`) — remove and return the
+  oldest inserted `(key, value)` pair, or `None` if empty.
+- **`SemanticStore::keys_with_tag`** (`memory.rs`) — return all entry keys that
+  carry a specific tag; complement to `retrieve(&[tag])` when only keys are needed.
+- **`RuntimeMetrics::top_tools_by_failures`** (`metrics.rs`) — return the top-N
+  tools sorted by descending failure count; useful for SLO dashboards.
+- **`LatencyHistogram::sum_ms`** (`metrics.rs`) — return the sum of all recorded
+  latency samples in milliseconds; enables computing mean without floating-point.
+- **`CircuitBreaker::threshold`** (`orchestrator.rs`) — read accessor for the
+  failure threshold configured at construction.
+- **`CircuitBreaker::recovery_window`** (`orchestrator.rs`) — read accessor for
+  the recovery window `Duration` configured at construction.
+- **`Pipeline::get_stage_name_at`** (`orchestrator.rs`) — return the name of a
+  stage by zero-based index, or `None` if out of bounds.
+- **`AgentConfig::clone_with_model`** (`agent.rs`) — clone the config and override
+  only the model name; handy for A/B testing different models on the same config.
+- **`ToolSpec::with_name`** (`agent.rs`) — override the tool name after
+  construction; mirrors the existing `with_description` builder method.
+
+---
+
 ## [1.11.0] - 2026-03-20
 
 ### Added
