@@ -222,6 +222,31 @@ impl FilePersistenceBackend {
         let path = self.path_for(key);
         Ok(tokio::fs::metadata(&path).await.is_ok())
     }
+
+    /// Return the number of keys currently stored in the backend.
+    ///
+    /// More efficient than `list_keys().await?.len()` for callers that only
+    /// need the count, as it avoids building the string list.
+    pub async fn key_count(&self) -> Result<usize, AgentRuntimeError> {
+        let mut entries = tokio::fs::read_dir(self.base_dir.as_ref())
+            .await
+            .map_err(|e| AgentRuntimeError::Persistence(format!("key_count readdir: {e}")))?;
+        let mut count = 0usize;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| AgentRuntimeError::Persistence(format!("key_count entry: {e}")))?
+        {
+            if entry
+                .file_name()
+                .to_str()
+                .map_or(false, |n| n.ends_with(".bin"))
+            {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -379,5 +404,40 @@ mod tests {
         backend.save("obj-safe", b"ok").await.unwrap();
         let r = backend.load("obj-safe").await.unwrap();
         assert_eq!(r, Some(b"ok".to_vec()));
+    }
+
+    // ── Round 11: key_count ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_key_count_zero_for_empty_directory() {
+        let dir = std::env::temp_dir().join(format!("art_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let _guard = tempdir::Handle { path: dir.clone() };
+        let backend = FilePersistenceBackend::new(&dir);
+        assert_eq!(backend.key_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_key_count_matches_number_of_saves() {
+        let dir = std::env::temp_dir().join(format!("art_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let _guard = tempdir::Handle { path: dir.clone() };
+        let backend = FilePersistenceBackend::new(&dir);
+        backend.save("k1", b"v1").await.unwrap();
+        backend.save("k2", b"v2").await.unwrap();
+        backend.save("k3", b"v3").await.unwrap();
+        assert_eq!(backend.key_count().await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_key_count_decrements_after_delete() {
+        let dir = std::env::temp_dir().join(format!("art_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let _guard = tempdir::Handle { path: dir.clone() };
+        let backend = FilePersistenceBackend::new(&dir);
+        backend.save("key", b"val").await.unwrap();
+        assert_eq!(backend.key_count().await.unwrap(), 1);
+        backend.delete("key").await.unwrap();
+        assert_eq!(backend.key_count().await.unwrap(), 0);
     }
 }

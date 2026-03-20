@@ -2889,4 +2889,45 @@ mod tests {
         let cfg = AgentConfig::new(3, "m").with_max_iterations(10);
         assert_eq!(cfg.max_iterations(), 10);
     }
+
+    // ── Round 11: ToolRegistry::is_empty / clear / remove ─────────────────────
+
+    #[test]
+    fn test_tool_registry_is_empty_true_when_new() {
+        let reg = ToolRegistry::new();
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn test_tool_registry_is_empty_false_after_register() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t", "d", |_| serde_json::json!({})));
+        assert!(!reg.is_empty());
+    }
+
+    #[test]
+    fn test_tool_registry_clear_empties_registry() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "d", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("t2", "d", |_| serde_json::json!({})));
+        reg.clear();
+        assert!(reg.is_empty());
+        assert_eq!(reg.tool_count(), 0);
+    }
+
+    #[test]
+    fn test_tool_registry_remove_returns_spec_and_decrements_count() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("myTool", "desc", |_| serde_json::json!({})));
+        assert_eq!(reg.tool_count(), 1);
+        let removed = reg.remove("myTool");
+        assert!(removed.is_some());
+        assert_eq!(reg.tool_count(), 0);
+    }
+
+    #[test]
+    fn test_tool_registry_remove_returns_none_for_absent_tool() {
+        let mut reg = ToolRegistry::new();
+        assert!(reg.remove("ghost").is_none());
+    }
 }

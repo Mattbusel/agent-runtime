@@ -63,6 +63,11 @@ impl AgentId {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Return `true` if the inner ID string starts with `prefix`.
+    pub fn starts_with(&self, prefix: &str) -> bool {
+        self.0.starts_with(prefix)
+    }
 }
 
 impl AsRef<str> for AgentId {
@@ -127,6 +132,11 @@ impl MemoryId {
     /// Return `true` if the inner ID string is empty.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Return `true` if the inner ID string starts with `prefix`.
+    pub fn starts_with(&self, prefix: &str) -> bool {
+        self.0.starts_with(prefix)
     }
 }
 
@@ -212,5 +222,27 @@ mod tests {
         let a = MemoryId::random();
         let b = MemoryId::random();
         assert_ne!(a, b);
+    }
+
+    // ── Round 11: starts_with ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_agent_id_starts_with_matching_prefix() {
+        let id = AgentId::new("agent-001");
+        assert!(id.starts_with("agent-"));
+        assert!(!id.starts_with("user-"));
+    }
+
+    #[test]
+    fn test_agent_id_starts_with_empty_prefix_always_true() {
+        let id = AgentId::new("anything");
+        assert!(id.starts_with(""));
+    }
+
+    #[test]
+    fn test_memory_id_starts_with_matching_prefix() {
+        let id = MemoryId::new("mem-42");
+        assert!(id.starts_with("mem-"));
+        assert!(!id.starts_with("ep-"));
     }
 }

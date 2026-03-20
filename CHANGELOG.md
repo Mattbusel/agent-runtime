@@ -11,6 +11,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.24.0] - 2026-03-20
+
+### Added
+
+- **`FilePersistenceBackend::key_count`** (`persistence.rs`) — count stored keys
+  without building a string list; more efficient than `list_keys().await?.len()`.
+- **`AgentId::starts_with`** / **`MemoryId::starts_with`** (`types.rs`) — check
+  whether an ID string begins with a given prefix; useful for namespace-based
+  routing and ID classification.
+
+---
+
 ## [1.23.0] - 2026-03-20
 
 ### Added

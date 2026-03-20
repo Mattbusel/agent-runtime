@@ -4485,4 +4485,38 @@ mod tests {
         wm.set("foo", "bar").unwrap();
         assert!(wm.keys_starting_with("xyz:").unwrap().is_empty());
     }
+
+    // ── Round 11: SemanticStore::to_map / WorkingMemory::fill_ratio ──────────
+
+    #[test]
+    fn test_semantic_to_map_returns_key_value_pairs() {
+        let store = SemanticStore::new();
+        store.store("key1", "val1", vec![]).unwrap();
+        store.store("key2", "val2", vec![]).unwrap();
+        let map = store.to_map().unwrap();
+        assert_eq!(map.get("key1").map(String::as_str), Some("val1"));
+        assert_eq!(map.get("key2").map(String::as_str), Some("val2"));
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn test_semantic_to_map_empty_when_no_entries() {
+        let store = SemanticStore::new();
+        assert!(store.to_map().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_working_memory_fill_ratio_zero_when_empty() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.fill_ratio().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_working_memory_fill_ratio_correct_proportion() {
+        let wm = WorkingMemory::new(4).unwrap();
+        wm.set("a", "1").unwrap();
+        wm.set("b", "2").unwrap();
+        // 2 out of 4 = 0.5
+        assert!((wm.fill_ratio().unwrap() - 0.5).abs() < 1e-9);
+    }
 }
