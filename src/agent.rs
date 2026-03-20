@@ -1135,6 +1135,11 @@ impl ToolRegistry {
             .filter(|s| s.description.to_ascii_lowercase().contains(&lower))
             .collect()
     }
+
+    /// Return the number of tools that have at least one required field.
+    pub fn tool_count_with_required_fields(&self) -> usize {
+        self.tools.values().filter(|s| s.has_required_fields()).count()
+    }
 }
 
 // ── ReActLoop ─────────────────────────────────────────────────────────────────
@@ -3444,5 +3449,51 @@ mod tests {
         let cfg = AgentConfig::new(5, "model")
             .with_request_timeout(std::time::Duration::from_secs(30));
         assert!(cfg.has_request_timeout());
+    }
+
+    // ── Round 29: ReActLoop::unregister_tool ──────────────────────────────────
+
+    #[test]
+    fn test_react_loop_unregister_tool_removes_registered_tool() {
+        let mut agent = ReActLoop::new(AgentConfig::new(5, "m"));
+        agent.register_tool(ToolSpec::new("t1", "desc", |_| serde_json::json!({})));
+        assert!(agent.unregister_tool("t1"));
+        assert_eq!(agent.tool_count(), 0);
+    }
+
+    #[test]
+    fn test_react_loop_unregister_tool_returns_false_for_unknown() {
+        let mut agent = ReActLoop::new(AgentConfig::new(5, "m"));
+        assert!(!agent.unregister_tool("nonexistent"));
+    }
+
+    // ── Round 26: tool_count_with_required_fields ─────────────────────────────
+
+    #[test]
+    fn test_tool_count_with_required_fields_zero_when_empty() {
+        let reg = ToolRegistry::new();
+        assert_eq!(reg.tool_count_with_required_fields(), 0);
+    }
+
+    #[test]
+    fn test_tool_count_with_required_fields_excludes_tools_without_fields() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "d", |_| serde_json::json!({})));
+        assert_eq!(reg.tool_count_with_required_fields(), 0);
+    }
+
+    #[test]
+    fn test_tool_count_with_required_fields_counts_only_tools_with_fields() {
+        let mut reg = ToolRegistry::new();
+        reg.register(
+            ToolSpec::new("t1", "d", |_| serde_json::json!({}))
+                .with_required_fields(["query"]),
+        );
+        reg.register(ToolSpec::new("t2", "d", |_| serde_json::json!({}))); // no required
+        reg.register(
+            ToolSpec::new("t3", "d", |_| serde_json::json!({}))
+                .with_required_fields(["url", "method"]),
+        );
+        assert_eq!(reg.tool_count_with_required_fields(), 2);
     }
 }

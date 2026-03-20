@@ -6056,4 +6056,50 @@ mod tests {
         let result = store.store_with_embedding("k2", "v2", vec![], vec![1.0, 0.0, 0.0]);
         assert!(result.is_err());
     }
+
+    // ── Round 26: has_episodes / value_for / count_above_value_length ─────────
+
+    #[test]
+    fn test_episodic_store_has_episodes_false_when_empty() {
+        let store = EpisodicStore::new();
+        let id = AgentId::new("agent-x");
+        assert!(!store.has_episodes(&id).unwrap());
+    }
+
+    #[test]
+    fn test_episodic_store_has_episodes_true_after_recording() {
+        let store = EpisodicStore::new();
+        let id = AgentId::new("agent-y");
+        store.add_episode(id.clone(), "e1", 0.8).unwrap();
+        assert!(store.has_episodes(&id).unwrap());
+    }
+
+    #[test]
+    fn test_semantic_store_value_for_none_when_missing() {
+        let store = SemanticStore::new();
+        assert!(store.value_for("missing-key").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_semantic_store_value_for_returns_stored_value() {
+        let store = SemanticStore::new();
+        store.store("mykey", "myvalue", vec![]).unwrap();
+        assert_eq!(store.value_for("mykey").unwrap(), Some("myvalue".to_string()));
+    }
+
+    #[test]
+    fn test_working_memory_count_above_value_length_zero_when_empty() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.count_above_value_length(5).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_working_memory_count_above_value_length_counts_correctly() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "short").unwrap();        // 5 bytes
+        wm.set("k2", "a longer value").unwrap(); // 13 bytes
+        wm.set("k3", "hi").unwrap();             // 2 bytes
+        // min_bytes=5: values strictly > 5 bytes: "a longer value" (13)
+        assert_eq!(wm.count_above_value_length(5).unwrap(), 1);
+    }
 }
