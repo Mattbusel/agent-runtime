@@ -827,6 +827,10 @@ impl GraphStore {
             .map(|(i, id)| (id.clone(), i))
             .collect();
 
+        // Hoist the frequency counter out of the inner loop to avoid
+        // allocating a fresh HashMap for every node on every iteration.
+        let mut freq: HashMap<usize, usize> = HashMap::new();
+
         for _ in 0..max_iterations {
             let mut changed = false;
             // Iterate in a stable order.
@@ -846,21 +850,21 @@ impl GraphStore {
                     .map(|froms| froms.iter().map(|f| labels.get(f).copied().unwrap_or(0)))
                     .into_iter()
                     .flatten();
-                let neighbour_labels: Vec<usize> = out_labels.chain(in_labels).collect();
 
-                if neighbour_labels.is_empty() {
+                freq.clear();
+                for lbl in out_labels.chain(in_labels) {
+                    *freq.entry(lbl).or_insert(0) += 1;
+                }
+
+                if freq.is_empty() {
                     continue;
                 }
 
                 // Find the most frequent label.
-                let mut freq: HashMap<usize, usize> = HashMap::new();
-                for &lbl in &neighbour_labels {
-                    *freq.entry(lbl).or_insert(0) += 1;
-                }
                 let best = freq
-                    .into_iter()
+                    .iter()
                     .max_by_key(|&(_, count)| count)
-                    .map(|(lbl, _)| lbl);
+                    .map(|(&lbl, _)| lbl);
 
                 if let Some(new_label) = best {
                     let current = labels.entry(node.clone()).or_insert(0);
@@ -910,16 +914,16 @@ impl GraphStore {
                 *color.entry(start).or_insert(0) = 1;
 
                 while let Some((node, idx)) = stack.last_mut() {
-                    // Collect neighbors on first visit.
-                    let neighbors: Vec<&EntityId> = inner
-                        .relationships
-                        .iter()
-                        .filter(|r| &r.from == *node)
-                        .map(|r| &r.to)
-                        .collect();
+                    // Use the adjacency index (O(1) lookup) instead of an
+                    // O(|E|) relationship scan on every while-loop step.
+                    let rels = inner
+                        .adjacency
+                        .get(*node)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]);
 
-                    if *idx < neighbors.len() {
-                        let next = neighbors[*idx];
+                    if *idx < rels.len() {
+                        let next = &rels[*idx].to;
                         *idx += 1;
                         match color.get(next).copied().unwrap_or(0) {
                             1 => break 'outer true, // back edge → cycle
@@ -1107,6 +1111,26 @@ impl GraphStore {
         Ok(())
     }
 
+    /// Check whether an entity with the given ID exists.
+    pub fn entity_exists(&self, id: &EntityId) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "entity_exists");
+        Ok(inner.entities.contains_key(id))
+    }
+
+    /// Check whether a relationship `(from, to, kind)` exists.
+    pub fn relationship_exists(
+        &self,
+        from: &EntityId,
+        to: &EntityId,
+        kind: &str,
+    ) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "relationship_exists");
+        Ok(inner
+            .relationships
+            .iter()
+            .any(|r| r.from == *from && r.to == *to && r.kind == kind))
+    }
+
     /// Extract a subgraph containing only the specified entities and the
     /// relationships between them.
     pub fn subgraph(&self, node_ids: &[EntityId]) -> Result<GraphStore, AgentRuntimeError> {
@@ -1126,17 +1150,21 @@ impl GraphStore {
             new_inner.entities.insert(entity.id.clone(), entity);
         }
 
-        for rel in inner.relationships.iter() {
-            if id_set.contains(&rel.from) && id_set.contains(&rel.to) {
-                let mut new_inner =
-                    recover_lock(new_store.inner.lock(), "subgraph:add_relationship");
-                // Keep adjacency index in sync with relationships.
-                new_inner
-                    .adjacency
-                    .entry(rel.from.clone())
-                    .or_default()
-                    .push(rel.clone());
-                new_inner.relationships.push(rel.clone());
+        // Acquire the new store's lock once for the entire relationship batch
+        // rather than once per relationship.
+        {
+            let mut new_inner =
+                recover_lock(new_store.inner.lock(), "subgraph:add_relationships");
+            for rel in inner.relationships.iter() {
+                if id_set.contains(&rel.from) && id_set.contains(&rel.to) {
+                    // Keep adjacency index in sync with relationships.
+                    new_inner
+                        .adjacency
+                        .entry(rel.from.clone())
+                        .or_default()
+                        .push(rel.clone());
+                    new_inner.relationships.push(rel.clone());
+                }
             }
         }
 

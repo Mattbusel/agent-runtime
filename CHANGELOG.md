@@ -11,6 +11,28 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.5.0] - 2026-03-20
+
+### Changed
+
+- **`GraphStore::detect_cycles`** (`graph.rs`) — DFS inner loop no longer rebuilds
+  the neighbour `Vec` via an O(|E|) relationship scan on every while-loop step.
+  Now uses `inner.adjacency.get(node)` for O(1) lookup, reducing the per-cycle
+  detection cost from O(V·E) to O(V + E).
+- **`GraphStore::label_propagation_communities`** (`graph.rs`) — the `freq:
+  HashMap<usize, usize>` used to find the most-frequent neighbour label is now
+  allocated once before the outer iteration loop and cleared each step, removing
+  `V * max_iterations` HashMap allocations.
+- **`GraphStore::subgraph`** (`graph.rs`) — the relationship-copy phase now
+  acquires `new_store`'s mutex **once** for all relationships rather than once per
+  relationship, eliminating O(|E_subgraph|) redundant lock round-trips.
+- **`AnthropicProvider::complete_with_options`** and
+  **`OpenAiProvider::complete_with_options`** (`providers.rs`) — `options.timeout`
+  is now applied to the reqwest request builder when set, replacing the previous
+  behaviour where per-request timeouts were silently ignored.
+
+---
+
 ## [1.4.0] - 2026-03-20
 
 ### Added

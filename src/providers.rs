@@ -247,13 +247,17 @@ impl LlmProvider for AnthropicProvider {
             body["temperature"] = serde_json::json!(t);
         }
 
-        let response = self
+        let mut req = self
             .client
             .post(&self.api_url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", Self::API_VERSION)
             .header("content-type", "application/json")
-            .json(&body)
+            .json(&body);
+        if let Some(timeout) = options.timeout {
+            req = req.timeout(timeout);
+        }
+        let response = req
             .send()
             .await
             .map_err(|e| AgentRuntimeError::Provider(format!("Anthropic request failed: {e}")))?;
@@ -487,12 +491,16 @@ impl LlmProvider for OpenAiProvider {
             body["temperature"] = serde_json::json!(temp);
         }
 
-        let response = self
+        let mut req = self
             .client
             .post(&url)
             .bearer_auth(&self.api_key)
             .header("content-type", "application/json")
-            .json(&body)
+            .json(&body);
+        if let Some(timeout) = options.timeout {
+            req = req.timeout(timeout);
+        }
+        let response = req
             .send()
             .await
             .map_err(|e| AgentRuntimeError::Provider(format!("OpenAI request failed: {e}")))?;
