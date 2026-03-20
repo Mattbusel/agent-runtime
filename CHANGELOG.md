@@ -11,6 +11,22 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.72.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::steps_with_observation_prefix`** — count steps whose observation starts with a given prefix.
+- **`AgentSession::observation_bytes_total`** — sum of byte lengths of all observation fields.
+- **`AgentSession::first_thought_chars`** — character count of the first step's thought field.
+- **`EpisodicStore::total_tag_count`** — total tag count across all episodes for an agent.
+- **`EpisodicStore::avg_tag_count_per_episode`** — average tags per episode for an agent.
+- **`WorkingMemory::keys_with_suffix`** — keys ending with a given suffix, sorted.
+- **`WorkingMemory::avg_key_length`** — average byte length of all stored keys.
+- **`RuntimeMetrics::active_session_count`** — current count of active sessions.
+- **`GraphStore::graph_is_empty`** — `true` if the graph has no entities or relationships.
+
+---
+
 ## [1.71.0] - 2026-03-20
 
 ### Added
