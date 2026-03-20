@@ -3034,4 +3034,43 @@ mod tests {
         link_w(&g, "a", "b", 1.0); link_w(&g, "a", "c", 9.5);
         assert!((g.min_edge_weight().unwrap().unwrap() - 1.0).abs() < 1e-6);
     }
+
+    // ── Round 6: max_out_degree_entity / leaf_nodes ───────────────────────────
+
+    #[test]
+    fn test_max_out_degree_entity_returns_node_with_most_edges() {
+        let g = make_graph();
+        add(&g, "hub"); add(&g, "a"); add(&g, "b"); add(&g, "leaf");
+        link(&g, "hub", "a"); link(&g, "hub", "b"); link(&g, "a", "leaf");
+        let best = g.max_out_degree_entity().unwrap().unwrap();
+        assert_eq!(best.id, EntityId::new("hub"));
+    }
+
+    #[test]
+    fn test_max_out_degree_entity_none_for_empty_graph() {
+        let g = make_graph();
+        assert!(g.max_out_degree_entity().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_leaf_nodes_returns_nodes_with_no_outgoing_edges() {
+        let g = make_graph();
+        add(&g, "root"); add(&g, "mid"); add(&g, "leaf1"); add(&g, "leaf2");
+        link(&g, "root", "mid"); link(&g, "mid", "leaf1"); link(&g, "mid", "leaf2");
+        let mut leaf_ids: Vec<String> = g
+            .leaf_nodes()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id.0.clone())
+            .collect();
+        leaf_ids.sort();
+        assert_eq!(leaf_ids, vec!["leaf1", "leaf2"]);
+    }
+
+    #[test]
+    fn test_leaf_nodes_all_are_leaves_with_no_edges() {
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b");
+        assert_eq!(g.leaf_nodes().unwrap().len(), 2);
+    }
 }

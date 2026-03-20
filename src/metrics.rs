@@ -308,6 +308,32 @@ impl MetricsSnapshot {
         self.failed_tool_calls as f64 / self.total_tool_calls as f64
     }
 
+    /// Return the overall tool-call success rate as a value in `[0.0, 1.0]`.
+    ///
+    /// Returns `1.0` if no tool calls have been recorded (vacuously all succeeded).
+    pub fn success_rate(&self) -> f64 {
+        1.0 - self.failure_rate()
+    }
+
+    /// Return the number of successful calls for the named tool.
+    ///
+    /// Computed as `tool_call_count(name) - tool_failure_count(name)`.
+    pub fn tool_success_count(&self, name: &str) -> u64 {
+        self.tool_call_count(name)
+            .saturating_sub(self.tool_failure_count(name))
+    }
+
+    /// Return the per-tool failure rate for the named tool.
+    ///
+    /// Returns `0.0` if no calls have been recorded for that tool.
+    pub fn tool_failure_rate(&self, name: &str) -> f64 {
+        let calls = self.tool_call_count(name);
+        if calls == 0 {
+            return 0.0;
+        }
+        self.tool_failure_count(name) as f64 / calls as f64
+    }
+
     /// Return `true` if all counters are zero (no activity has been recorded).
     pub fn is_zero(&self) -> bool {
         self.active_sessions == 0
@@ -648,6 +674,18 @@ impl RuntimeMetrics {
         }
         let failed = self.failed_tool_calls.load(Ordering::Relaxed);
         failed as f64 / total as f64
+    }
+
+    /// Return the fraction of tool calls that succeeded: `1.0 - failure_rate()`.
+    ///
+    /// Returns `1.0` if no tool calls have been recorded (vacuously all succeeded).
+    pub fn success_rate(&self) -> f64 {
+        1.0 - self.failure_rate()
+    }
+
+    /// Return `true` if there is at least one active (in-progress) session.
+    pub fn is_active(&self) -> bool {
+        self.active_sessions.load(Ordering::Relaxed) > 0
     }
 
     /// Return the top `n` tools by total call count, sorted descending.

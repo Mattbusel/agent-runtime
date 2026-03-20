@@ -11,6 +11,58 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.15.0] - 2026-03-20
+
+### Added
+
+- **`EpisodicStore::clear_for`** (`memory.rs`) — remove all episodes for a
+  specific agent in one call; returns the count of removed items.
+- **`EpisodicStore::importance_sum`** (`memory.rs`) — sum of all importance
+  scores for an agent; useful for computing average importance.
+- **`WorkingMemory::merge_from`** (`memory.rs`) — copy all entries from another
+  `WorkingMemory`; capacity limits and eviction policies apply.
+- **`WorkingMemory::entry_count_satisfying`** (`memory.rs`) — count entries
+  matching a `(key, value) -> bool` predicate without allocating a result vec.
+- **`SemanticStore::update_value`** (`memory.rs`) — update the stored value of
+  an entry by key; mirrors `update_tags` for the value field.
+- **`GraphStore::max_out_degree_entity`** (`graph.rs`) — return the entity with
+  the most outgoing edges, or `None` for an empty graph.
+- **`GraphStore::leaf_nodes`** (`graph.rs`) — return all entities with
+  out-degree = 0; efficiently found via the adjacency index.
+- **`AgentConfig::with_max_iterations`** (`agent.rs`) — fluent builder to set
+  `max_iterations` after construction; completes the builder surface.
+- **`ToolRegistry::tool_names_owned`** (`agent.rs`) — return registered tool
+  names as `Vec<String>`; unlike `tool_names()` this does not borrow `self`.
+
+---
+
+## [1.14.0] - 2026-03-20
+
+### Added
+
+- **`AgentRuntimeError::is_agent_loop`** (`error.rs`) — predicate for `AgentLoop` variant.
+- **`AgentRuntimeError::is_orchestration`** (`error.rs`) — predicate for `Orchestration` variant.
+- **`AgentRuntimeError::is_persistence`** (`error.rs`) — predicate for `Persistence` variant.
+- **`AgentRuntimeError::is_not_configured`** (`error.rs`) — predicate for `NotConfigured` variant.
+- **`AgentRuntimeError::is_deduplication_conflict`** (`error.rs`) — predicate for `DeduplicationConflict` variant.
+- **`AgentRuntimeError::is_retryable`** (`error.rs`) — returns `true` for `Provider` and
+  `Persistence` errors (transient/IO); returns `false` for all logic/configuration errors.
+- **`AgentSession::thoughts_containing`** (`runtime.rs`) — filter steps by case-insensitive
+  substring match on the thought field; mirrors `observations_matching`.
+- **`AgentSession::step_durations_ms`** (`runtime.rs`) — return all per-step durations as
+  `Vec<u64>`; useful for computing custom latency percentiles over a session.
+- **`MetricsSnapshot::success_rate`** (`metrics.rs`) — `1.0 - failure_rate()`; complement
+  to the existing `failure_rate()`.
+- **`MetricsSnapshot::tool_success_count`** (`metrics.rs`) — successful calls for a named
+  tool (`calls - failures`); uses `saturating_sub` to guard against counter skew.
+- **`MetricsSnapshot::tool_failure_rate`** (`metrics.rs`) — per-tool failure rate; returns
+  `0.0` if the tool has no recorded calls.
+- **`RuntimeMetrics::success_rate`** (`metrics.rs`) — live-read counterpart to `failure_rate()`.
+- **`RuntimeMetrics::is_active`** (`metrics.rs`) — `true` when `active_sessions > 0`; useful
+  for health-check endpoints.
+
+---
+
 ## [1.12.0] - 2026-03-20
 
 ### Added

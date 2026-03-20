@@ -2687,4 +2687,28 @@ mod tests {
         assert!(!Message::assistant("reply").is_tool());
         assert!(!Message::system("prompt").is_tool());
     }
+
+    // ── Round 6: AgentConfig::with_max_iterations / ToolRegistry::tool_names_owned
+
+    #[test]
+    fn test_agent_config_with_max_iterations() {
+        let cfg = AgentConfig::new(5, "m").with_max_iterations(20);
+        assert_eq!(cfg.max_iterations, 20);
+    }
+
+    #[test]
+    fn test_tool_registry_tool_names_owned_returns_strings() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("alpha", "d", |_| serde_json::json!("ok")));
+        reg.register(ToolSpec::new("beta", "d", |_| serde_json::json!("ok")));
+        let mut names = reg.tool_names_owned();
+        names.sort();
+        assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn test_tool_registry_tool_names_owned_empty_when_no_tools() {
+        let reg = ToolRegistry::new();
+        assert!(reg.tool_names_owned().is_empty());
+    }
 }

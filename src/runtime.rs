@@ -212,6 +212,22 @@ impl AgentSession {
             .collect()
     }
 
+    /// Return steps whose thought contains `pattern` (case-insensitive).
+    pub fn thoughts_containing(&self, pattern: &str) -> Vec<&ReActStep> {
+        let lower = pattern.to_ascii_lowercase();
+        self.steps
+            .iter()
+            .filter(|s| s.thought.to_ascii_lowercase().contains(&lower))
+            .collect()
+    }
+
+    /// Return all per-step durations in milliseconds, in order.
+    ///
+    /// Useful for computing custom percentiles or detecting slow outlier steps.
+    pub fn step_durations_ms(&self) -> Vec<u64> {
+        self.steps.iter().map(|s| s.step_duration_ms).collect()
+    }
+
     /// Collect all thought strings from every step, in order.
     pub fn all_thoughts(&self) -> Vec<&str> {
         self.steps.iter().map(|s| s.thought.as_str()).collect()
