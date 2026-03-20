@@ -3417,6 +3417,31 @@ impl GraphStore {
         Ok(labels.len())
     }
 
+    /// Return all entities that have the given `property_key` set in their
+    /// `properties` map.
+    pub fn entities_with_property_key(
+        &self,
+        property_key: &str,
+    ) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entities_with_property_key");
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| e.properties.contains_key(property_key))
+            .cloned()
+            .collect())
+    }
+
+    /// Return the number of entities that have the given `property_key` set.
+    pub fn entity_properties_count(&self, property_key: &str) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entity_properties_count");
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| e.properties.contains_key(property_key))
+            .count())
+    }
+
     /// Return all outgoing `Relationship`s from the entity with the given `id`.
     ///
     /// Returns an empty `Vec` when the entity has no outgoing edges or does

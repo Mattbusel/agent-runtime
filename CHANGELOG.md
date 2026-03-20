@@ -11,6 +11,22 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.73.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::last_observation_chars`** — character count of the last step's observation.
+- **`AgentSession::observation_word_count_total`** — total word count across all observations.
+- **`EpisodicStore::episodes_above_importance_count`** — count episodes above an importance threshold.
+- **`EpisodicStore::tag_union`** — union of all tags across all episodes for an agent.
+- **`WorkingMemory::entries_sorted_by_key_length`** — key-value pairs sorted by key byte length.
+- **`RuntimeMetrics::memory_to_session_ratio`** — ratio of memory recalls to total sessions.
+- **`GraphStore::unique_relationship_kinds`** — sorted list of distinct relationship kinds.
+- **`GraphStore::has_any_relationships`** — `true` if the graph contains at least one relationship.
+- **`Pipeline::stage_count_with_name_containing`** — count stages whose name contains a substring.
+
+---
+
 ## [1.72.0] - 2026-03-20
 
 ### Added

@@ -2214,6 +2214,36 @@ impl AgentSession {
             .filter(|s| s.thought.len() > min_bytes)
             .collect()
     }
+
+    /// Return all steps whose `action` contains `substr` as a substring.
+    pub fn steps_with_action_containing(&self, substr: &str) -> Vec<&ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.action.contains(substr))
+            .collect()
+    }
+
+    /// Return the maximum `observation` length in Unicode chars across all
+    /// steps.  Returns `0` for an empty session.
+    pub fn observation_max_chars(&self) -> usize {
+        self.steps
+            .iter()
+            .map(|s| s.observation.chars().count())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Return the minimum `observation` length in Unicode chars, considering
+    /// only steps with a non-empty observation.  Returns `0` if no non-empty
+    /// observations exist.
+    pub fn observation_min_chars(&self) -> usize {
+        self.steps
+            .iter()
+            .map(|s| s.observation.chars().count())
+            .filter(|&n| n > 0)
+            .min()
+            .unwrap_or(0)
+    }
 }
 
 // ── AgentRuntimeBuilder ───────────────────────────────────────────────────────

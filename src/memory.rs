@@ -1142,6 +1142,18 @@ impl EpisodicStore {
         Ok(ids)
     }
 
+    /// Return the agent with the fewest (non-zero) stored episodes, or `None`
+    /// if the store is empty.
+    pub fn min_episode_count(&self) -> Result<Option<(AgentId, usize)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::min_episode_count");
+        Ok(inner
+            .items
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .min_by_key(|(_, v)| v.len())
+            .map(|(id, v)| (id.clone(), v.len())))
+    }
+
     /// Return the highest importance value across all stored episodes,
     /// or `None` if the store is empty.
     pub fn max_importance_overall(&self) -> Result<Option<f32>, AgentRuntimeError> {
@@ -4608,6 +4620,17 @@ impl WorkingMemory {
     pub fn keys_shorter_than(&self, max_bytes: usize) -> Result<Vec<String>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::keys_shorter_than");
         Ok(inner.map.keys().filter(|k| k.len() < max_bytes).cloned().collect())
+    }
+
+    /// Return all stored values that start with `prefix`.
+    pub fn values_with_prefix(&self, prefix: &str) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::values_with_prefix");
+        Ok(inner
+            .map
+            .values()
+            .filter(|v| v.starts_with(prefix))
+            .cloned()
+            .collect())
     }
 
     /// Return `true` if the value stored under `key` starts with `prefix`.
