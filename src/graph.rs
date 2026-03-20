@@ -320,6 +320,12 @@ impl GraphStore {
             .entry(rel.from.clone())
             .or_default()
             .push(rel.clone());
+        // Keep reverse adjacency in sync: add rel.from to incoming list for rel.to.
+        inner
+            .reverse_adjacency
+            .entry(rel.to.clone())
+            .or_default()
+            .push(rel.from.clone());
         inner.relationships.push(rel);
         Ok(())
     }
@@ -350,6 +356,10 @@ impl GraphStore {
         if let Some(adj) = inner.adjacency.get_mut(from) {
             adj.retain(|r| !(&r.to == to && r.kind == kind));
         }
+        // Keep reverse adjacency in sync.
+        if let Some(rev) = inner.reverse_adjacency.get_mut(to) {
+            rev.retain(|src| src != from);
+        }
 
         inner.cycle_cache = None;
         Ok(())
@@ -371,6 +381,11 @@ impl GraphStore {
         inner.adjacency.remove(id);
         for adj in inner.adjacency.values_mut() {
             adj.retain(|r| &r.to != id);
+        }
+        // Remove incoming edges for this entity from the reverse adjacency index.
+        inner.reverse_adjacency.remove(id);
+        for rev in inner.reverse_adjacency.values_mut() {
+            rev.retain(|src| src != id);
         }
         Ok(())
     }
@@ -1167,12 +1182,16 @@ impl GraphStore {
     /// a workflow or dependency graph.
     pub fn source_nodes(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "source_nodes");
-        let has_incoming: std::collections::HashSet<&EntityId> =
-            inner.relationships.iter().map(|r| &r.to).collect();
+        // Use reverse_adjacency: entities with no entry (or an empty entry) have no incoming edges.
         Ok(inner
             .entities
             .values()
-            .filter(|e| !has_incoming.contains(&e.id))
+            .filter(|e| {
+                inner
+                    .reverse_adjacency
+                    .get(&e.id)
+                    .map_or(true, |v| v.is_empty())
+            })
             .cloned()
             .collect())
     }
@@ -1180,15 +1199,21 @@ impl GraphStore {
     /// Return all entities that have no edges (neither incoming nor outgoing).
     pub fn isolates(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "isolates");
-        let mut has_edge: std::collections::HashSet<&EntityId> = std::collections::HashSet::new();
-        for rel in &inner.relationships {
-            has_edge.insert(&rel.from);
-            has_edge.insert(&rel.to);
-        }
+        // An entity is isolated if it has no outgoing edges (adjacency) and no
+        // incoming edges (reverse_adjacency).
         Ok(inner
             .entities
             .values()
-            .filter(|e| !has_edge.contains(&e.id))
+            .filter(|e| {
+                inner
+                    .adjacency
+                    .get(&e.id)
+                    .map_or(true, |v| v.is_empty())
+                    && inner
+                        .reverse_adjacency
+                        .get(&e.id)
+                        .map_or(true, |v| v.is_empty())
+            })
             .cloned()
             .collect())
     }
@@ -1203,10 +1228,13 @@ impl GraphStore {
 
     /// Return the number of incoming edges (in-degree) for `id`.
     ///
-    /// Scans all relationships in O(|E|).
+    /// Uses the reverse adjacency index for O(in-degree) lookup.
     pub fn in_degree(&self, id: &EntityId) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "in_degree");
-        Ok(inner.relationships.iter().filter(|r| &r.to == id).count())
+        Ok(inner
+            .reverse_adjacency
+            .get(id)
+            .map_or(0, |srcs| srcs.len()))
     }
 
     /// Return `true` if there is any path from `from` to `to`.
@@ -1530,6 +1558,68 @@ impl GraphStore {
         }
 
         Ok(new_store)
+    }
+
+    /// Return a new graph with all edge directions reversed.
+    ///
+    /// Every relationship `A → B` becomes `B → A` in the returned graph.
+    /// All entities are copied; relationship weights and kinds are preserved.
+    pub fn reverse(&self) -> Result<GraphStore, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "reverse");
+        let reversed = GraphStore::new();
+
+        // Copy all entities.
+        {
+            let mut r_inner = recover_lock(reversed.inner.lock(), "reverse:entities");
+            for entity in inner.entities.values() {
+                r_inner.adjacency.entry(entity.id.clone()).or_default();
+                r_inner.entities.insert(entity.id.clone(), entity.clone());
+            }
+        }
+
+        // Add reversed relationships.
+        for rel in &inner.relationships {
+            let flipped = Relationship {
+                from: rel.to.clone(),
+                to: rel.from.clone(),
+                kind: rel.kind.clone(),
+                weight: rel.weight,
+            };
+            let mut r_inner = recover_lock(reversed.inner.lock(), "reverse:rels");
+            r_inner
+                .adjacency
+                .entry(flipped.from.clone())
+                .or_default()
+                .push(flipped.clone());
+            r_inner.relationships.push(flipped);
+        }
+
+        Ok(reversed)
+    }
+
+    /// Return entities that are out-neighbors of **both** `a` and `b`.
+    ///
+    /// Useful for link-prediction and community detection heuristics.
+    /// Returns an empty `Vec` if either node has no outgoing edges.
+    pub fn common_neighbors(
+        &self,
+        a: &EntityId,
+        b: &EntityId,
+    ) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "common_neighbors");
+        let a_set: HashSet<&EntityId> = inner
+            .adjacency
+            .get(a)
+            .map_or(HashSet::new(), |rels| rels.iter().map(|r| &r.to).collect());
+        let b_set: HashSet<&EntityId> = inner
+            .adjacency
+            .get(b)
+            .map_or(HashSet::new(), |rels| rels.iter().map(|r| &r.to).collect());
+        let common: Vec<Entity> = a_set
+            .intersection(&b_set)
+            .filter_map(|id| inner.entities.get(*id).cloned())
+            .collect();
+        Ok(common)
     }
 }
 
@@ -2482,5 +2572,97 @@ mod tests {
         g.add_entity(Entity::new("solo", "Solo")).unwrap();
         assert_eq!(g.source_nodes().unwrap().len(), 1);
         assert_eq!(g.sink_nodes().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_reverse_flips_all_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "edge", 1.0)).unwrap();
+        let rev = g.reverse().unwrap();
+        // Original: a→b. Reversed: b→a.
+        assert_eq!(rev.entity_count().unwrap(), 2);
+        assert_eq!(rev.relationship_count().unwrap(), 1);
+        let b_id = EntityId::new("b");
+        let a_id = EntityId::new("a");
+        assert!(rev.relationship_exists(&b_id, &a_id, "edge").unwrap());
+    }
+
+    #[test]
+    fn test_reverse_empty_graph_stays_empty() {
+        let g = GraphStore::new();
+        let rev = g.reverse().unwrap();
+        assert_eq!(rev.entity_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_common_neighbors_finds_shared_targets() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_entity(Entity::new("shared", "S")).unwrap();
+        g.add_entity(Entity::new("only_a", "OA")).unwrap();
+        g.add_relationship(Relationship::new("a", "shared", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "shared", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "only_a", "e", 1.0)).unwrap();
+        let a_id = EntityId::new("a");
+        let b_id = EntityId::new("b");
+        let common = g.common_neighbors(&a_id, &b_id).unwrap();
+        assert_eq!(common.len(), 1);
+        assert_eq!(common[0].id.as_str(), "shared");
+    }
+
+    #[test]
+    fn test_common_neighbors_empty_when_none_shared() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_entity(Entity::new("x", "X")).unwrap();
+        g.add_entity(Entity::new("y", "Y")).unwrap();
+        g.add_relationship(Relationship::new("a", "x", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "y", "e", 1.0)).unwrap();
+        let a_id = EntityId::new("a");
+        let b_id = EntityId::new("b");
+        assert!(g.common_neighbors(&a_id, &b_id).unwrap().is_empty());
+    }
+
+    // ── Round 3: entity_ids, is_empty, clear ─────────────────────────────────
+
+    #[test]
+    fn test_graph_is_empty_initially() {
+        let g = GraphStore::new();
+        assert!(g.is_empty().unwrap());
+    }
+
+    #[test]
+    fn test_graph_is_empty_false_after_add() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        assert!(!g.is_empty().unwrap());
+    }
+
+    #[test]
+    fn test_graph_entity_ids_returns_all_ids() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("x", "X")).unwrap();
+        g.add_entity(Entity::new("y", "Y")).unwrap();
+        let ids = g.entity_ids().unwrap();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.iter().any(|id| id.0 == "x"));
+        assert!(ids.iter().any(|id| id.0 == "y"));
+    }
+
+    #[test]
+    fn test_graph_clear_removes_entities_and_relationships() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "links", 1.0))
+        .unwrap();
+        g.clear().unwrap();
+        assert_eq!(g.entity_count().unwrap(), 0);
+        assert_eq!(g.relationship_count().unwrap(), 0);
+        assert!(g.is_empty().unwrap());
     }
 }

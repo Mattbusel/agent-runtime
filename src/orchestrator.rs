@@ -902,6 +902,12 @@ impl Deduplicator {
         Ok(inner.in_flight.len())
     }
 
+    /// Return a snapshot of all keys currently in-flight.
+    pub fn in_flight_keys(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = timed_lock(&self.inner, "Deduplicator::in_flight_keys");
+        Ok(inner.in_flight.keys().cloned().collect())
+    }
+
     /// Return the number of keys currently in the completed result cache.
     ///
     /// Note: expired entries are only removed lazily on the next `check*` call.
@@ -1035,6 +1041,15 @@ impl BackpressureGuard {
         let mut depth = timed_lock(&self.inner, "BackpressureGuard::release");
         *depth = depth.saturating_sub(1);
         Ok(())
+    }
+
+    /// Reset the current depth to zero.
+    ///
+    /// Useful in tests or after a controlled shutdown when all in-flight
+    /// requests have been cancelled and the guard should start fresh.
+    pub fn reset(&self) {
+        let mut depth = timed_lock(&self.inner, "BackpressureGuard::reset");
+        *depth = 0;
     }
 
     /// Return `true` if the guard is at or over its hard capacity.
@@ -1920,5 +1935,58 @@ mod tests {
         let p = Pipeline::new()
             .with_error_handler(|_stage, _err| "recovered".to_string());
         assert!(p.has_error_handler());
+    }
+
+    // ── Round 3: new methods ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_with_base_delay_ms_changes_delay() {
+        let p = RetryPolicy::exponential(3, 100)
+            .unwrap()
+            .with_base_delay_ms(200)
+            .unwrap();
+        assert_eq!(p.delay_for(1), Duration::from_millis(200));
+    }
+
+    #[test]
+    fn test_retry_policy_with_base_delay_ms_rejects_zero() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(p.with_base_delay_ms(0).is_err());
+    }
+
+    #[test]
+    fn test_backpressure_reset_depth_clears_counter() {
+        let guard = BackpressureGuard::new(5).unwrap();
+        guard.try_acquire().unwrap();
+        guard.try_acquire().unwrap();
+        assert_eq!(guard.depth().unwrap(), 2);
+        guard.reset_depth().unwrap();
+        assert_eq!(guard.depth().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_pipeline_remove_stage_returns_true_if_found() {
+        let mut p = Pipeline::new()
+            .add_stage("a", |s| Ok(s))
+            .add_stage("b", |s| Ok(s));
+        assert!(p.remove_stage("a"));
+        assert_eq!(p.stage_count(), 1);
+        assert_eq!(p.stage_names(), vec!["b"]);
+    }
+
+    #[test]
+    fn test_pipeline_remove_stage_returns_false_if_missing() {
+        let mut p = Pipeline::new().add_stage("x", |s| Ok(s));
+        assert!(!p.remove_stage("nope"));
+        assert_eq!(p.stage_count(), 1);
+    }
+
+    #[test]
+    fn test_pipeline_clear_removes_all_stages() {
+        let mut p = Pipeline::new()
+            .add_stage("a", |s| Ok(s))
+            .add_stage("b", |s| Ok(s));
+        p.clear();
+        assert!(p.is_empty());
     }
 }

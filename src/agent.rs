@@ -861,6 +861,11 @@ impl ToolRegistry {
         self.tools.get(name)
     }
 
+    /// Return `true` if a tool with the given name is registered.
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+    }
+
     /// Remove a tool by name.  Returns `true` if the tool was registered.
     pub fn unregister(&mut self, name: &str) -> bool {
         self.tools.remove(name).is_some()
@@ -874,6 +879,11 @@ impl ToolRegistry {
     /// Return the number of registered tools.
     pub fn tool_count(&self) -> usize {
         self.tools.len()
+    }
+
+    /// Return `true` if no tools are registered.
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
     }
 
     /// Remove all registered tools.
@@ -2450,5 +2460,27 @@ mod tests {
         loop_.register_tool(ToolSpec::new("t1", "desc", |_| serde_json::json!("ok")));
         loop_.register_tool(ToolSpec::new("t2", "desc", |_| serde_json::json!("ok")));
         assert_eq!(loop_.tool_count(), 2);
+    }
+
+    // ── Round 3: AgentConfig::validate ───────────────────────────────────────
+
+    #[test]
+    fn test_agent_config_validate_ok_for_valid_config() {
+        let cfg = AgentConfig::new(5, "my-model");
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_agent_config_validate_err_for_zero_iterations() {
+        let cfg = AgentConfig::new(0, "my-model");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("max_iterations"));
+    }
+
+    #[test]
+    fn test_agent_config_validate_err_for_empty_model() {
+        let cfg = AgentConfig::new(5, "");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("model"));
     }
 }

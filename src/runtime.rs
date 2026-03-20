@@ -183,6 +183,16 @@ impl AgentSession {
             .map(|(i, _)| i)
     }
 
+    /// Return a reference to the last step, or `None` if there are no steps.
+    pub fn last_step(&self) -> Option<&ReActStep> {
+        self.steps.last()
+    }
+
+    /// Return a reference to the step at zero-based index `idx`, or `None` if out of bounds.
+    pub fn step_at(&self, idx: usize) -> Option<&ReActStep> {
+        self.steps.get(idx)
+    }
+
     /// Collect all thought strings from every step, in order.
     pub fn all_thoughts(&self) -> Vec<&str> {
         self.steps.iter().map(|s| s.thought.as_str()).collect()
@@ -1747,5 +1757,91 @@ mod tests {
         };
         assert_eq!(session.slowest_step_index(), None);
         assert_eq!(session.fastest_step_index(), None);
+    }
+
+    #[test]
+    fn test_last_step_returns_last() {
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![
+                ReActStep::new("t1", "a1", "o1"),
+                ReActStep::new("t2", "FINAL_ANSWER done", ""),
+            ],
+            memory_hits: 0,
+            graph_lookups: 0,
+            duration_ms: 0,
+            checkpoint_errors: vec![],
+        };
+        assert_eq!(session.last_step().map(|s| s.action.as_str()), Some("FINAL_ANSWER done"));
+    }
+
+    #[test]
+    fn test_last_step_none_when_empty() {
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![],
+            memory_hits: 0,
+            graph_lookups: 0,
+            duration_ms: 0,
+            checkpoint_errors: vec![],
+        };
+        assert!(session.last_step().is_none());
+    }
+
+    #[test]
+    fn test_step_at_returns_correct_step() {
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![
+                ReActStep::new("t0", "a0", "o0"),
+                ReActStep::new("t1", "a1", "o1"),
+            ],
+            memory_hits: 0,
+            graph_lookups: 0,
+            duration_ms: 0,
+            checkpoint_errors: vec![],
+        };
+        assert_eq!(session.step_at(1).map(|s| s.thought.as_str()), Some("t1"));
+        assert!(session.step_at(99).is_none());
+    }
+
+    // ── Round 3: failed_steps ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_failed_steps_returns_steps_with_error_observation() {
+        use crate::agent::ReActStep;
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![
+                ReActStep::new("t", "tool_a {}", r#"{"error":"bad input","ok":false}"#),
+                ReActStep::new("t", "tool_b {}", r#"{"result":"ok","ok":true}"#),
+            ],
+            memory_hits: 0,
+            graph_lookups: 0,
+            duration_ms: 0,
+            checkpoint_errors: vec![],
+        };
+        let failed = session.failed_steps();
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].observation.contains("bad input"));
+    }
+
+    #[test]
+    fn test_failed_steps_empty_when_no_errors() {
+        use crate::agent::ReActStep;
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![ReActStep::new("t", "FINAL_ANSWER done", "")],
+            memory_hits: 0,
+            graph_lookups: 0,
+            duration_ms: 0,
+            checkpoint_errors: vec![],
+        };
+        assert!(session.failed_steps().is_empty());
     }
 }

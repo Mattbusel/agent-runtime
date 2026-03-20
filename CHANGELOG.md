@@ -11,6 +11,49 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.11.0] - 2026-03-20
+
+### Added
+
+- **`SemanticStore::list_keys`** (`memory.rs`) — return all stored entry keys in
+  insertion order; complements the existing `list_tags()`.
+- **`SemanticStore::update_tags`** (`memory.rs`) — update the tag list for an
+  existing entry in-place; returns `Ok(true/false)` like `update()`.
+- **`EpisodicStore::recall_since`** (`memory.rs`) — recall episodes whose
+  `timestamp` is at or after a `chrono::DateTime<Utc>` cutoff, ordered by
+  descending importance; `limit = 0` returns all matching items.
+- **`EpisodicStore::update_content`** (`memory.rs`) — update the `content` field
+  of an existing episode by `MemoryId`; returns `Ok(true/false)`.
+- **`DecayPolicy::half_life_hours`** (`memory.rs`) — read accessor for the
+  previously private `half_life_hours` field.
+- **`MemoryItem` `Display` impl** (`memory.rs`) — one-liner
+  `[id] importance=X.XX recalls=N content="..."` for debug output and logging.
+- **`WorkingMemory::capacity`** (`memory.rs`) — returns the maximum number of
+  entries set at construction time; completes the capacity-introspection surface.
+- **`RetryPolicy::with_base_delay_ms`** (`orchestrator.rs`) — fluent builder to
+  override the base retry delay after construction; mirrors `with_max_attempts`.
+- **`BackpressureGuard::reset_depth`** (`orchestrator.rs`) — force the in-flight
+  counter to zero; useful for test teardown when slots were never released.
+- **`Pipeline::remove_stage`** (`orchestrator.rs`) — remove the first stage with
+  a matching name; returns `true` if found.
+- **`Pipeline::clear`** (`orchestrator.rs`) — remove all stages while preserving
+  the error handler.
+- **`GraphStore::entity_ids`** (`graph.rs`) — return all entity IDs without
+  allocating full `Entity` objects; cheaper than `all_entities()` when only IDs
+  are needed.
+- **`GraphStore::is_empty`** (`graph.rs`) — `true` when the graph contains no
+  entities.
+- **`GraphStore::clear`** (`graph.rs`) — remove all entities, relationships, and
+  the adjacency index in one call; resets the cycle-detection cache.
+- **`AgentSession::failed_steps`** (`runtime.rs`) — return references to steps
+  whose observation starts with `{"error"` or contains `"error"` (case-insensitive);
+  useful for post-run diagnostics.
+- **`AgentConfig::validate`** (`agent.rs`) — validate configuration and return
+  `Err(AgentRuntimeError::AgentLoop)` with a descriptive message; a structured
+  alternative to the existing `is_valid() -> bool`.
+
+---
+
 ## [1.10.0] - 2026-03-20
 
 ### Added

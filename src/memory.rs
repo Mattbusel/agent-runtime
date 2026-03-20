@@ -1046,6 +1046,22 @@ impl EpisodicStore {
             .map_or(0, |items| items.iter().map(|i| i.recall_count).sum()))
     }
 
+    /// Return summary statistics (count, min, max, mean importance) for `agent_id`.
+    ///
+    /// Returns `(0, 0.0, 0.0, 0.0)` if the agent has no stored episodes.
+    pub fn importance_stats(&self, agent_id: &AgentId) -> Result<(usize, f32, f32, f32), AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::importance_stats");
+        let items = inner.items.get(agent_id).map(|v| v.as_slice()).unwrap_or(&[]);
+        if items.is_empty() {
+            return Ok((0, 0.0, 0.0, 0.0));
+        }
+        let count = items.len();
+        let min = items.iter().map(|i| i.importance).fold(f32::MAX, f32::min);
+        let max = items.iter().map(|i| i.importance).fold(f32::MIN, f32::max);
+        let mean = items.iter().map(|i| i.importance).sum::<f32>() / count as f32;
+        Ok((count, min, max, mean))
+    }
+
     /// Return the total number of stored episodes across all agents.
     pub fn len(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "EpisodicStore::len");
@@ -1443,6 +1459,15 @@ impl SemanticStore {
         Ok(inner.entries.iter().map(|e| e.key.clone()).collect())
     }
 
+    /// Return all stored entry keys in insertion order.
+    ///
+    /// Alias for [`list_keys`] using more idiomatic naming.
+    ///
+    /// [`list_keys`]: SemanticStore::list_keys
+    pub fn keys(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        self.list_keys()
+    }
+
     /// Update the tags of the first entry whose key matches `key`.
     ///
     /// Returns `Ok(true)` if found and updated, `Ok(false)` if not found.
@@ -1703,6 +1728,16 @@ impl WorkingMemory {
         inner.map.clear();
         inner.order.clear();
         Ok(pairs)
+    }
+
+    /// Clone all current entries into a `HashMap<String, String>`.
+    ///
+    /// Unlike [`drain`], this leaves the working memory unchanged.
+    ///
+    /// [`drain`]: WorkingMemory::drain
+    pub fn snapshot(&self) -> Result<std::collections::HashMap<String, String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::snapshot");
+        Ok(inner.map.clone())
     }
 
     /// Return the current number of entries.
@@ -2966,5 +3001,148 @@ mod tests {
     fn test_working_memory_rename_missing_returns_false() {
         let wm = WorkingMemory::new(10).unwrap();
         assert!(!wm.rename("nope", "other").unwrap());
+    }
+
+    #[test]
+    fn test_episodic_importance_stats_basic() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("ag");
+        store.add_episode(agent.clone(), "a", 0.2).unwrap();
+        store.add_episode(agent.clone(), "b", 0.6).unwrap();
+        store.add_episode(agent.clone(), "c", 1.0).unwrap();
+        let (count, min, max, mean) = store.importance_stats(&agent).unwrap();
+        assert_eq!(count, 3);
+        assert!((min - 0.2).abs() < 1e-5);
+        assert!((max - 1.0).abs() < 1e-5);
+        assert!((mean - 0.6).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_episodic_importance_stats_empty_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("nobody");
+        let (count, min, max, mean) = store.importance_stats(&agent).unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(min, 0.0);
+        assert_eq!(max, 0.0);
+        assert_eq!(mean, 0.0);
+    }
+
+    #[test]
+    fn test_semantic_store_keys_returns_stored_keys() {
+        let store = SemanticStore::new();
+        store.store("alpha", "v1", vec![]).unwrap();
+        store.store("beta", "v2", vec![]).unwrap();
+        let keys = store.keys().unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&"alpha".to_string()));
+        assert!(keys.contains(&"beta".to_string()));
+    }
+
+    #[test]
+    fn test_working_memory_snapshot_clones_contents() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("x", "1".to_string()).unwrap();
+        wm.set("y", "2".to_string()).unwrap();
+        let snap = wm.snapshot().unwrap();
+        assert_eq!(snap.get("x").map(|s| s.as_str()), Some("1"));
+        assert_eq!(snap.get("y").map(|s| s.as_str()), Some("2"));
+        // Memory still has items
+        assert_eq!(wm.len().unwrap(), 2);
+    }
+
+    // ── Round 3: new methods ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_memory_item_display_includes_content() {
+        let agent = AgentId::new("a");
+        let item = MemoryItem::new(agent, "hello world", 0.75, vec![]);
+        let s = format!("{item}");
+        assert!(s.contains("hello world"), "Display should include content");
+        assert!(s.contains("0.75"), "Display should include importance");
+    }
+
+    #[test]
+    fn test_decay_policy_half_life_hours_accessor() {
+        let policy = DecayPolicy::exponential(12.5).unwrap();
+        assert!((policy.half_life_hours() - 12.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_semantic_store_list_keys_returns_all_keys() {
+        let store = SemanticStore::new();
+        store.store("k1", "v1", vec![]).unwrap();
+        store.store("k2", "v2", vec![]).unwrap();
+        let keys = store.list_keys().unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&"k1".to_string()));
+        assert!(keys.contains(&"k2".to_string()));
+    }
+
+    #[test]
+    fn test_semantic_store_update_tags_returns_true_on_found() {
+        let store = SemanticStore::new();
+        store.store("k", "v", vec!["old".into()]).unwrap();
+        let updated = store.update_tags("k", vec!["new".into()]).unwrap();
+        assert!(updated);
+        let (_, tags) = store.retrieve_by_key("k").unwrap().unwrap();
+        assert_eq!(tags, vec!["new".to_string()]);
+    }
+
+    #[test]
+    fn test_semantic_store_update_tags_returns_false_on_missing() {
+        let store = SemanticStore::new();
+        assert!(!store.update_tags("missing", vec![]).unwrap());
+    }
+
+    #[test]
+    fn test_episodic_store_recall_since_filters_old() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let old_ts = Utc::now() - chrono::Duration::hours(2);
+        store.add_episode_at(agent.clone(), "old", 0.9, old_ts).unwrap();
+        store.add_episode(agent.clone(), "new", 0.5).unwrap();
+
+        let cutoff = Utc::now() - chrono::Duration::minutes(30);
+        let items = store.recall_since(&agent, cutoff, 0).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].content, "new");
+    }
+
+    #[test]
+    fn test_episodic_store_recall_since_limit_respected() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        for i in 0..5 {
+            store.add_episode(agent.clone(), format!("item {i}"), 0.5).unwrap();
+        }
+        let cutoff = Utc::now() - chrono::Duration::hours(1);
+        let items = store.recall_since(&agent, cutoff, 2).unwrap();
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn test_episodic_store_update_content_returns_true_on_found() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let id = store.add_episode(agent.clone(), "original", 0.5).unwrap();
+        let updated = store.update_content(&agent, &id, "updated").unwrap();
+        assert!(updated);
+        let item = store.recall_by_id(&agent, &id).unwrap().unwrap();
+        assert_eq!(item.content, "updated");
+    }
+
+    #[test]
+    fn test_episodic_store_update_content_returns_false_on_missing() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let fake_id = MemoryId::new("does-not-exist");
+        assert!(!store.update_content(&agent, &fake_id, "x").unwrap());
+    }
+
+    #[test]
+    fn test_working_memory_capacity_matches_constructor() {
+        let wm = WorkingMemory::new(7).unwrap();
+        assert_eq!(wm.capacity(), 7);
     }
 }
