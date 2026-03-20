@@ -213,6 +213,9 @@ impl MetricsSnapshot {
             memory_recall_count: after
                 .memory_recall_count
                 .saturating_sub(before.memory_recall_count),
+            checkpoint_errors: after
+                .checkpoint_errors
+                .saturating_sub(before.checkpoint_errors),
             per_tool_calls: {
                 let mut m = after.per_tool_calls.clone();
                 for (k, v) in &before.per_tool_calls {
@@ -240,6 +243,22 @@ impl MetricsSnapshot {
             per_agent_tool_failures: after.per_agent_tool_failures.clone(),
         }
     }
+
+    /// Serialize the snapshot to a `serde_json::Value` for logging or export.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "active_sessions": self.active_sessions,
+            "total_sessions": self.total_sessions,
+            "total_steps": self.total_steps,
+            "total_tool_calls": self.total_tool_calls,
+            "failed_tool_calls": self.failed_tool_calls,
+            "backpressure_shed_count": self.backpressure_shed_count,
+            "memory_recall_count": self.memory_recall_count,
+            "step_latency_mean_ms": self.step_latency_mean_ms,
+            "per_tool_calls": self.per_tool_calls,
+            "per_tool_failures": self.per_tool_failures,
+        })
+    }
 }
 
 impl std::fmt::Display for MetricsSnapshot {
@@ -248,7 +267,7 @@ impl std::fmt::Display for MetricsSnapshot {
             f,
             "MetricsSnapshot {{ sessions: active={} total={}, steps={}, \
              tool_calls={} (failed={}), backpressure_shed={}, \
-             memory_recalls={}, latency_mean={:.1}ms }}",
+             memory_recalls={}, checkpoint_errors={}, latency_mean={:.1}ms }}",
             self.active_sessions,
             self.total_sessions,
             self.total_steps,
@@ -256,6 +275,7 @@ impl std::fmt::Display for MetricsSnapshot {
             self.failed_tool_calls,
             self.backpressure_shed_count,
             self.memory_recall_count,
+            self.checkpoint_errors,
             self.step_latency_mean_ms,
         )
     }
@@ -412,6 +432,11 @@ impl RuntimeMetrics {
         self.memory_recall_count.load(Ordering::Relaxed)
     }
 
+    /// Return the total number of checkpoint failures encountered during `run_agent`.
+    pub fn checkpoint_errors(&self) -> u64 {
+        self.checkpoint_errors.load(Ordering::Relaxed)
+    }
+
     /// Increment the call counter for `tool_name` by 1.
     ///
     /// Called automatically by the agent loop when `with_metrics` is configured.
@@ -517,6 +542,7 @@ impl RuntimeMetrics {
             failed_tool_calls: self.failed_tool_calls.load(Ordering::Relaxed),
             backpressure_shed_count: self.backpressure_shed_count.load(Ordering::Relaxed),
             memory_recall_count: self.memory_recall_count.load(Ordering::Relaxed),
+            checkpoint_errors: self.checkpoint_errors.load(Ordering::Relaxed),
             per_tool_calls,
             per_tool_failures,
             step_latency_buckets: self.step_latency.buckets(),
@@ -542,6 +568,7 @@ impl RuntimeMetrics {
         self.failed_tool_calls.store(0, Ordering::Relaxed);
         self.backpressure_shed_count.store(0, Ordering::Relaxed);
         self.memory_recall_count.store(0, Ordering::Relaxed);
+        self.checkpoint_errors.store(0, Ordering::Relaxed);
         if let Ok(mut maps) = self.per_tool.lock() {
             maps.calls.clear();
             maps.failures.clear();

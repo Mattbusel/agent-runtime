@@ -174,6 +174,11 @@ pub struct AgentConfig {
     /// total length below this limit.  This prevents silent context-window
     /// overruns in long-running agents.  `None` (default) means no limit.
     pub max_context_chars: Option<usize>,
+    /// Stop sequences passed to the inference function.
+    ///
+    /// The model stops generating when it produces any of these strings.
+    /// An empty `Vec` (default) means no stop sequences.
+    pub stop_sequences: Vec<String>,
 }
 
 impl AgentConfig {
@@ -190,6 +195,7 @@ impl AgentConfig {
             max_tokens: None,
             request_timeout: None,
             max_context_chars: None,
+            stop_sequences: vec![],
         }
     }
 
@@ -279,6 +285,15 @@ impl AgentConfig {
     /// Change the model used for completions.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
+        self
+    }
+
+    /// Set stop sequences for inference requests.
+    ///
+    /// The model will stop generating when it produces any of these strings.
+    /// Defaults to an empty list (no stop sequences).
+    pub fn with_stop_sequences(mut self, sequences: Vec<String>) -> Self {
+        self.stop_sequences = sequences;
         self
     }
 }
@@ -774,6 +789,11 @@ impl ToolRegistry {
         self.tools.get(name)
     }
 
+    /// Remove a tool by name.  Returns `true` if the tool was registered.
+    pub fn unregister(&mut self, name: &str) -> bool {
+        self.tools.remove(name).is_some()
+    }
+
     /// Return the list of registered tool names.
     pub fn tool_names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()
@@ -790,6 +810,18 @@ impl ToolRegistry {
     /// agent reconfiguration.
     pub fn clear(&mut self) {
         self.tools.clear();
+    }
+
+    /// Remove a tool from the registry by name.
+    ///
+    /// Returns `Some(spec)` if the tool was registered, `None` if not found.
+    pub fn remove(&mut self, name: &str) -> Option<ToolSpec> {
+        self.tools.remove(name)
+    }
+
+    /// Return `true` if a tool with the given name is registered.
+    pub fn contains(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
     }
 }
 
@@ -947,6 +979,11 @@ impl ReActLoop {
     /// Return a read-only reference to the tool registry.
     pub fn registry(&self) -> &ToolRegistry {
         &self.registry
+    }
+
+    /// Remove a registered tool by name.  Returns `true` if the tool was found.
+    pub fn unregister_tool(&mut self, name: &str) -> bool {
+        self.registry.unregister(name)
     }
 
     /// Register a tool that the agent loop can invoke.

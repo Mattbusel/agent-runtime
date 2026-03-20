@@ -11,6 +11,34 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.8.0] - 2026-03-20
+
+### Added
+
+- **`EpisodicStore::recall_all`** (`memory.rs`) — retrieve every episode for an
+  agent without a limit, useful for export and migration.
+- **`SemanticStore::update_if_exists`** (`memory.rs`) — update a fact value only
+  when the key is present; returns `Ok(false)` rather than inserting a new entry.
+- **`MetricsSnapshot::to_json`** (`metrics.rs`) — serialize the snapshot to a
+  `serde_json::Value` for structured log sinks and dashboards.
+- **`RuntimeMetrics::checkpoint_errors`** (`metrics.rs`) — atomic counter for
+  persistence checkpoint failures, exposed alongside the existing metric accessors.
+- **`MetricsSnapshot::checkpoint_errors`** field and delta calculation
+  (`metrics.rs`) — included in `delta()` comparisons and `Display` output.
+- **`AgentConfig::stop_sequences`** field + **`AgentConfig::with_stop_sequences`**
+  (`agent.rs`) — pass stop sequences through to the provider on every call.
+- **`AnthropicProvider::with_stop_sequences`** /
+  **`OpenAiProvider::with_stop_sequences`** (`providers.rs`) — configure provider-
+  level stop sequences forwarded in the API request body.
+- **`ToolRegistry::remove`** / **`ToolRegistry::contains`** (`agent.rs`) —
+  unregister a tool by name and check registration status.
+- **`ToolRegistry::unregister`** (`agent.rs`) — alias for `remove` that returns
+  `bool` instead of `Option<ToolSpec>`.
+- **`ReActLoop::unregister_tool`** (`agent.rs`) — convenience wrapper that
+  delegates to the inner registry's `unregister`.
+
+---
+
 ## [1.7.0] - 2026-03-20
 
 ### Added

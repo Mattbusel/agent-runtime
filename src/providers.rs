@@ -34,6 +34,9 @@ pub struct CompletionOptions<'a> {
     pub temperature: Option<f32>,
     /// Per-request wall-clock timeout.
     pub timeout: Option<std::time::Duration>,
+    /// Stop sequences: the model will stop generating when it produces any of
+    /// these strings.  An empty slice means no stop sequences.
+    pub stop_sequences: Vec<String>,
 }
 
 impl<'a> CompletionOptions<'a> {
@@ -44,6 +47,7 @@ impl<'a> CompletionOptions<'a> {
             max_tokens: None,
             temperature: None,
             timeout: None,
+            stop_sequences: vec![],
         }
     }
 
@@ -62,6 +66,12 @@ impl<'a> CompletionOptions<'a> {
     /// Set the per-request timeout.
     pub fn with_timeout(mut self, d: std::time::Duration) -> Self {
         self.timeout = Some(d);
+        self
+    }
+
+    /// Set stop sequences for this request.
+    pub fn with_stop_sequences(mut self, sequences: Vec<String>) -> Self {
+        self.stop_sequences = sequences;
         self
     }
 }

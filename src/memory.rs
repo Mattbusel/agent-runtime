@@ -26,6 +26,17 @@ use uuid::Uuid;
 
 // ── Cosine similarity ─────────────────────────────────────────────────────────
 
+/// Normalize `v` to unit length in-place.  Does nothing if the norm is below
+/// `f32::EPSILON` (zero or near-zero vector).
+fn normalize_in_place(v: &mut Vec<f32>) {
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > f32::EPSILON {
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+}
+
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -1027,6 +1038,16 @@ impl EpisodicStore {
         Ok(items[start..].iter().rev().cloned().collect())
     }
 
+    /// Retrieve all stored episodes for `agent_id` without any limit.
+    ///
+    /// Returns items in descending importance order, consistent with [`recall`].
+    /// For large stores, prefer [`recall`] with an explicit limit.
+    ///
+    /// [`recall`]: EpisodicStore::recall
+    pub fn recall_all(&self, agent_id: &AgentId) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        self.recall(agent_id, usize::MAX)
+    }
+
     /// Return the total number of stored episodes across all agents.
     pub fn len(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "EpisodicStore::len");
@@ -1300,9 +1321,9 @@ impl SemanticStore {
         };
         if top_k > 0 && top_k < scored.len() {
             scored.select_nth_unstable_by(top_k - 1, cmp);
-            scored[..top_k].sort_by(cmp);
+            scored[..top_k].sort_unstable_by(cmp);
         } else {
-            scored.sort_by(cmp);
+            scored.sort_unstable_by(cmp);
         }
         scored.truncate(top_k);
         Ok(scored)
@@ -1486,6 +1507,23 @@ impl WorkingMemory {
             inner.map.insert(key, value);
         }
         Ok(())
+    }
+
+    /// Update the value of an existing key without inserting if absent.
+    ///
+    /// Returns `Ok(true)` if the key existed and was updated, `Ok(false)` if not present.
+    pub fn update_if_exists(
+        &self,
+        key: &str,
+        value: impl Into<String>,
+    ) -> Result<bool, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "WorkingMemory::update_if_exists");
+        if let Some(v) = inner.map.get_mut(key) {
+            *v = value.into();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Return `true` if a value is stored under `key`.
