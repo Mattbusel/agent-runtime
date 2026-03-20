@@ -3735,6 +3735,23 @@ impl GraphStore {
         Ok(inner.adjacency.values().any(|rels| !rels.is_empty()))
     }
 
+    /// Return the average weight across all relationships in the graph.
+    ///
+    /// Returns `0.0` for a graph with no relationships.
+    pub fn avg_edge_weight(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::avg_edge_weight");
+        let rels: Vec<&crate::graph::Relationship> = inner
+            .adjacency
+            .values()
+            .flat_map(|v| v.iter())
+            .collect();
+        if rels.is_empty() {
+            return Ok(0.0);
+        }
+        let total: f64 = rels.iter().map(|r| r.weight as f64).sum();
+        Ok(total / rels.len() as f64)
+    }
+
     /// Return all entities that have at least one **incoming** relationship
     /// (in-degree ≥ 1).
     ///
@@ -3925,6 +3942,16 @@ impl GraphStore {
             .values()
             .flat_map(|rels| rels.iter())
             .any(|r| r.kind == kind))
+    }
+
+    /// Return `true` if every entity in the graph has at least one entry in
+    /// its `properties` map.
+    ///
+    /// Returns `true` vacuously when the graph contains no entities.
+    pub fn all_entities_have_properties(&self) -> Result<bool, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "GraphStore::all_entities_have_properties");
+        Ok(inner.entities.values().all(|e| !e.properties.is_empty()))
     }
 
 }
@@ -8281,5 +8308,31 @@ mod tests {
         g.add_entity(Entity::new("y", "N")).unwrap();
         g.add_relationship(Relationship::new("x", "y", "link", 1.0)).unwrap();
         assert_eq!(g.cycle_count().unwrap(), 0);
+    }
+
+    // ── Round 63: entities_with_property_key, entity_properties_count ────────
+
+    #[test]
+    fn test_entities_with_property_key_returns_matching_entities() {
+        let g = GraphStore::new();
+        let e1 = Entity::new("e1", "N").with_property("color", serde_json::json!("red"));
+        let e2 = Entity::new("e2", "N");
+        g.add_entity(e1).unwrap();
+        g.add_entity(e2).unwrap();
+        let result = g.entities_with_property_key("color").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id.0, "e1");
+    }
+
+    #[test]
+    fn test_entity_properties_count_returns_count_of_matching_entities() {
+        let g = GraphStore::new();
+        let e1 = Entity::new("p1", "N").with_property("tag", serde_json::json!("x"));
+        let e2 = Entity::new("p2", "N").with_property("tag", serde_json::json!("y"));
+        let e3 = Entity::new("p3", "N");
+        g.add_entity(e1).unwrap();
+        g.add_entity(e2).unwrap();
+        g.add_entity(e3).unwrap();
+        assert_eq!(g.entity_properties_count("tag").unwrap(), 2);
     }
 }

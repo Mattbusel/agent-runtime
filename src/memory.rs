@@ -2594,6 +2594,50 @@ impl EpisodicStore {
             }))
     }
 
+    /// Return the most recently stored episode for `agent_id`.
+    ///
+    /// Uses `MemoryItem::timestamp` to determine recency.  Returns `None` for
+    /// unknown agents.
+    pub fn episode_most_recent(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episode_most_recent");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|items| items.iter().max_by_key(|m| m.timestamp))
+            .cloned())
+    }
+
+    /// Return all episodes for `agent_id` whose importance is in `[lo, hi]`
+    /// (inclusive), sorted by importance ascending.
+    ///
+    /// Returns an empty `Vec` for unknown agents.
+    pub fn episodes_by_importance_range(
+        &self,
+        agent_id: &AgentId,
+        lo: f32,
+        hi: f32,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "EpisodicStore::episodes_by_importance_range");
+        let mut items: Vec<MemoryItem> = inner
+            .items
+            .get(agent_id)
+            .map_or_else(Vec::new, |items| {
+                items
+                    .iter()
+                    .filter(|m| m.importance >= lo && m.importance <= hi)
+                    .cloned()
+                    .collect()
+            });
+        items.sort_unstable_by(|a, b| {
+            a.importance.partial_cmp(&b.importance).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(items)
+    }
+
     /// Return the number of episodes for `agent_id` whose timestamp falls
     /// within `[start, end]` (inclusive on both ends).
     ///
@@ -4359,6 +4403,14 @@ impl WorkingMemory {
             .collect();
         pairs.sort_unstable_by(|(a, _), (b, _)| a.len().cmp(&b.len()).then(a.cmp(b)));
         Ok(pairs)
+    }
+
+    /// Return the maximum byte length among all stored values.
+    ///
+    /// Returns `0` for an empty store.
+    pub fn value_bytes_max(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::value_bytes_max");
+        Ok(inner.map.values().map(|v| v.len()).max().unwrap_or(0))
     }
 
     /// Return all keys whose string representation ends with `suffix`,
@@ -10994,6 +11046,61 @@ mod tests {
         assert!(wm.entries_sorted_by_key_length().unwrap().is_empty());
     }
 
+    // ── Round 63: episode_most_recent, episodes_by_importance_range, value_bytes_max ──
+
+    #[test]
+    fn test_episode_most_recent_returns_newest() {
+        use std::thread::sleep;
+        use std::time::Duration;
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r63-recent");
+        store.add_episode(agent.clone(), "first", 0.5).unwrap();
+        sleep(Duration::from_millis(2));
+        store.add_episode(agent.clone(), "latest", 0.8).unwrap();
+        let recent = store.episode_most_recent(&agent).unwrap();
+        assert_eq!(recent.map(|m| m.content), Some("latest".to_string()));
+    }
+
+    #[test]
+    fn test_episode_most_recent_none_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r63-recent-unknown");
+        assert!(store.episode_most_recent(&agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_episodes_by_importance_range_correct() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r63-range");
+        store.add_episode(agent.clone(), "low", 0.1).unwrap();
+        store.add_episode(agent.clone(), "mid", 0.5).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        let range = store.episodes_by_importance_range(&agent, 0.3, 0.7).unwrap();
+        assert_eq!(range.len(), 1);
+        assert_eq!(range[0].content, "mid");
+    }
+
+    #[test]
+    fn test_episodes_by_importance_range_empty_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r63-range-unknown");
+        assert!(store.episodes_by_importance_range(&agent, 0.0, 1.0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_value_bytes_max_returns_max() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "short").unwrap();
+        wm.set("k2", "much longer value").unwrap();
+        assert_eq!(wm.value_bytes_max().unwrap(), "much longer value".len());
+    }
+
+    #[test]
+    fn test_value_bytes_max_zero_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.value_bytes_max().unwrap(), 0);
+    }
+
     #[test]
     fn test_total_content_words_returns_total_word_count() {
         let store = EpisodicStore::new();
@@ -11258,5 +11365,44 @@ mod tests {
         let wm = WorkingMemory::new(10).unwrap();
         wm.set("long_key", "v").unwrap();
         assert_eq!(wm.count_keys_below_bytes(1).unwrap(), 0);
+    }
+
+    // ── Round 63: min_episode_count, values_with_prefix ──────────────────────
+
+    #[test]
+    fn test_min_episode_count_returns_agent_with_fewest() {
+        let store = EpisodicStore::new();
+        let a = AgentId::new("r63-min-a");
+        let b = AgentId::new("r63-min-b");
+        store.add_episode_with_tags(a.clone(), "x", 0.5, vec![]).unwrap();
+        store.add_episode_with_tags(a.clone(), "y", 0.5, vec![]).unwrap();
+        store.add_episode_with_tags(b.clone(), "z", 0.5, vec![]).unwrap();
+        let result = store.min_episode_count().unwrap().unwrap();
+        assert_eq!(result.0, b);
+        assert_eq!(result.1, 1);
+    }
+
+    #[test]
+    fn test_min_episode_count_none_for_empty_store() {
+        let store = EpisodicStore::new();
+        assert!(store.min_episode_count().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_values_with_prefix_returns_matching_values() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "prefix:hello").unwrap();
+        wm.set("k2", "other:world").unwrap();
+        wm.set("k3", "prefix:bye").unwrap();
+        let mut vals = wm.values_with_prefix("prefix:").unwrap();
+        vals.sort();
+        assert_eq!(vals, vec!["prefix:bye".to_string(), "prefix:hello".to_string()]);
+    }
+
+    #[test]
+    fn test_values_with_prefix_empty_when_none_match() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "hello").unwrap();
+        assert!(wm.values_with_prefix("xyz:").unwrap().is_empty());
     }
 }

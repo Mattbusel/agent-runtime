@@ -1759,6 +1759,31 @@ impl AgentSession {
             .sum()
     }
 
+    /// Return the count of steps whose `action` field ends with `suffix`.
+    ///
+    /// Returns `0` for an empty session or when no step qualifies.
+    pub fn action_ends_with_count(&self, suffix: &str) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| s.action.ends_with(suffix))
+            .count()
+    }
+
+    /// Return the average word count per observation field across all steps.
+    ///
+    /// Returns `0.0` for an empty session.
+    pub fn avg_observation_words(&self) -> f64 {
+        if self.steps.is_empty() {
+            return 0.0;
+        }
+        let total: usize = self
+            .steps
+            .iter()
+            .map(|s| s.observation.split_whitespace().count())
+            .sum();
+        total as f64 / self.steps.len() as f64
+    }
+
     /// Return the statistical variance of thought byte lengths across all steps.
     ///
     /// Returns `0.0` for a session with fewer than two steps.
@@ -7546,6 +7571,42 @@ mod tests {
         assert_eq!(session.observation_word_count_total(), 0);
     }
 
+    // ── Round 63: action_ends_with_count, avg_observation_words ──────────────
+
+    #[test]
+    fn test_action_ends_with_count_correct() {
+        let steps = vec![
+            make_step("t", "search.", "o"),
+            make_step("t", "browse.", "o"),
+            make_step("t", "calculate", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.action_ends_with_count("."), 2);
+    }
+
+    #[test]
+    fn test_action_ends_with_count_zero_when_none_match() {
+        let steps = vec![make_step("t", "nope", "o")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.action_ends_with_count("."), 0);
+    }
+
+    #[test]
+    fn test_avg_observation_words_correct() {
+        let steps = vec![
+            make_step("t", "a", "one two"),    // 2
+            make_step("t", "a", "three four five"), // 3
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.avg_observation_words() - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_observation_words_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.avg_observation_words(), 0.0);
+    }
+
     // ── Round 58: steps_matching_thought, median_observation_chars, cumulative_thought_chars, count_steps_with_thought_containing ──
 
     #[test]
@@ -7917,5 +7978,53 @@ mod tests {
         ];
         let session = make_session(steps, 0);
         assert_eq!(session.steps_with_thought_longer_than(5).len(), 1);
+    }
+
+    // ── Round 63: steps_with_action_containing, observation_max_chars, observation_min_chars ──
+
+    #[test]
+    fn test_steps_with_action_containing_returns_matching_steps() {
+        let steps = vec![
+            make_step("t", "search(foo)", "o"),
+            make_step("t", "read(file)", "o"),
+            make_step("t", "search(bar)", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_with_action_containing("search").len(), 2);
+    }
+
+    #[test]
+    fn test_steps_with_action_containing_empty_when_no_match() {
+        let steps = vec![make_step("t", "read(file)", "o")];
+        let session = make_session(steps, 0);
+        assert!(session.steps_with_action_containing("search").is_empty());
+    }
+
+    #[test]
+    fn test_observation_max_chars_returns_longest() {
+        let steps = vec![
+            make_step("t", "a", "hi"),
+            make_step("t", "a", "hello world"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.observation_max_chars(), 11);
+    }
+
+    #[test]
+    fn test_observation_min_chars_skips_empty_observations() {
+        let steps = vec![
+            make_step("t", "a", ""),
+            make_step("t", "a", "abcd"),
+            make_step("t", "a", "ab"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.observation_min_chars(), 2);
+    }
+
+    #[test]
+    fn test_observation_min_chars_zero_when_all_empty() {
+        let steps = vec![make_step("t", "a", "")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.observation_min_chars(), 0);
     }
 }

@@ -1765,6 +1765,31 @@ impl RuntimeMetrics {
         failures as f64 / calls as f64
     }
 
+    /// Return the total number of checkpoint errors recorded since the runtime
+    /// started.
+    pub fn checkpoint_errors_count(&self) -> u64 {
+        self.checkpoint_errors.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Return the names of agents that have at least one per-agent tool
+    /// failure recorded.
+    pub fn agents_with_failures(&self) -> Vec<String> {
+        self.per_agent_tool_failures_snapshot()
+            .into_iter()
+            .filter(|(_, tools)| tools.values().any(|&c| c > 0))
+            .map(|(agent_id, _)| agent_id)
+            .collect()
+    }
+
+    /// Return the total number of per-agent tool failures recorded across all
+    /// agents and all tools.
+    pub fn total_agent_failures(&self) -> u64 {
+        self.per_agent_tool_failures_snapshot()
+            .values()
+            .flat_map(|m| m.values())
+            .sum()
+    }
+
     /// Return a sorted list of tool names whose total call count exceeds
     /// `threshold`.
     ///
@@ -1954,6 +1979,18 @@ impl RuntimeMetrics {
             return 0.0;
         }
         self.memory_recall_count.load(Ordering::Relaxed) as f64 / sessions as f64
+    }
+
+    /// Return the total accumulated step latency in milliseconds divided by
+    /// `total_sessions`.
+    ///
+    /// Returns `0.0` when no sessions have been recorded.
+    pub fn total_latency_per_session(&self) -> f64 {
+        let sessions = self.total_sessions.load(Ordering::Relaxed);
+        if sessions == 0 {
+            return 0.0;
+        }
+        self.step_latency.sum_ms() as f64 / sessions as f64
     }
 
     /// Capture a snapshot of global counters as plain integers.
@@ -4875,5 +4912,47 @@ mod tests {
         for _ in 0..3 { m.record_tool_call("apple"); }
         let result = m.tools_with_calls_above(2);
         assert_eq!(result, vec!["apple", "zebra"]);
+    }
+
+    // ── Round 63: checkpoint_errors_count, agents_with_failures, total_agent_failures ──
+
+    #[test]
+    fn test_checkpoint_errors_count_zero_for_new_metrics() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.checkpoint_errors_count(), 0);
+    }
+
+    #[test]
+    fn test_checkpoint_errors_count_reflects_incremented_value() {
+        let m = RuntimeMetrics::new();
+        m.checkpoint_errors
+            .fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(m.checkpoint_errors_count(), 3);
+    }
+
+    #[test]
+    fn test_agents_with_failures_returns_agents_with_failures() {
+        let m = RuntimeMetrics::new();
+        m.record_agent_tool_call("agent-x", "search");
+        m.record_agent_tool_failure("agent-x", "search");
+        m.record_agent_tool_call("agent-y", "browse");
+        let agents = m.agents_with_failures();
+        assert!(agents.contains(&"agent-x".to_string()));
+        assert!(!agents.contains(&"agent-y".to_string()));
+    }
+
+    #[test]
+    fn test_total_agent_failures_sums_all_failures() {
+        let m = RuntimeMetrics::new();
+        m.record_agent_tool_failure("a", "tool1");
+        m.record_agent_tool_failure("a", "tool2");
+        m.record_agent_tool_failure("b", "tool1");
+        assert_eq!(m.total_agent_failures(), 3);
+    }
+
+    #[test]
+    fn test_total_agent_failures_zero_for_new_metrics() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.total_agent_failures(), 0);
     }
 }
