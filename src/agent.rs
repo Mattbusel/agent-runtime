@@ -1176,6 +1176,11 @@ impl ToolRegistry {
             .filter(|s| s.description.to_ascii_lowercase().contains(&lower))
             .count()
     }
+
+    /// Remove all registered tools.
+    pub fn unregister_all(&mut self) {
+        self.tools.clear();
+    }
 }
 
 // ── ReActLoop ─────────────────────────────────────────────────────────────────
@@ -3600,5 +3605,15 @@ mod tests {
         reg.register(ToolSpec::new("t2", "web scraper tool", |_| serde_json::json!({})));
         reg.register(ToolSpec::new("t3", "database lookup", |_| serde_json::json!({})));
         assert_eq!(reg.count_with_description_containing("web"), 2);
+    }
+
+    #[test]
+    fn test_unregister_all_clears_all_tools() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "tool one", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("t2", "tool two", |_| serde_json::json!({})));
+        assert_eq!(reg.tool_count(), 2);
+        reg.unregister_all();
+        assert_eq!(reg.tool_count(), 0);
     }
 }

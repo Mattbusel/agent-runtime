@@ -349,6 +349,14 @@ impl GraphStore {
         Ok(labels)
     }
 
+    /// Return the number of incoming relationships for the given entity.
+    ///
+    /// Returns `0` if the entity has no in-edges or does not exist.
+    pub fn incoming_count_for(&self, id: &EntityId) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::incoming_count_for");
+        Ok(inner.reverse_adjacency.get(id).map_or(0, |v| v.len()))
+    }
+
     /// Return the number of entities that have no outgoing relationships.
     pub fn orphan_count(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "GraphStore::orphan_count");
@@ -4636,5 +4644,17 @@ mod tests {
         g.add_entity(Entity::new("b", "Person")).unwrap();
         g.add_entity(Entity::new("c", "Concept")).unwrap();
         assert_eq!(g.labels().unwrap(), vec!["Concept".to_string(), "Person".to_string()]);
+    }
+
+    #[test]
+    fn test_incoming_count_for_counts_inbound_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Node")).unwrap();
+        g.add_entity(Entity::new("b", "Node")).unwrap();
+        g.add_entity(Entity::new("c", "Node")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("c", "b", "link", 1.0)).unwrap();
+        assert_eq!(g.incoming_count_for(&EntityId::new("b")).unwrap(), 2);
+        assert_eq!(g.incoming_count_for(&EntityId::new("a")).unwrap(), 0);
     }
 }

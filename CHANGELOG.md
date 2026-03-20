@@ -11,6 +11,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.50.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::duration_secs`** — session duration in whole seconds.
+- **`AgentSession::steps_above_thought_length`** — count of steps whose thought exceeds a byte threshold.
+- **`EpisodicStore::max_importance_overall`** — highest importance value across all agents.
+- **`SemanticStore::rename_tag`** — rename a tag across all entries, returns count updated.
+- **`WorkingMemory::entry_count`** — number of key-value pairs currently stored.
+- **`MetricsSnapshot::step_to_tool_ratio`** — ratio of tool calls to total steps.
+- **`LatencyHistogram::min_occupied_ms`** — bound of the smallest bucket with at least one recorded value.
+- **`RetryPolicy::backoff_factor`** — multiplier per retry (2.0 for exponential, 1.0 for constant).
+- **`GraphStore::incoming_count_for`** — number of inbound edges for a given entity.
+- **`ToolRegistry::unregister_all`** — remove all registered tools at once.
+
+---
+
 ## [1.49.0] - 2026-03-20
 
 ### Added

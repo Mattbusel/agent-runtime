@@ -655,6 +655,16 @@ impl AgentSession {
         self.steps.len() as f64 / (self.duration_ms as f64 / 1000.0)
     }
 
+    /// Return the session duration in full seconds (rounded down).
+    pub fn duration_secs(&self) -> u64 {
+        self.duration_ms / 1000
+    }
+
+    /// Return the count of steps whose thought string is longer than `threshold` bytes.
+    pub fn steps_above_thought_length(&self, threshold: usize) -> usize {
+        self.steps.iter().filter(|s| s.thought.len() > threshold).count()
+    }
+
     /// Return `true` if any tool-call steps had error observations.
     pub fn has_tool_failures(&self) -> bool {
         self.failed_tool_call_count() > 0
@@ -3826,5 +3836,23 @@ mod tests {
         let session = make_session(steps, 0);
         // mean = 3.5
         assert!((session.avg_observation_length() - 3.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_duration_secs_converts_ms_to_seconds() {
+        let session = make_session(vec![], 7000);
+        assert_eq!(session.duration_secs(), 7);
+    }
+
+    #[test]
+    fn test_steps_above_thought_length_counts_qualifying_steps() {
+        let steps = vec![
+            make_step("hi", "a", "obs"),
+            make_step("a longer thought here", "b", "obs"),
+            make_step("medium thought", "c", "obs"),
+        ];
+        let session = make_session(steps, 0);
+        // "hi" (2) <= 5, "a longer thought here" (21) > 5, "medium thought" (13) > 5
+        assert_eq!(session.steps_above_thought_length(5), 2);
     }
 }

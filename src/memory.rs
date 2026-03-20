@@ -793,6 +793,19 @@ impl EpisodicStore {
         Ok(ids)
     }
 
+    /// Return the highest importance value across all stored episodes,
+    /// or `None` if the store is empty.
+    pub fn max_importance_overall(&self) -> Result<Option<f32>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::max_importance_overall");
+        let max = inner
+            .items
+            .values()
+            .flat_map(|v| v.iter())
+            .map(|e| e.importance)
+            .reduce(f32::max);
+        Ok(max)
+    }
+
     /// Return the variance of importance scores for the given agent's episodes.
     ///
     /// Returns `0.0` when the agent has fewer than two episodes.
@@ -2137,6 +2150,24 @@ impl SemanticStore {
     }
 
     /// Return the count of entries whose value contains `substring`.
+    /// Rename `old_tag` to `new_tag` across all entries.
+    ///
+    /// Returns the number of entries that were modified.
+    pub fn rename_tag(&self, old_tag: &str, new_tag: &str) -> Result<usize, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "SemanticStore::rename_tag");
+        let mut count = 0;
+        for entry in &mut inner.entries {
+            for tag in &mut entry.tags {
+                if tag == old_tag {
+                    *tag = new_tag.to_string();
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    /// Return the count of entries whose value contains `substring`.
     pub fn count_matching_value(&self, substring: &str) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::count_matching_value");
         Ok(inner.entries.iter().filter(|e| e.value.contains(substring)).count())
@@ -2841,6 +2872,13 @@ impl WorkingMemory {
             .values()
             .max_by_key(|v| v.len())
             .map(|v| v.clone()))
+    }
+
+    /// Return a list of `(key, value_byte_length)` pairs for all entries.
+    /// Return the number of key-value entries currently stored.
+    pub fn entry_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::entry_count");
+        Ok(inner.map.len())
     }
 
     /// Return a list of `(key, value_byte_length)` pairs for all entries.
@@ -6380,5 +6418,47 @@ mod tests {
         wm.set("long", "this is a longer value").unwrap();
         let keys = wm.keys_with_value_longer_than(5).unwrap();
         assert_eq!(keys, vec!["long".to_string()]);
+    }
+
+    #[test]
+    fn test_episodic_store_max_importance_overall_returns_highest() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "low", 0.2).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        store.add_episode(agent.clone(), "mid", 0.5).unwrap();
+        let max = store.max_importance_overall().unwrap();
+        assert!((max.unwrap() - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_episodic_store_max_importance_overall_empty_returns_none() {
+        let store = EpisodicStore::new();
+        assert!(store.max_importance_overall().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_semantic_store_rename_tag_updates_all_occurrences() {
+        let store = SemanticStore::new();
+        store.store("k1", "v1", vec!["old".to_string(), "x".to_string()]).unwrap();
+        store.store("k2", "v2", vec!["old".to_string()]).unwrap();
+        let count = store.rename_tag("old", "new").unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_semantic_store_rename_tag_nonexistent_returns_zero() {
+        let store = SemanticStore::new();
+        store.store("k", "v", vec!["alpha".to_string()]).unwrap();
+        assert_eq!(store.rename_tag("missing", "new").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_working_memory_entry_count_reflects_stored_entries() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.entry_count().unwrap(), 0);
+        wm.set("a", "1").unwrap();
+        wm.set("b", "2").unwrap();
+        assert_eq!(wm.entry_count().unwrap(), 2);
     }
 }

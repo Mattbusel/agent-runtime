@@ -244,6 +244,16 @@ impl RetryPolicy {
         self.max_total_delay_ms() / self.max_attempts as u64
     }
 
+    /// Return the effective backoff factor per attempt.
+    ///
+    /// Returns `2.0` for exponential policies and `1.0` for constant policies.
+    pub fn backoff_factor(&self) -> f64 {
+        match self.kind {
+            RetryKind::Exponential => 2.0,
+            RetryKind::Constant => 1.0,
+        }
+    }
+
     /// Return a copy of this policy with the base delay changed to `ms` milliseconds.
     ///
     /// # Errors
@@ -3247,5 +3257,17 @@ mod tests {
         // RetryPolicy::none() has 1 attempt and ZERO delay
         let p = RetryPolicy::none();
         assert_eq!(p.avg_delay_ms(), 0);
+    }
+
+    #[test]
+    fn test_backoff_factor_exponential_returns_two() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!((p.backoff_factor() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_backoff_factor_constant_returns_one() {
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        assert!((p.backoff_factor() - 1.0).abs() < 1e-9);
     }
 }

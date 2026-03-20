@@ -333,6 +333,16 @@ impl LatencyHistogram {
         out
     }
 
+    /// Return the upper bound (ms) of the lowest bucket that has at least one
+    /// sample, or `None` if no samples have been recorded.
+    pub fn min_occupied_ms(&self) -> Option<u64> {
+        Self::BOUNDS
+            .iter()
+            .zip(self.buckets.iter())
+            .find(|(_, b)| b.load(std::sync::atomic::Ordering::Relaxed) > 0)
+            .map(|(&bound, _)| bound)
+    }
+
     /// Return `true` if all recorded samples fall into exactly one bucket.
     ///
     /// An empty histogram is considered uniform.
@@ -624,6 +634,16 @@ impl MetricsSnapshot {
             return 0.0;
         }
         self.active_sessions as f64 / self.total_sessions as f64
+    }
+
+    /// Return the average number of tool calls per step.
+    ///
+    /// Returns `0.0` when no steps have been taken.
+    pub fn step_to_tool_ratio(&self) -> f64 {
+        if self.total_steps == 0 {
+            return 0.0;
+        }
+        self.total_tool_calls as f64 / self.total_steps as f64
     }
 }
 
@@ -2439,5 +2459,40 @@ mod tests {
             ..Default::default()
         };
         assert!((snap.active_session_ratio() - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_step_to_tool_ratio_correct_value() {
+        let snap = MetricsSnapshot {
+            total_steps: 4,
+            total_tool_calls: 2,
+            ..Default::default()
+        };
+        assert!((snap.step_to_tool_ratio() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_step_to_tool_ratio_zero_steps_returns_zero() {
+        let snap = MetricsSnapshot {
+            total_steps: 0,
+            total_tool_calls: 5,
+            ..Default::default()
+        };
+        assert_eq!(snap.step_to_tool_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_latency_histogram_min_occupied_ms_returns_smallest_occupied_bucket() {
+        let h = LatencyHistogram::default();
+        h.record(10); // falls in ≤10ms bucket (bound = 10)
+        h.record(200); // falls in ≤500ms bucket
+        // min_occupied should be the ≤10ms bucket bound = 10
+        assert_eq!(h.min_occupied_ms(), Some(10));
+    }
+
+    #[test]
+    fn test_latency_histogram_min_occupied_ms_empty_returns_none() {
+        let h = LatencyHistogram::default();
+        assert_eq!(h.min_occupied_ms(), None);
     }
 }
