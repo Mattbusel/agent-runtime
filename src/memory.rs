@@ -875,6 +875,23 @@ impl EpisodicStore {
             }))
     }
 
+    /// Count episodes for `agent_id` whose importance is strictly greater than
+    /// `threshold`.
+    ///
+    /// Returns `0` if the agent has no episodes.
+    pub fn count_above_importance(
+        &self,
+        agent_id: &AgentId,
+        threshold: f32,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::count_above_importance");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map(|v| v.iter().filter(|i| i.importance > threshold).count())
+            .unwrap_or(0))
+    }
+
     /// Return the episode with the highest `recall_count` for `agent_id`.
     ///
     /// Returns `None` if the agent has no stored episodes.  When multiple
@@ -1903,6 +1920,14 @@ impl SemanticStore {
             .map(|e| e.value.clone()))
     }
 
+    /// Return the tags for the first entry whose key matches `key`.
+    ///
+    /// Returns `None` if no entry with that key exists.
+    pub fn get_tags(&self, key: &str) -> Result<Option<Vec<String>>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::get_tags");
+        Ok(inner.entries.iter().find(|e| e.key == key).map(|e| e.tags.clone()))
+    }
+
     /// Return all entry keys that contain `tag` (case-sensitive).
     pub fn keys_with_tag(&self, tag: &str) -> Result<Vec<String>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::keys_with_tag");
@@ -1912,6 +1937,17 @@ impl SemanticStore {
             .filter(|e| e.tags.iter().any(|t| t.as_str() == tag))
             .map(|e| e.key.clone())
             .collect())
+    }
+
+    /// Return the tags associated with the first entry matching `key`, or
+    /// `None` if no entry with that key exists.
+    pub fn tags_for(&self, key: &str) -> Result<Option<Vec<String>>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::tags_for");
+        Ok(inner
+            .entries
+            .iter()
+            .find(|e| e.key == key)
+            .map(|e| e.tags.clone()))
     }
 
     /// Return all stored entry keys in insertion order.
@@ -1929,6 +1965,12 @@ impl SemanticStore {
     /// [`list_keys`]: SemanticStore::list_keys
     pub fn keys(&self) -> Result<Vec<String>, AgentRuntimeError> {
         self.list_keys()
+    }
+
+    /// Return the stored value for every entry, in insertion order.
+    pub fn values(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::values");
+        Ok(inner.entries.iter().map(|e| e.value.clone()).collect())
     }
 
     /// Return all keys that contain `pattern` as a substring (case-insensitive).
@@ -2209,6 +2251,15 @@ impl WorkingMemory {
             .collect())
     }
 
+    /// Return the byte length of the value stored at `key`, or `None` if the
+    /// key is not present.
+    ///
+    /// Useful for estimating memory usage without cloning the value string.
+    pub fn value_length(&self, key: &str) -> Result<Option<usize>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::value_length");
+        Ok(inner.map.get(key).map(|v| v.len()))
+    }
+
     /// Rename a key without changing its value or insertion order.
     ///
     /// Return `true` if **all** of the given keys are currently stored.
@@ -2397,6 +2448,19 @@ impl WorkingMemory {
         } else {
             Ok(None)
         }
+    }
+
+    /// Peek at the oldest entry without removing it.
+    ///
+    /// Returns `None` if the memory is empty.  Unlike [`pop_oldest`] this
+    /// method does not modify the store.
+    ///
+    /// [`pop_oldest`]: WorkingMemory::pop_oldest
+    pub fn peek_oldest(&self) -> Result<Option<(String, String)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::peek_oldest");
+        Ok(inner.order.front().and_then(|key| {
+            inner.map.get(key).map(|val| (key.clone(), val.clone()))
+        }))
     }
 
     /// Return the maximum number of entries this store can hold.
@@ -4831,5 +4895,182 @@ mod tests {
         let wm = WorkingMemory::new(5).unwrap();
         wm.set("a", "foo").unwrap();
         assert!(wm.values_matching("xyz").unwrap().is_empty());
+    }
+
+    // ── Round 14: count_above_importance, value_length, tags_for ─────────────
+
+    #[test]
+    fn test_count_above_importance_correct_count() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("agent");
+        store.add_episode(agent.clone(), "low", 0.2).unwrap();
+        store.add_episode(agent.clone(), "mid", 0.5).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        assert_eq!(store.count_above_importance(&agent, 0.4).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_count_above_importance_zero_for_empty_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("nobody");
+        assert_eq!(store.count_above_importance(&agent, 0.0).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_count_above_importance_threshold_is_exclusive() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("ex");
+        store.add_episode(agent.clone(), "exact", 0.5).unwrap();
+        // threshold 0.5 — strictly greater than, so 0.5 should not count
+        assert_eq!(store.count_above_importance(&agent, 0.5).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_working_memory_value_length_some_for_existing_key() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("greeting", "hello").unwrap();
+        assert_eq!(wm.value_length("greeting").unwrap(), Some(5));
+    }
+
+    #[test]
+    fn test_working_memory_value_length_none_for_absent_key() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(wm.value_length("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_semantic_store_tags_for_returns_tags() {
+        let store = SemanticStore::new();
+        store
+            .store("key1", "value1", vec!["alpha".to_string(), "beta".to_string()])
+            .unwrap();
+        let tags = store.tags_for("key1").unwrap().unwrap();
+        assert_eq!(tags, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn test_semantic_store_tags_for_none_for_missing_key() {
+        let store = SemanticStore::new();
+        assert!(store.tags_for("ghost").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_semantic_store_tags_for_empty_tags() {
+        let store = SemanticStore::new();
+        store.store("k", "v", vec![]).unwrap();
+        let tags = store.tags_for("k").unwrap().unwrap();
+        assert!(tags.is_empty());
+    }
+
+    // ── Round 27: peek_oldest, SemanticStore::values, SemanticStore::get_tags ─
+
+    #[test]
+    fn test_peek_oldest_returns_oldest_without_removing() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("first", "alpha").unwrap();
+        wm.set("second", "beta").unwrap();
+        let peeked = wm.peek_oldest().unwrap();
+        assert_eq!(peeked, Some(("first".into(), "alpha".into())));
+        // Still there after peek
+        assert_eq!(wm.len().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_peek_oldest_empty_returns_none() {
+        let wm = WorkingMemory::new(5).unwrap();
+        assert_eq!(wm.peek_oldest().unwrap(), None);
+    }
+
+    #[test]
+    fn test_peek_oldest_does_not_remove_entry() {
+        let wm = WorkingMemory::new(5).unwrap();
+        wm.set("k", "v").unwrap();
+        wm.peek_oldest().unwrap();
+        assert_eq!(wm.get("k").unwrap(), Some("v".into()));
+    }
+
+    #[test]
+    fn test_semantic_store_values_returns_all_values() {
+        let store = SemanticStore::new();
+        store.store("k1", "hello", vec![]).unwrap();
+        store.store("k2", "world", vec![]).unwrap();
+        let vals = store.values().unwrap();
+        assert_eq!(vals.len(), 2);
+        assert!(vals.contains(&"hello".to_string()));
+        assert!(vals.contains(&"world".to_string()));
+    }
+
+    #[test]
+    fn test_semantic_store_values_empty() {
+        let store = SemanticStore::new();
+        assert!(store.values().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_semantic_store_get_tags_returns_tags() {
+        let store = SemanticStore::new();
+        store.store("k1", "val", vec!["tag-a".to_string(), "tag-b".to_string()]).unwrap();
+        let tags = store.get_tags("k1").unwrap();
+        assert!(tags.is_some());
+        let tags = tags.unwrap();
+        assert!(tags.contains(&"tag-a".to_string()));
+        assert!(tags.contains(&"tag-b".to_string()));
+    }
+
+    #[test]
+    fn test_semantic_store_get_tags_missing_key_returns_none() {
+        let store = SemanticStore::new();
+        assert!(store.get_tags("no-such-key").unwrap().is_none());
+    }
+
+    // ── Round 16 (duplicate block): WorkingMemory::value_length, iter_sorted ──
+
+    #[test]
+    fn test_working_memory_value_length_returns_char_count_r27() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k", "hello").unwrap();
+        assert_eq!(wm.value_length("k").unwrap(), Some(5));
+    }
+
+    #[test]
+    fn test_working_memory_value_length_none_for_missing_key_r27() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(wm.value_length("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_working_memory_iter_sorted_returns_sorted_pairs() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("b", "2").unwrap();
+        wm.set("a", "1").unwrap();
+        let pairs = wm.iter_sorted().unwrap();
+        assert_eq!(pairs[0].0, "a");
+        assert_eq!(pairs[1].0, "b");
+    }
+
+    #[test]
+    fn test_working_memory_drain_empties_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("x", "1").unwrap();
+        wm.set("y", "2").unwrap();
+        let drained = wm.drain().unwrap();
+        assert_eq!(drained.len(), 2);
+        assert!(wm.is_empty().unwrap());
+    }
+
+    #[test]
+    fn test_working_memory_snapshot_returns_all_entries_r27() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("a", "alpha").unwrap();
+        wm.set("b", "beta").unwrap();
+        let snap = wm.snapshot().unwrap();
+        assert_eq!(snap.get("a").map(String::as_str), Some("alpha"));
+        assert_eq!(snap.get("b").map(String::as_str), Some("beta"));
+    }
+
+    #[test]
+    fn test_working_memory_snapshot_empty_when_no_entries_r27() {
+        let wm = WorkingMemory::new(5).unwrap();
+        assert!(wm.snapshot().unwrap().is_empty());
     }
 }

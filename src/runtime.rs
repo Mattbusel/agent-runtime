@@ -398,6 +398,20 @@ impl AgentSession {
             .collect()
     }
 
+    /// Return the number of tool-call steps whose observation indicates an error.
+    ///
+    /// Equivalent to `failed_steps().len()` but avoids collecting a `Vec`.
+    pub fn failed_tool_call_count(&self) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| {
+                let obs = s.observation.trim();
+                obs.starts_with("{\"error\"")
+                    || obs.to_ascii_lowercase().contains("\"error\"")
+            })
+            .count()
+    }
+
     /// Return a count of how many times each action was taken in this session.
     ///
     /// The map key is the action name (e.g. `"search"`, `"FINAL_ANSWER"`).
@@ -2051,6 +2065,10 @@ mod tests {
 
     // ── Round 17: untested AgentSession methods ───────────────────────────────
 
+    fn make_step(thought: &str, action: &str, observation: &str) -> ReActStep {
+        ReActStep::new(thought, action, observation)
+    }
+
     fn make_session(steps: Vec<ReActStep>, duration_ms: u64) -> AgentSession {
         AgentSession {
             session_id: "s".into(),
@@ -2508,5 +2526,71 @@ mod tests {
         session.checkpoint_errors.push("save failed".into());
         session.checkpoint_errors.push("disk full".into());
         assert_eq!(session.checkpoint_error_count(), 2);
+    }
+
+    // ── Round 27: failed_tool_call_count ─────────────────────────────────────
+
+    #[test]
+    fn test_failed_tool_call_count_zero_when_no_errors() {
+        let step = ReActStep::new("think", "search", "results found");
+        let session = make_session(vec![step], 0);
+        assert_eq!(session.failed_tool_call_count(), 0);
+    }
+
+    #[test]
+    fn test_failed_tool_call_count_matches_failed_steps() {
+        let ok_step = ReActStep::new("ok", "search", "all good");
+        let err_step = ReActStep::new("err", "lookup", "{\"error\": \"not found\"}");
+        let session = make_session(vec![ok_step, err_step], 0);
+        assert_eq!(session.failed_tool_call_count(), session.failed_steps().len());
+        assert_eq!(session.failed_tool_call_count(), 1);
+    }
+
+    #[test]
+    fn test_failed_tool_call_count_counts_all_errors() {
+        let err1 = ReActStep::new("e1", "a", "{\"error\": \"bad\"}");
+        let err2 = ReActStep::new("e2", "b", "some \"error\" text");
+        let ok = ReActStep::new("ok", "c", "success");
+        let session = make_session(vec![err1, err2, ok], 0);
+        assert_eq!(session.failed_tool_call_count(), 2);
+    }
+
+    // ── Round 14: AgentSession::last_n_steps ──────────────────────────────────
+
+    #[test]
+    fn test_last_n_steps_returns_last_n() {
+        let steps = vec![
+            ReActStep::new("t1", "a", "r1"),
+            ReActStep::new("t2", "b", "r2"),
+            ReActStep::new("t3", "c", "r3"),
+        ];
+        let session = make_session(steps, 0);
+        let last2 = session.last_n_steps(2);
+        assert_eq!(last2.len(), 2);
+        assert_eq!(last2[0].action, "b");
+        assert_eq!(last2[1].action, "c");
+    }
+
+    #[test]
+    fn test_last_n_steps_returns_all_when_n_exceeds_count() {
+        let steps = vec![
+            ReActStep::new("t1", "a", "r1"),
+            ReActStep::new("t2", "b", "r2"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.last_n_steps(10).len(), 2);
+    }
+
+    #[test]
+    fn test_last_n_steps_empty_for_no_steps() {
+        let session = make_session(vec![], 0);
+        assert!(session.last_n_steps(3).is_empty());
+    }
+
+    #[test]
+    fn test_last_n_steps_zero_returns_empty() {
+        let steps = vec![ReActStep::new("t1", "a", "r1")];
+        let session = make_session(steps, 0);
+        assert!(session.last_n_steps(0).is_empty());
     }
 }

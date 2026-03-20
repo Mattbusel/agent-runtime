@@ -11,6 +11,36 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.30.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::last_n_steps`** (`runtime.rs`) — slice of the last `n` steps;
+  returns all steps if `n` exceeds step count, empty slice for empty sessions.
+- **`GraphStore::reachable_from`** (`graph.rs`) — BFS traversal returning a
+  `HashSet` of all entity IDs reachable from a start node (start node excluded).
+- **`GraphStore::contains_cycle`** (`graph.rs`) — iterative DFS with three-colour
+  scheme to detect directed cycles; returns `false` for empty graphs.
+- **`EpisodicStore::count_above_importance`** (`memory.rs`) — count of episodes
+  whose importance is strictly greater than a threshold; `0` for unknown agents.
+- **`WorkingMemory::value_length`** (`memory.rs`) — byte length of the stored
+  value for a key, or `None` when the key is absent.
+- **`SemanticStore::tags_for`** (`memory.rs`) — tags list for the first entry
+  matching a key; `None` when no entry with that key exists.
+- **`Pipeline::prepend_stage`** (`orchestrator.rs`) — insert a stage at the
+  front of the pipeline; all existing stages shift to higher indices.
+- **`RuntimeMetrics::avg_steps_per_session`** (`metrics.rs`) — mean ReAct steps
+  per completed session; `0.0` when no sessions have been recorded.
+
+### Fixed
+
+- Pre-existing compilation errors in linter-generated tests:
+  - Added missing `make_step` helper in `runtime.rs` test module.
+  - Replaced `LatencyHistogram::new()` with `LatencyHistogram::default()` in
+    `metrics.rs` tests.
+
+---
+
 ## [1.29.0] - 2026-03-20
 
 ### Added

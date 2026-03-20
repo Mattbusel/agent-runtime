@@ -3894,6 +3894,64 @@ mod tests {
         assert!(g.is_sink(&EntityId::new("ghost")).unwrap());
     }
 
+    // ── Round 14: reachable_from / contains_cycle ─────────────────────────────
+
+    #[test]
+    fn test_reachable_from_returns_all_downstream_nodes() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "edge", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "edge", 1.0)).unwrap();
+        let reachable = g.reachable_from(&EntityId::new("a")).unwrap();
+        assert!(reachable.contains(&EntityId::new("b")));
+        assert!(reachable.contains(&EntityId::new("c")));
+        assert!(!reachable.contains(&EntityId::new("a")));
+    }
+
+    #[test]
+    fn test_reachable_from_empty_for_sink_node() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("sink", "N")).unwrap();
+        let reachable = g.reachable_from(&EntityId::new("sink")).unwrap();
+        assert!(reachable.is_empty());
+    }
+
+    #[test]
+    fn test_reachable_from_empty_for_unknown_node() {
+        let g = GraphStore::new();
+        let reachable = g.reachable_from(&EntityId::new("ghost")).unwrap();
+        assert!(reachable.is_empty());
+    }
+
+    #[test]
+    fn test_contains_cycle_false_for_dag() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "e", 1.0)).unwrap();
+        assert!(!g.contains_cycle().unwrap());
+    }
+
+    #[test]
+    fn test_contains_cycle_true_for_cyclic_graph() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("x", "N")).unwrap();
+        g.add_entity(Entity::new("y", "N")).unwrap();
+        g.add_relationship(Relationship::new("x", "y", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("y", "x", "e", 1.0)).unwrap();
+        assert!(g.contains_cycle().unwrap());
+    }
+
+    #[test]
+    fn test_contains_cycle_false_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(!g.contains_cycle().unwrap());
+    }
+
     // ── Round 15: count_relationships_by_kind, merge, top_nodes_by_in/out_degree ──
 
     #[test]
@@ -3951,5 +4009,60 @@ mod tests {
         let top = g.top_nodes_by_out_degree(1).unwrap();
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].id.as_str(), "src");
+    }
+
+    // ── Round 27: property_value, find_relationships_by_kind, count_relationships_by_kind ──
+
+    #[test]
+    fn test_entity_property_value_returns_value() {
+        let e = Entity::new("n1", "Node")
+            .with_property("age", serde_json::Value::Number(42.into()));
+        let val = e.property_value("age");
+        assert!(val.is_some());
+        assert_eq!(val.unwrap(), &serde_json::Value::Number(42.into()));
+    }
+
+    #[test]
+    fn test_entity_property_value_missing_returns_none() {
+        let e = Entity::new("n1", "Node");
+        assert!(e.property_value("missing").is_none());
+    }
+
+    #[test]
+    fn test_find_relationships_by_kind_returns_matching() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "LIKES", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "KNOWS", 1.0)).unwrap();
+        let rels = g.find_relationships_by_kind("KNOWS").unwrap();
+        assert_eq!(rels.len(), 2);
+        assert!(rels.iter().all(|r| r.kind == "KNOWS"));
+    }
+
+    #[test]
+    fn test_find_relationships_by_kind_no_match_returns_empty() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        let rels = g.find_relationships_by_kind("HATES").unwrap();
+        assert!(rels.is_empty());
+    }
+
+    #[test]
+    fn test_count_relationships_by_kind_correct() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "KNOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "PART_OF", 1.0)).unwrap();
+        assert_eq!(g.count_relationships_by_kind("KNOWS").unwrap(), 2);
+        assert_eq!(g.count_relationships_by_kind("PART_OF").unwrap(), 1);
+        assert_eq!(g.count_relationships_by_kind("MISSING").unwrap(), 0);
     }
 }

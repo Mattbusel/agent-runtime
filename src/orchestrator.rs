@@ -609,6 +609,19 @@ impl CircuitBreaker {
         self.threshold
     }
 
+    /// Return the current failure count as a ratio of the threshold.
+    ///
+    /// Returns a value in `[0.0, 1.0]` where `1.0` (or greater) means the
+    /// circuit will open (or is already open).  Returns `0.0` when the
+    /// threshold is zero to avoid division by zero.
+    pub fn failure_rate(&self) -> f64 {
+        if self.threshold == 0 {
+            return 0.0;
+        }
+        let failures = self.backend.get_failures(&self.service);
+        failures as f64 / self.threshold as f64
+    }
+
     /// Return the configured recovery window duration.
     ///
     /// After the circuit has been `Open` for this long, it transitions to
@@ -1026,6 +1039,23 @@ impl Deduplicator {
         Ok(inner.in_flight.contains_key(key) || inner.cache.contains_key(key))
     }
 
+    /// Return the cached result for `key` if one exists and has not expired.
+    ///
+    /// Returns `None` when the key is not in the cache (either not yet
+    /// completed or already expired).  Does not modify any state.
+    pub fn get_result(&self, key: &str) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = timed_lock(&self.inner, "Deduplicator::get_result");
+        let ttl = self.ttl;
+        let now = std::time::Instant::now();
+        Ok(inner.cache.get(key).and_then(|(result, inserted_at)| {
+            if now.duration_since(*inserted_at) <= ttl {
+                Some(result.clone())
+            } else {
+                None
+            }
+        }))
+    }
+
     /// Remove all in-flight entries and cached results.
     ///
     /// Useful for test teardown or hard resets.
@@ -1330,6 +1360,22 @@ impl Pipeline {
         self
     }
 
+    /// Insert a stage at the **front** of the pipeline (index 0).
+    ///
+    /// All existing stages are shifted to higher indices.  The pipeline's
+    /// stage names remain unique only if the caller ensures uniqueness.
+    pub fn prepend_stage(
+        mut self,
+        name: impl Into<String>,
+        handler: impl Fn(String) -> Result<String, AgentRuntimeError> + Send + Sync + 'static,
+    ) -> Self {
+        self.stages.insert(0, Stage {
+            name: name.into(),
+            handler: Box::new(handler),
+        });
+        self
+    }
+
     /// Return `true` if the pipeline has no stages.
     pub fn is_empty(&self) -> bool {
         self.stages.is_empty()
@@ -1397,6 +1443,19 @@ impl Pipeline {
     pub fn remove_stage(&mut self, name: &str) -> bool {
         if let Some(pos) = self.stages.iter().position(|s| s.name == name) {
             self.stages.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Rename the first stage whose name equals `old_name` to `new_name`.
+    ///
+    /// Returns `true` if a stage was found and renamed, `false` if no stage
+    /// with `old_name` exists.
+    pub fn rename_stage(&mut self, old_name: &str, new_name: impl Into<String>) -> bool {
+        if let Some(stage) = self.stages.iter_mut().find(|s| s.name == old_name) {
+            stage.name = new_name.into();
             true
         } else {
             false
@@ -2529,5 +2588,80 @@ mod tests {
         }
         let pct = g.percent_full().unwrap();
         assert!((pct - 100.0).abs() < 1e-9);
+    }
+
+    // ── Round 27: get_result, rename_stage, failure_rate ─────────────────────
+
+    #[test]
+    fn test_deduplicator_get_result_returns_cached_value() {
+        let d = Deduplicator::new(std::time::Duration::from_secs(60));
+        d.check_and_register("req-1").unwrap();
+        d.complete("req-1", "the answer").unwrap();
+        let result = d.get_result("req-1").unwrap();
+        assert_eq!(result, Some("the answer".to_string()));
+    }
+
+    #[test]
+    fn test_deduplicator_get_result_missing_key_returns_none() {
+        let d = Deduplicator::new(std::time::Duration::from_secs(60));
+        assert_eq!(d.get_result("ghost").unwrap(), None);
+    }
+
+    #[test]
+    fn test_pipeline_rename_stage_succeeds() {
+        let mut p = Pipeline::new().add_stage("old-name", |s: String| Ok(s));
+        let renamed = p.rename_stage("old-name", "new-name");
+        assert!(renamed);
+        assert!(p.has_stage("new-name"));
+        assert!(!p.has_stage("old-name"));
+    }
+
+    #[test]
+    fn test_pipeline_rename_stage_missing_returns_false() {
+        let mut p = Pipeline::new();
+        assert!(!p.rename_stage("nonexistent", "anything"));
+    }
+
+    #[test]
+    fn test_circuit_breaker_failure_rate_zero_initially() {
+        let cb = CircuitBreaker::new("svc", 5, std::time::Duration::from_secs(10)).unwrap();
+        assert!((cb.failure_rate() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_circuit_breaker_failure_rate_increases_with_failures() {
+        let cb = CircuitBreaker::new("svc-fr", 4, std::time::Duration::from_secs(10)).unwrap();
+        cb.record_failure();
+        cb.record_failure();
+        // 2 failures / threshold 4 = 0.5
+        assert!((cb.failure_rate() - 0.5).abs() < 1e-9);
+    }
+
+    // ── Round 14: Pipeline::prepend_stage ────────────────────────────────────
+
+    #[test]
+    fn test_prepend_stage_inserts_at_front() {
+        let p = Pipeline::new()
+            .add_stage("second", |s| Ok(s))
+            .prepend_stage("first", |s| Ok(s));
+        let names = p.stage_names_owned();
+        assert_eq!(names[0], "first");
+        assert_eq!(names[1], "second");
+    }
+
+    #[test]
+    fn test_prepend_stage_executes_before_existing_stages() {
+        let p = Pipeline::new()
+            .add_stage("append", |s| Ok(format!("{s}_appended")))
+            .prepend_stage("prefix", |s| Ok(format!("pre_{s}")));
+        let result = p.run("input".to_string()).unwrap();
+        assert_eq!(result, "pre_input_appended");
+    }
+
+    #[test]
+    fn test_prepend_stage_on_empty_pipeline() {
+        let p = Pipeline::new().prepend_stage("only", |s| Ok(s.to_uppercase()));
+        let result = p.run("hello".to_string()).unwrap();
+        assert_eq!(result, "HELLO");
     }
 }

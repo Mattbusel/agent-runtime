@@ -597,6 +597,17 @@ impl RuntimeMetrics {
         self.total_steps.load(Ordering::Relaxed)
     }
 
+    /// Return the average number of ReAct steps per completed session.
+    ///
+    /// Returns `0.0` when no sessions have been recorded.
+    pub fn avg_steps_per_session(&self) -> f64 {
+        let sessions = self.total_sessions();
+        if sessions == 0 {
+            return 0.0;
+        }
+        self.total_steps() as f64 / sessions as f64
+    }
+
     /// Return the total number of tool calls dispatched.
     pub fn total_tool_calls(&self) -> u64 {
         self.total_tool_calls.load(Ordering::Relaxed)
@@ -1580,5 +1591,43 @@ mod tests {
         m.total_sessions.fetch_add(2, Ordering::Relaxed);
         m.total_tool_calls.fetch_add(10, Ordering::Relaxed);
         assert!((m.avg_tool_calls_per_session() - 5.0).abs() < 1e-9);
+    }
+
+    // ── Round 27: interquartile_range_ms, avg_steps_per_session ──────────────
+
+    #[test]
+    fn test_interquartile_range_ms_empty_is_zero() {
+        let h = LatencyHistogram::default();
+        assert_eq!(h.interquartile_range_ms(), 0);
+    }
+
+    #[test]
+    fn test_interquartile_range_ms_saturates_not_panics() {
+        let h = LatencyHistogram::default();
+        for _ in 0..50 {
+            h.record(10);
+        }
+        for _ in 0..50 {
+            h.record(500);
+        }
+        let iqr = h.interquartile_range_ms();
+        // IQR must be non-negative (saturating_sub guarantee)
+        assert!(iqr < u64::MAX);
+    }
+
+    #[test]
+    fn test_avg_steps_per_session_zero_when_no_sessions() {
+        let snap = MetricsSnapshot::default();
+        assert!((snap.avg_steps_per_session() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_steps_per_session_correct_ratio() {
+        let snap = MetricsSnapshot {
+            total_sessions: 4,
+            total_steps: 20,
+            ..Default::default()
+        };
+        assert!((snap.avg_steps_per_session() - 5.0).abs() < 1e-9);
     }
 }
