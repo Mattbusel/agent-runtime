@@ -171,6 +171,15 @@ impl RetryPolicy {
         self.max_attempts <= 1
     }
 
+    /// Return `true` if this policy allows at least one retry (max_attempts > 1).
+    ///
+    /// Complement of [`is_no_retry`].
+    ///
+    /// [`is_no_retry`]: RetryPolicy::is_no_retry
+    pub fn will_retry_at_all(&self) -> bool {
+        self.max_attempts > 1
+    }
+
     /// Return `true` if this policy uses exponential back-off between retries.
     pub fn is_exponential(&self) -> bool {
         matches!(self.kind, RetryKind::Exponential)
@@ -1056,6 +1065,13 @@ impl Deduplicator {
         Ok(inner.in_flight.is_empty())
     }
 
+    /// Return the total number of items tracked by the deduplicator
+    /// (in-flight + cached results, regardless of TTL expiry).
+    pub fn total_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = timed_lock(&self.inner, "Deduplicator::total_count");
+        Ok(inner.in_flight.len() + inner.cache.len())
+    }
+
     /// Return `true` if `key` is currently in-flight or has a cached result.
     ///
     /// Unlike [`check_and_register`] this is a read-only inspection — it does
@@ -1326,6 +1342,13 @@ impl BackpressureGuard {
     pub fn headroom_ratio(&self) -> Result<f64, AgentRuntimeError> {
         Ok(self.available_capacity()? as f64 / self.capacity as f64)
     }
+
+    /// Return the number of currently held (acquired) slots.
+    ///
+    /// Equivalent to `capacity - available_capacity()`.
+    pub fn acquired_count(&self) -> Result<usize, AgentRuntimeError> {
+        Ok(self.capacity - self.available_capacity()?)
+    }
 }
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -1515,6 +1538,22 @@ impl Pipeline {
     /// The error handler (if any) is preserved; only the stage list is cleared.
     pub fn clear(&mut self) {
         self.stages.clear();
+    }
+
+    /// Swap the positions of two stages by name.
+    ///
+    /// Returns `true` if both stages were found and swapped.  Returns `false`
+    /// if either name is not present in the pipeline (no state change).
+    pub fn swap_stages(&mut self, a: &str, b: &str) -> bool {
+        let idx_a = self.stages.iter().position(|s| s.name == a);
+        let idx_b = self.stages.iter().position(|s| s.name == b);
+        match (idx_a, idx_b) {
+            (Some(i), Some(j)) => {
+                self.stages.swap(i, j);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Execute the pipeline, passing `input` through each stage in order.
@@ -2995,5 +3034,82 @@ mod tests {
         d.check_and_register("k1").unwrap();
         d.complete("k1", "result").unwrap();
         assert_eq!(d.in_flight_count().unwrap(), 0);
+    }
+
+    // ── Round 27: total_count, acquired_count, swap_stages, will_retry_at_all
+
+    #[test]
+    fn test_deduplicator_total_count_sums_in_flight_and_cached() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("k1").unwrap(); // in-flight
+        d.check_and_register("k2").unwrap(); // in-flight
+        d.complete("k1", "done").unwrap();   // moves to cache
+        // 1 in-flight + 1 cached = 2
+        assert_eq!(d.total_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_deduplicator_total_count_zero_when_empty() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        assert_eq!(d.total_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_backpressure_acquired_count_zero_initially() {
+        let g = BackpressureGuard::new(5).unwrap();
+        assert_eq!(g.acquired_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_backpressure_acquired_count_increments_on_acquire() {
+        let g = BackpressureGuard::new(5).unwrap();
+        g.try_acquire().unwrap();
+        g.try_acquire().unwrap();
+        assert_eq!(g.acquired_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_pipeline_swap_stages_swaps_positions() {
+        let mut p = Pipeline::new()
+            .add_stage("a", |s| Ok(s + "A"))
+            .add_stage("b", |s| Ok(s + "B"));
+        let swapped = p.swap_stages("a", "b");
+        assert!(swapped);
+        assert_eq!(p.first_stage_name().unwrap(), "b");
+        assert_eq!(p.last_stage_name().unwrap(), "a");
+    }
+
+    #[test]
+    fn test_pipeline_swap_stages_returns_false_for_unknown_stage() {
+        let mut p = Pipeline::new().add_stage("a", |s| Ok(s));
+        assert!(!p.swap_stages("a", "missing"));
+    }
+
+    #[test]
+    fn test_retry_policy_will_retry_at_all_false_for_none() {
+        let p = RetryPolicy::none();
+        assert!(!p.will_retry_at_all());
+    }
+
+    #[test]
+    fn test_retry_policy_will_retry_at_all_true_for_exponential() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(p.will_retry_at_all());
+    }
+
+    #[test]
+    fn test_agent_config_stop_sequence_count_zero_by_default() {
+        // Tested via AgentConfig but placed in orchestrator block for proximity
+        use crate::agent::AgentConfig;
+        let cfg = AgentConfig::new(5, "m");
+        assert_eq!(cfg.stop_sequence_count(), 0);
+    }
+
+    #[test]
+    fn test_agent_config_stop_sequence_count_after_adding() {
+        use crate::agent::AgentConfig;
+        let cfg = AgentConfig::new(5, "m")
+            .with_stop_sequences(vec!["STOP".to_string(), "END".to_string()]);
+        assert_eq!(cfg.stop_sequence_count(), 2);
     }
 }
