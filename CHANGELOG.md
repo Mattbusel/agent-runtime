@@ -11,6 +11,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.64.0] - 2026-03-20
+
+### Added
+
+- **`MetricsSnapshot::has_tool`** — check whether a tool has any recorded calls.
+- **`MetricsSnapshot::tool_call_share`** — fraction of total calls for a named tool.
+- **`GraphStore::entities_with_min_out_degree`** — entities with at least N outgoing edges.
+- **`AgentSession::has_thought_containing`** — true if any step thought contains a substring.
+- **`AgentSession::steps_with_action_length_above`** — steps with action byte length above threshold.
+- **`EpisodicStore::all_episode_ids`** — all episode IDs across every agent.
+- **`WorkingMemory::non_empty_values`** — values that are non-empty strings, in insertion order.
+- **`Pipeline::unique_stage_names`** — sorted deduplicated stage names.
+- **`AgentConfig::loop_timeout_ms`** — loop timeout expressed as milliseconds.
+- **`AgentConfig::total_timeout_ms`** — rough upper-bound budget: loop + max\_iterations × request timeout.
+- **`ReActStep::thought_is_empty`** — true when the thought string is empty or whitespace-only.
+- **`AgentConfig::model_is`** — case-sensitive model name predicate.
+- **Fixed**: worktree-added Round 47/48 tests using non-existent `ReActStep::new(4 args)`, `AgentConfig::builder()`, `RuntimeMetrics::record_step()`, and `AgentRuntime::new()` — corrected to use current API.
+
+---
+
 ## [1.63.0] - 2026-03-20
 
 ### Added
