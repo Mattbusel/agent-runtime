@@ -2675,4 +2675,51 @@ mod tests {
         let all = store.recall_all(&agent).unwrap();
         assert!(all.is_empty());
     }
+
+    #[test]
+    fn test_episodic_clear_all_removes_all_agents() {
+        let store = EpisodicStore::new();
+        let a1 = AgentId::new("a1");
+        let a2 = AgentId::new("a2");
+        store.add_episode(a1.clone(), "ep", 0.5).unwrap();
+        store.add_episode(a2.clone(), "ep", 0.5).unwrap();
+        store.clear_all().unwrap();
+        assert_eq!(store.len().unwrap(), 0);
+        assert!(store.list_agents().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_working_memory_drain_returns_all_and_empties() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("x", "1".to_string()).unwrap();
+        wm.set("y", "2".to_string()).unwrap();
+        let drained = wm.drain().unwrap();
+        assert_eq!(drained.len(), 2);
+        assert!(wm.is_empty().unwrap());
+    }
+
+    #[test]
+    fn test_working_memory_drain_preserves_insertion_order() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("a", "1".to_string()).unwrap();
+        wm.set("b", "2".to_string()).unwrap();
+        wm.set("c", "3".to_string()).unwrap();
+        let drained = wm.drain().unwrap();
+        let keys: Vec<&str> = drained.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_semantic_store_tag_count() {
+        let store = SemanticStore::new();
+        store.store("a", "1", vec!["rust".into(), "sys".into()]).unwrap();
+        store.store("b", "2", vec!["rust".into(), "ml".into()]).unwrap();
+        assert_eq!(store.tag_count().unwrap(), 3); // rust, sys, ml
+    }
+
+    #[test]
+    fn test_semantic_store_tag_count_empty() {
+        let store = SemanticStore::new();
+        assert_eq!(store.tag_count().unwrap(), 0);
+    }
 }

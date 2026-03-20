@@ -1807,4 +1807,34 @@ mod tests {
         let d = Deduplicator::new(Duration::from_secs(42));
         assert_eq!(d.ttl(), Duration::from_secs(42));
     }
+
+    #[test]
+    fn test_circuit_breaker_is_closed_initially() {
+        let cb = CircuitBreaker::new("svc", 3, Duration::from_secs(1)).unwrap();
+        assert!(cb.is_closed());
+        assert!(!cb.is_open());
+        assert!(!cb.is_half_open());
+    }
+
+    #[test]
+    fn test_circuit_breaker_is_open_after_threshold_failures() {
+        let cb = CircuitBreaker::new("svc", 2, Duration::from_secs(60)).unwrap();
+        cb.record_failure();
+        cb.record_failure();
+        assert!(cb.is_open());
+        assert!(!cb.is_closed());
+    }
+
+    #[test]
+    fn test_retry_policy_total_max_delay_constant() {
+        // constant 100ms × 3 attempts = 300ms total
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        assert_eq!(p.total_max_delay_ms(), 300);
+    }
+
+    #[test]
+    fn test_retry_policy_total_max_delay_none_is_zero() {
+        let p = RetryPolicy::none();
+        assert_eq!(p.total_max_delay_ms(), 0);
+    }
 }

@@ -1029,4 +1029,17 @@ mod tests {
         assert!(json.get("total_steps").is_some());
         assert!(json.get("total_tool_calls").is_some());
     }
+
+    #[test]
+    fn test_metrics_snapshot_is_zero_on_new_metrics() {
+        let m = RuntimeMetrics::new();
+        assert!(m.snapshot().is_zero());
+    }
+
+    #[test]
+    fn test_metrics_snapshot_is_zero_false_after_activity() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("t");
+        assert!(!m.snapshot().is_zero());
+    }
 }
