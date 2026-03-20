@@ -1674,6 +1674,26 @@ impl AgentSession {
         self.steps.first().map_or(0, |s| s.observation.len())
     }
 
+    /// Return `true` if any step has an empty `observation` field.
+    ///
+    /// Useful for detecting incomplete ReAct traces where a tool produced no
+    /// output.
+    pub fn has_step_with_empty_observation(&self) -> bool {
+        self.steps.iter().any(|s| s.observation.is_empty())
+    }
+
+    /// Return the ratio of total thought bytes to total action bytes.
+    ///
+    /// Returns `0.0` when there are no action bytes (avoids division by zero).
+    pub fn thought_to_action_byte_ratio(&self) -> f64 {
+        let thought_bytes: usize = self.steps.iter().map(|s| s.thought.len()).sum();
+        let action_bytes: usize = self.steps.iter().map(|s| s.action.len()).sum();
+        if action_bytes == 0 {
+            return 0.0;
+        }
+        thought_bytes as f64 / action_bytes as f64
+    }
+
     /// Return the statistical variance of thought byte lengths across all steps.
     ///
     /// Returns `0.0` for a session with fewer than two steps.
@@ -1988,6 +2008,61 @@ impl AgentSession {
         self.steps
             .iter()
             .any(|s| terms.iter().any(|t| s.observation.contains(t)))
+    }
+
+    /// Return the step at `index`, or `None` if the index is out of bounds.
+    pub fn step_at_index(&self, index: usize) -> Option<&ReActStep> {
+        self.steps.get(index)
+    }
+
+    /// Return `true` if any step's thought contains **all** of the provided
+    /// `terms` as substrings (case-sensitive).
+    ///
+    /// Returns `false` for an empty `terms` slice or an empty session.
+    pub fn thought_contains_all(&self, terms: &[&str]) -> bool {
+        if terms.is_empty() {
+            return false;
+        }
+        self.steps
+            .iter()
+            .any(|s| terms.iter().all(|t| s.thought.contains(t)))
+    }
+
+    /// Return `true` if any step's action contains at least one of the
+    /// provided `terms` (case-sensitive substring match).
+    ///
+    /// Returns `false` for an empty `terms` slice or an empty session.
+    pub fn action_contains_any(&self, terms: &[&str]) -> bool {
+        if terms.is_empty() {
+            return false;
+        }
+        self.steps
+            .iter()
+            .any(|s| terms.iter().any(|t| s.action.contains(t)))
+    }
+
+    /// Return the maximum thought length in characters across all steps.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn max_thought_chars(&self) -> usize {
+        self.steps
+            .iter()
+            .map(|s| s.thought.chars().count())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Return the minimum thought length in characters, considering only
+    /// steps that have a non-empty thought.
+    ///
+    /// Returns `0` if there are no non-empty thoughts.
+    pub fn min_thought_chars(&self) -> usize {
+        self.steps
+            .iter()
+            .map(|s| s.thought.chars().count())
+            .filter(|&n| n > 0)
+            .min()
+            .unwrap_or(0)
     }
 }
 
@@ -2676,6 +2751,19 @@ impl AgentRuntime {
         names
     }
 
+    /// Return an owned, sorted list of registered tool names.
+    ///
+    /// Unlike [`AgentRuntime::tool_names`] which borrows from `self`, this
+    /// method returns `Vec<String>` so the result can outlive the runtime
+    /// reference — useful for logging, serialisation, or passing across async
+    /// boundaries.
+    pub fn registered_tool_names(&self) -> Vec<String> {
+        let mut names: Vec<String> =
+            self.tools.iter().map(|t| t.name.clone()).collect();
+        names.sort_unstable();
+        names
+    }
+
     /// Return a reference to the runtime's agent configuration.
     pub fn config(&self) -> &AgentConfig {
         &self.agent_config
@@ -2690,6 +2778,12 @@ impl AgentRuntime {
     /// to allow per session.
     pub fn session_max_iterations(&self) -> usize {
         self.agent_config.max_iterations
+    }
+
+    /// Return `true` if a tool with the given `name` is registered with this
+    /// runtime's tool registry.
+    pub fn is_registered_tool(&self, name: &str) -> bool {
+        self.tools.iter().any(|t| t.name == name)
     }
 
     /// Gracefully shut down the runtime.
@@ -7109,6 +7203,49 @@ mod tests {
         assert_eq!(session.first_observation_bytes(), 0);
     }
 
+    // ── Round 59: has_step_with_empty_observation, thought_to_action_byte_ratio ──
+
+    #[test]
+    fn test_has_step_with_empty_observation_true() {
+        let steps = vec![make_step("t", "a", "")];
+        let session = make_session(steps, 0);
+        assert!(session.has_step_with_empty_observation());
+    }
+
+    #[test]
+    fn test_has_step_with_empty_observation_false_when_all_nonempty() {
+        let steps = vec![make_step("t", "a", "obs")];
+        let session = make_session(steps, 0);
+        assert!(!session.has_step_with_empty_observation());
+    }
+
+    #[test]
+    fn test_has_step_with_empty_observation_false_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(!session.has_step_with_empty_observation());
+    }
+
+    #[test]
+    fn test_thought_to_action_byte_ratio_correct() {
+        // thought = "hello" (5 bytes), action = "hi" (2 bytes) → 5/2 = 2.5
+        let steps = vec![make_step("hello", "hi", "o")];
+        let session = make_session(steps, 0);
+        assert!((session.thought_to_action_byte_ratio() - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_thought_to_action_byte_ratio_zero_when_no_action_bytes() {
+        let steps = vec![make_step("thought", "", "o")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.thought_to_action_byte_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_thought_to_action_byte_ratio_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.thought_to_action_byte_ratio(), 0.0);
+    }
+
     // ── Round 58: steps_matching_thought, median_observation_chars, cumulative_thought_chars, count_steps_with_thought_containing ──
 
     #[test]
@@ -7191,5 +7328,136 @@ mod tests {
         let steps = vec![make_step("t", "a", "something")];
         let session = make_session(steps, 0);
         assert!(!session.observation_contains_any(&[]));
+    }
+
+    // ── Round 59: step_at_index, thought_contains_all, action_contains_any, max_thought_chars, min_thought_chars, is_registered_tool ──
+
+    #[test]
+    fn test_step_at_index_returns_correct_step() {
+        let steps = vec![
+            make_step("first", "a1", "o1"),
+            make_step("second", "a2", "o2"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.step_at_index(1).map(|s| s.thought.as_str()), Some("second"));
+    }
+
+    #[test]
+    fn test_step_at_index_returns_none_out_of_bounds() {
+        let session = make_session(vec![], 0);
+        assert!(session.step_at_index(0).is_none());
+    }
+
+    #[test]
+    fn test_thought_contains_all_true_when_all_present_in_one_step() {
+        let steps = vec![
+            make_step("alpha beta gamma", "a", "o"),
+            make_step("alpha only", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(session.thought_contains_all(&["alpha", "beta"]));
+    }
+
+    #[test]
+    fn test_thought_contains_all_false_when_no_single_step_has_all() {
+        let steps = vec![
+            make_step("alpha", "a", "o"),
+            make_step("beta", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(!session.thought_contains_all(&["alpha", "beta"]));
+    }
+
+    #[test]
+    fn test_action_contains_any_true_when_present() {
+        let steps = vec![
+            make_step("t", "search(query)", "o"),
+            make_step("t", "read(file)", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(session.action_contains_any(&["search", "write"]));
+    }
+
+    #[test]
+    fn test_action_contains_any_false_when_not_present() {
+        let steps = vec![make_step("t", "read(file)", "o")];
+        let session = make_session(steps, 0);
+        assert!(!session.action_contains_any(&["search", "write"]));
+    }
+
+    #[test]
+    fn test_max_thought_chars_returns_longest() {
+        let steps = vec![
+            make_step("hi", "a", "o"),
+            make_step("hello world", "a", "o"),
+            make_step("hey", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.max_thought_chars(), 11);
+    }
+
+    #[test]
+    fn test_max_thought_chars_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.max_thought_chars(), 0);
+    }
+
+    #[test]
+    fn test_min_thought_chars_returns_shortest_non_empty() {
+        let steps = vec![
+            make_step("", "a", "o"),
+            make_step("ab", "a", "o"),
+            make_step("abcd", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.min_thought_chars(), 2);
+    }
+
+    #[test]
+    fn test_min_thought_chars_zero_when_all_empty() {
+        let steps = vec![make_step("", "a", "o")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.min_thought_chars(), 0);
+    }
+
+    #[test]
+    fn test_is_registered_tool_true_for_registered_tool() {
+        let spec = crate::agent::ToolSpec::new("calculator", "Does math", |_| {
+            serde_json::json!("ok")
+        });
+        let rt = AgentRuntime::builder()
+            .with_agent_config(AgentConfig::new(3, "m"))
+            .register_tool(spec)
+            .build();
+        assert!(rt.is_registered_tool("calculator"));
+    }
+
+    #[test]
+    fn test_is_registered_tool_false_for_unknown_tool() {
+        let rt = AgentRuntime::quick(3, "m");
+        assert!(!rt.is_registered_tool("nonexistent"));
+    }
+
+    // ── Round 58: registered_tool_names ───────────────────────────────────────
+
+    #[test]
+    fn test_registered_tool_names_returns_owned_sorted_names() {
+        let rt = AgentRuntime::builder()
+            .with_agent_config(AgentConfig::new(3, "test-model"))
+            .register_tool(crate::agent::ToolSpec::new("beta", "b", |_| {
+                serde_json::json!("ok")
+            }))
+            .register_tool(crate::agent::ToolSpec::new("alpha", "a", |_| {
+                serde_json::json!("ok")
+            }))
+            .build();
+        let names = rt.registered_tool_names();
+        assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn test_registered_tool_names_empty_when_no_tools() {
+        let rt = AgentRuntime::quick(3, "test-model");
+        assert!(rt.registered_tool_names().is_empty());
     }
 }

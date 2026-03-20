@@ -377,6 +377,15 @@ impl RetryPolicy {
     pub fn max_single_delay_ms(&self) -> u64 {
         self.delay_for(self.max_attempts).as_millis() as u64
     }
+
+    /// Return `true` if this policy allows at least `n` retry attempts
+    /// (i.e. `max_attempts > n`).
+    ///
+    /// Useful for validating that a policy can tolerate a minimum number of
+    /// consecutive failures before giving up.
+    pub fn covers_n_failures(&self, n: u32) -> bool {
+        self.max_attempts > n
+    }
 }
 
 impl std::fmt::Display for RetryPolicy {
@@ -2175,6 +2184,13 @@ impl Pipeline {
     /// Equivalent to `stage_count() == 0`.
     pub fn has_no_stages(&self) -> bool {
         self.stages.is_empty()
+    }
+
+    /// Return the byte length of the longest stage name in the pipeline.
+    ///
+    /// Returns `0` for an empty pipeline.
+    pub fn longest_stage_name_len(&self) -> usize {
+        self.stages.iter().map(|s| s.name.len()).max().unwrap_or(0)
     }
 
     /// Return `true` if **all** stage names start with `prefix`.
@@ -4654,6 +4670,22 @@ mod tests {
         assert!(!p.has_no_stages());
     }
 
+    // ── Round 59: longest_stage_name_len ─────────────────────────────────────
+
+    #[test]
+    fn test_longest_stage_name_len_returns_max() {
+        let p = Pipeline::new()
+            .add_stage("short", |s: String| Ok(s))
+            .add_stage("much-longer-name", |s: String| Ok(s));
+        assert_eq!(p.longest_stage_name_len(), "much-longer-name".len());
+    }
+
+    #[test]
+    fn test_longest_stage_name_len_zero_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert_eq!(p.longest_stage_name_len(), 0);
+    }
+
     // ── Round 57: any_stage_has_name ─────────────────────────────────────────
 
     #[test]
@@ -4675,5 +4707,27 @@ mod tests {
     fn test_any_stage_has_name_false_for_empty_pipeline() {
         let p = Pipeline::new();
         assert!(!p.any_stage_has_name("anything"));
+    }
+
+    // ── Round 58: covers_n_failures ───────────────────────────────────────────
+
+    #[test]
+    fn test_covers_n_failures_true_when_max_attempts_exceeds_n() {
+        let policy = RetryPolicy::exponential(5, 100).unwrap();
+        assert!(policy.covers_n_failures(4));
+        assert!(policy.covers_n_failures(0));
+    }
+
+    #[test]
+    fn test_covers_n_failures_false_when_max_attempts_equals_n() {
+        let policy = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(!policy.covers_n_failures(3));
+    }
+
+    #[test]
+    fn test_covers_n_failures_false_for_no_retry_policy() {
+        let policy = RetryPolicy::none();
+        // none() has max_attempts == 1, so covers_n_failures(1) is false
+        assert!(!policy.covers_n_failures(1));
     }
 }

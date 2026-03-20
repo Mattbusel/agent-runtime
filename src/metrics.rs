@@ -1057,6 +1057,15 @@ impl MetricsSnapshot {
     pub fn any_tool_exceeds_calls(&self, threshold: u64) -> bool {
         self.per_tool_calls.values().any(|&c| c > threshold)
     }
+
+    /// Return the number of distinct tools that have been tracked in this
+    /// snapshot (i.e. tools with at least one call recorded).
+    ///
+    /// Equivalent to `per_tool_calls.len()` but exposed as a named method for
+    /// readability.
+    pub fn total_unique_tools(&self) -> usize {
+        self.per_tool_calls.len()
+    }
 }
 
 impl std::fmt::Display for MetricsSnapshot {
@@ -1698,6 +1707,15 @@ impl RuntimeMetrics {
             .unwrap_or(0)
     }
 
+    /// Return the name of the most-called tool, or `None` if no tools have
+    /// been called yet.
+    pub fn top_called_tool(&self) -> Option<String> {
+        self.per_tool_calls_snapshot()
+            .into_iter()
+            .max_by_key(|(_, c)| *c)
+            .map(|(name, _)| name)
+    }
+
     /// Return the top `n` tools by total call count, sorted descending.
     ///
     /// Returns fewer than `n` entries if fewer tools have been called.
@@ -1781,6 +1799,31 @@ impl RuntimeMetrics {
     /// Useful for guard-checking before using latency percentile methods.
     pub fn has_latency_data(&self) -> bool {
         self.total_steps.load(Ordering::Relaxed) > 0
+    }
+
+    /// Return the ratio of `failed_tool_calls` to `total_tool_calls`.
+    ///
+    /// Returns `0.0` when no tool calls have been recorded (avoids
+    /// division-by-zero).
+    pub fn global_failure_rate(&self) -> f64 {
+        let total = self.total_tool_calls.load(Ordering::Relaxed);
+        if total == 0 {
+            return 0.0;
+        }
+        self.failed_tool_calls.load(Ordering::Relaxed) as f64 / total as f64
+    }
+
+    /// Return the total number of tool calls recorded across all agents in
+    /// the per-agent breakdown.
+    ///
+    /// This sums the per-agent, per-tool call counters and is independent of
+    /// the global `total_tool_calls` counter, which is incremented by a
+    /// different code path.
+    pub fn total_agent_tool_calls(&self) -> u64 {
+        self.per_agent_tool_calls_snapshot()
+            .values()
+            .flat_map(|tool_map| tool_map.values())
+            .sum()
     }
 
     /// Capture a snapshot of global counters as plain integers.
@@ -4344,6 +4387,22 @@ mod tests {
         assert!(!m.has_latency_data());
     }
 
+    // ── Round 59: global_failure_rate ─────────────────────────────────────────
+
+    #[test]
+    fn test_global_failure_rate_correct() {
+        let m = RuntimeMetrics::new();
+        m.total_tool_calls.store(10, Ordering::Relaxed);
+        m.failed_tool_calls.store(2, Ordering::Relaxed);
+        assert!((m.global_failure_rate() - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_global_failure_rate_zero_when_no_calls() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.global_failure_rate(), 0.0);
+    }
+
     // ── Round 57: failure_ratio_for_tool, any_tool_exceeds_calls ─────────────
 
     #[test]
@@ -4396,5 +4455,56 @@ mod tests {
     fn test_tool_call_count_for_returns_zero_for_unknown_tool() {
         let m = RuntimeMetrics::new();
         assert_eq!(m.tool_call_count_for("nonexistent"), 0);
+    }
+
+    // ── Round 58: total_unique_tools, total_agent_tool_calls ──────────────────
+
+    #[test]
+    fn test_total_unique_tools_counts_distinct_tools() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        m.record_tool_call("search");
+        m.record_tool_call("browse");
+        let snap = m.snapshot();
+        assert_eq!(snap.total_unique_tools(), 2);
+    }
+
+    #[test]
+    fn test_total_unique_tools_zero_for_no_calls() {
+        let m = RuntimeMetrics::new();
+        let snap = m.snapshot();
+        assert_eq!(snap.total_unique_tools(), 0);
+    }
+
+    #[test]
+    fn test_total_agent_tool_calls_sums_all_agents() {
+        let m = RuntimeMetrics::new();
+        m.record_agent_tool_call("agent-1", "search");
+        m.record_agent_tool_call("agent-1", "browse");
+        m.record_agent_tool_call("agent-2", "search");
+        assert_eq!(m.total_agent_tool_calls(), 3);
+    }
+
+    #[test]
+    fn test_total_agent_tool_calls_zero_for_new_metrics() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.total_agent_tool_calls(), 0);
+    }
+
+    // ── Round 59: top_called_tool ──────────────────────────────────────────────
+
+    #[test]
+    fn test_top_called_tool_returns_most_called() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        m.record_tool_call("search");
+        m.record_tool_call("browse");
+        assert_eq!(m.top_called_tool().as_deref(), Some("search"));
+    }
+
+    #[test]
+    fn test_top_called_tool_none_for_new_metrics() {
+        let m = RuntimeMetrics::new();
+        assert!(m.top_called_tool().is_none());
     }
 }

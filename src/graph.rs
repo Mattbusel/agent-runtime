@@ -3365,6 +3365,21 @@ impl GraphStore {
             .collect())
     }
 
+    /// Return the in-degree of the entity with the given `id` — the number of
+    /// relationships whose `to` field equals `id`.
+    ///
+    /// Returns `0` when the entity has no incoming edges or does not exist.
+    pub fn in_degree_of(&self, id: &EntityId) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::in_degree_of");
+        let count = inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter())
+            .filter(|r| &r.to == id)
+            .count();
+        Ok(count)
+    }
+
     ///
     /// Entities with no outgoing edges have an out-degree of 0 and are
     /// excluded unless `min_degree` is 0.  Returns an empty `Vec` for an
@@ -3566,6 +3581,37 @@ impl GraphStore {
             .map_or(0, |rels| rels.len()))
     }
 
+    /// Return the IDs of all entities whose `label` matches the given string.
+    ///
+    /// Returns an empty `Vec` when no entity with that label exists.
+    pub fn entities_by_label(
+        &self,
+        label: &str,
+    ) -> Result<Vec<EntityId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entities_by_label");
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| e.label == label)
+            .map(|e| e.id.clone())
+            .collect())
+    }
+
+    /// Return the number of edges from `from_id` that point to `to_id`.
+    ///
+    /// Returns `0` when either entity does not exist or no such edge is found.
+    pub fn edge_count_between(
+        &self,
+        from_id: &EntityId,
+        to_id: &EntityId,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::edge_count_between");
+        Ok(inner
+            .adjacency
+            .get(from_id)
+            .map_or(0, |rels| rels.iter().filter(|r| &r.to == to_id).count()))
+    }
+
     /// Return all entities that have at least one **incoming** relationship
     /// (in-degree ≥ 1).
     ///
@@ -3716,6 +3762,7 @@ impl GraphStore {
             .count();
         Ok(count)
     }
+
 }
 
 impl Default for GraphStore {
@@ -7736,6 +7783,51 @@ mod tests {
         assert_eq!(g.relationship_count_for_entity(&id).unwrap(), 0);
     }
 
+    // ── Round 59: entities_by_label, edge_count_between ──────────────────────
+
+    #[test]
+    fn test_entities_by_label_returns_matching_ids() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a1", "Person")).unwrap();
+        g.add_entity(Entity::new("a2", "Person")).unwrap();
+        g.add_entity(Entity::new("a3", "Place")).unwrap();
+        let mut ids = g.entities_by_label("Person").unwrap();
+        ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0].as_str(), "a1");
+        assert_eq!(ids[1].as_str(), "a2");
+    }
+
+    #[test]
+    fn test_entities_by_label_empty_for_unknown_label() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("x", "Thing")).unwrap();
+        let ids = g.entities_by_label("Nonexistent").unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_edge_count_between_returns_count() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("u", "N")).unwrap();
+        g.add_entity(Entity::new("v", "N")).unwrap();
+        g.add_relationship(Relationship::new("u", "v", "LINKS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("u", "v", "ALSO", 1.0)).unwrap();
+        let from = EntityId::new("u");
+        let to = EntityId::new("v");
+        assert_eq!(g.edge_count_between(&from, &to).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_edge_count_between_zero_when_no_edge() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("u2", "N")).unwrap();
+        g.add_entity(Entity::new("v2", "N")).unwrap();
+        let from = EntityId::new("u2");
+        let to = EntityId::new("v2");
+        assert_eq!(g.edge_count_between(&from, &to).unwrap(), 0);
+    }
+
     // ── Round 58: nodes_with_no_outgoing ──────────────────────────────────────
 
     #[test]
@@ -7758,5 +7850,60 @@ mod tests {
         g.add_entity(Entity::new("a", "N")).unwrap();
         g.add_entity(Entity::new("b", "N")).unwrap();
         assert_eq!(g.nodes_with_no_outgoing().unwrap().len(), 2);
+    }
+
+    // ── Round 58: relationship_kinds, max_out_degree ──────────────────────────
+
+    #[test]
+    fn test_relationship_kinds_returns_sorted_unique_kinds() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "follows", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "likes", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "follows", 1.0)).unwrap();
+        let kinds = g.relationship_kinds().unwrap();
+        assert_eq!(kinds, vec!["follows", "likes"]);
+    }
+
+    #[test]
+    fn test_relationship_kinds_empty_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(g.relationship_kinds().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_max_out_degree_returns_correct_max() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "k", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "k", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "k", 1.0)).unwrap();
+        assert_eq!(g.max_out_degree().unwrap(), 2);
+    }
+
+    // ── Round 59: in_degree_of ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_in_degree_of_counts_incoming_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("src1", "N")).unwrap();
+        g.add_entity(Entity::new("src2", "N")).unwrap();
+        g.add_entity(Entity::new("dst", "N")).unwrap();
+        g.add_relationship(Relationship::new("src1", "dst", "k", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("src2", "dst", "k", 1.0)).unwrap();
+        let dst = EntityId("dst".to_string());
+        assert_eq!(g.in_degree_of(&dst).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_in_degree_of_zero_for_node_with_no_incoming() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("alone", "N")).unwrap();
+        let id = EntityId("alone".to_string());
+        assert_eq!(g.in_degree_of(&id).unwrap(), 0);
     }
 }
