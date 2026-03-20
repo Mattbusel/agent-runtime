@@ -271,6 +271,18 @@ impl AgentSession {
         self.steps.last().map(|s| s.thought.as_str())
     }
 
+    /// Return the action name from the first step, or `None` if the session
+    /// has no steps.
+    pub fn first_action(&self) -> Option<&str> {
+        self.steps.first().map(|s| s.action.as_str())
+    }
+
+    /// Return the action name from the last step, or `None` if the session
+    /// has no steps.
+    pub fn last_action(&self) -> Option<&str> {
+        self.steps.last().map(|s| s.action.as_str())
+    }
+
     /// Return all per-step durations in milliseconds, in order.
     ///
     /// Useful for computing custom percentiles or detecting slow outlier steps.
@@ -2432,5 +2444,43 @@ mod tests {
     fn test_last_thought_none_for_empty_session() {
         let session = make_session(vec![], 0);
         assert!(session.last_thought().is_none());
+    }
+
+    // ── Round 13: first_action / last_action ──────────────────────────────────
+
+    #[test]
+    fn test_first_action_returns_action_from_first_step() {
+        let session = make_session(
+            vec![
+                ReActStep::new("t1", "search", "r1"),
+                ReActStep::new("t2", "FINAL_ANSWER", "r2"),
+            ],
+            0,
+        );
+        assert_eq!(session.first_action(), Some("search"));
+    }
+
+    #[test]
+    fn test_last_action_returns_action_from_last_step() {
+        let session = make_session(
+            vec![
+                ReActStep::new("t1", "search", "r1"),
+                ReActStep::new("t2", "FINAL_ANSWER", "r2"),
+            ],
+            0,
+        );
+        assert_eq!(session.last_action(), Some("FINAL_ANSWER"));
+    }
+
+    #[test]
+    fn test_first_action_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.first_action().is_none());
+    }
+
+    #[test]
+    fn test_last_action_equals_first_action_for_single_step() {
+        let session = make_session(vec![ReActStep::new("t", "calc", "r")], 0);
+        assert_eq!(session.first_action(), session.last_action());
     }
 }

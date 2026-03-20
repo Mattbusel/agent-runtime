@@ -11,6 +11,43 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.28.0] - 2026-03-20
+
+### Added
+
+- **`ToolSpec::required_field_count`** (`agent.rs`) — number of required fields
+  configured; complements `has_required_fields`.
+- **`ToolSpec::has_required_fields`** (`agent.rs`) — `true` when at least one
+  required field is configured.
+- **`ToolSpec::has_validators`** (`agent.rs`) — `true` when at least one custom
+  argument validator is attached.
+- **`Relationship::is_self_loop`** (`graph.rs`) — `true` when source and target
+  entity IDs are equal.
+- **`Relationship::reversed`** (`graph.rs`) — return a new `Relationship` with
+  `from` and `to` swapped, preserving `kind` and `weight`.
+- **`GraphStore::find_entities_by_labels`** (`graph.rs`) — return entities whose
+  label is any of the given strings; multi-label generalisation of
+  `find_entities_by_label`.
+- **`GraphStore::remove_isolated`** (`graph.rs`) — remove all entities with no
+  incoming or outgoing edges and return the count; useful for graph compaction.
+- **`Pipeline::first_stage_name`** / **`last_stage_name`** (`orchestrator.rs`) —
+  return the name of the first/last stage without constructing a full `stage_names()`
+  list.
+- **`Deduplicator::contains`** (`orchestrator.rs`) — read-only check whether a
+  key is currently in-flight or cached; does not register the key.
+- **`EpisodicStore::most_recalled`** (`memory.rs`) — return the episode with the
+  highest `recall_count` for an agent.
+- **`AgentConfig::remaining_iterations_after`** (`agent.rs`) — iterations
+  remaining after `n` have been completed; uses saturating subtraction.
+
+### Fixed
+
+- Test assertion in `test_remove_isolated_removes_nodes_without_edges` — changed
+  incorrect `.unwrap().is_none()` / `.unwrap().is_some()` calls on `Entity` to
+  `.is_err()` / `.is_ok()` on the `Result` returned by `get_entity`.
+
+---
+
 ## [1.27.0] - 2026-03-20
 
 ### Added

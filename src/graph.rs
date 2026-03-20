@@ -3767,4 +3767,47 @@ mod tests {
         g.add_relationship(Relationship::new("a", "b", "r", 1.0)).unwrap();
         assert_eq!(g.remove_isolated().unwrap(), 0);
     }
+
+    // ── Round 13: successors / is_sink ────────────────────────────────────────
+
+    #[test]
+    fn test_successors_returns_direct_out_neighbors() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_entity(Entity::new("c", "C")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "r", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "r", 1.0)).unwrap();
+        let mut ids: Vec<String> = g
+            .successors(&EntityId::new("a"))
+            .unwrap()
+            .iter()
+            .map(|e| e.id.as_str().to_string())
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn test_successors_empty_for_sink_node() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("leaf", "L")).unwrap();
+        assert!(g.successors(&EntityId::new("leaf")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_is_sink_true_for_node_with_no_outgoing_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "r", 1.0)).unwrap();
+        assert!(!g.is_sink(&EntityId::new("a")).unwrap());
+        assert!(g.is_sink(&EntityId::new("b")).unwrap());
+    }
+
+    #[test]
+    fn test_is_sink_true_for_unknown_entity() {
+        let g = GraphStore::new();
+        assert!(g.is_sink(&EntityId::new("ghost")).unwrap());
+    }
 }

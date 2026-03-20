@@ -558,6 +558,17 @@ impl RuntimeMetrics {
         self.total_sessions.load(Ordering::Relaxed)
     }
 
+    /// Return the average number of tool calls per completed session.
+    ///
+    /// Returns `0.0` when no sessions have been recorded.
+    pub fn avg_tool_calls_per_session(&self) -> f64 {
+        let sessions = self.total_sessions();
+        if sessions == 0 {
+            return 0.0;
+        }
+        self.total_tool_calls() as f64 / sessions as f64
+    }
+
     /// Return the total number of ReAct steps executed across all sessions.
     pub fn total_steps(&self) -> u64 {
         self.total_steps.load(Ordering::Relaxed)
