@@ -743,24 +743,22 @@ impl Deduplicator {
         let mut inner = timed_lock(&self.inner, "Deduplicator::complete");
         inner.in_flight.remove(key);
 
-        // Enforce max_entries cap: evict the oldest entry when full.
+        // Enforce max_entries cap: evict via insertion-ordered VecDeque (O(1) amortised).
+        // Ghost entries (already expired by a prior `retain`) are skipped by looping.
         if let Some(max) = self.max_entries {
-            if inner.cache.len() >= max {
-                // Find and remove the entry with the earliest insertion time.
-                if let Some(oldest_key) = inner
-                    .cache
-                    .iter()
-                    .min_by_key(|(_, (_, ts))| *ts)
-                    .map(|(k, _)| k.clone())
-                {
-                    inner.cache.remove(&oldest_key);
+            while inner.cache.len() >= max {
+                match inner.cache_order.pop_front() {
+                    Some(oldest_key) => {
+                        inner.cache.remove(&oldest_key);
+                    }
+                    None => break,
                 }
             }
         }
 
-        inner
-            .cache
-            .insert(key.to_owned(), (result.into(), Instant::now()));
+        let owned_key = key.to_owned();
+        inner.cache_order.push_back(owned_key.clone());
+        inner.cache.insert(owned_key, (result.into(), Instant::now()));
         Ok(())
     }
 
@@ -786,6 +784,24 @@ impl Deduplicator {
     pub fn cached_count(&self) -> Result<usize, AgentRuntimeError> {
         let inner = timed_lock(&self.inner, "Deduplicator::cached_count");
         Ok(inner.cache.len())
+    }
+
+    /// Eagerly evict all cache entries whose TTL has elapsed.
+    ///
+    /// Under normal operation expired entries are removed lazily on the next
+    /// `check*` call.  Call `purge_expired` for deterministic memory reclamation
+    /// (e.g. before a `cached_count` snapshot or in a maintenance loop).
+    ///
+    /// Returns the number of entries that were removed.
+    pub fn purge_expired(&self) -> Result<usize, AgentRuntimeError> {
+        let mut inner = timed_lock(&self.inner, "Deduplicator::purge_expired");
+        let ttl = self.ttl;
+        let now = std::time::Instant::now();
+        let before = inner.cache.len();
+        inner.cache.retain(|_, (_, inserted_at)| {
+            now.duration_since(*inserted_at) <= ttl
+        });
+        Ok(before - inner.cache.len())
     }
 }
 

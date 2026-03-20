@@ -896,6 +896,35 @@ impl EpisodicStore {
         Ok(items)
     }
 
+    /// Recall episodes for `agent_id` that contain **all** of the specified `tags`.
+    ///
+    /// Returns at most `limit` items ordered by descending importance, consistent
+    /// with [`recall`].  Pass an empty `tags` slice to match all episodes.
+    ///
+    /// [`recall`]: EpisodicStore::recall
+    pub fn recall_tagged(
+        &self,
+        agent_id: &AgentId,
+        tags: &[&str],
+        limit: usize,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::recall_tagged");
+        let items = inner.items.get(agent_id).cloned().unwrap_or_default();
+        drop(inner);
+        let mut matched: Vec<MemoryItem> = items
+            .into_iter()
+            .filter(|item| {
+                tags.iter()
+                    .all(|t| item.tags.iter().any(|it| it.as_str() == *t))
+            })
+            .collect();
+        matched.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
+        if limit > 0 {
+            matched.truncate(limit);
+        }
+        Ok(matched)
+    }
+
     /// Return the total number of stored episodes across all agents.
     pub fn len(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "EpisodicStore::len");
@@ -1177,6 +1206,33 @@ impl SemanticStore {
         Ok(scored)
     }
 
+    /// Look up a single entry by its exact key.
+    ///
+    /// Returns `Ok(Some((value, tags)))` if found, `Ok(None)` if not.
+    pub fn retrieve_by_key(&self, key: &str) -> Result<Option<(String, Vec<String>)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::retrieve_by_key");
+        Ok(inner.entries.iter().find(|e| e.key == key).map(|e| (e.value.clone(), e.tags.clone())))
+    }
+
+    /// Remove the first entry whose key matches `key`.  Returns `true` if found.
+    pub fn remove(&self, key: &str) -> Result<bool, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "SemanticStore::remove");
+        if let Some(pos) = inner.entries.iter().position(|e| e.key == key) {
+            inner.entries.remove(pos);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Remove all entries.
+    pub fn clear(&self) -> Result<(), AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "SemanticStore::clear");
+        inner.entries.clear();
+        inner.expected_dim = None;
+        Ok(())
+    }
+
     /// Return the total number of stored entries.
     pub fn len(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::len");
@@ -1302,6 +1358,23 @@ impl WorkingMemory {
             inner.map.insert(key, value);
         }
         Ok(())
+    }
+
+    /// Remove a single entry by key.  Returns `true` if the key existed.
+    pub fn remove(&self, key: &str) -> Result<bool, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "WorkingMemory::remove");
+        if inner.map.remove(key).is_some() {
+            inner.order.retain(|k| k != key);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Return all keys in insertion order.
+    pub fn keys(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::keys");
+        Ok(inner.order.iter().cloned().collect())
     }
 
     /// Remove all entries from working memory.

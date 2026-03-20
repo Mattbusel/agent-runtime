@@ -11,6 +11,30 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.6.0] - 2026-03-20
+
+### Changed
+
+- **`Deduplicator::complete`** (`orchestrator.rs`) — eviction of the oldest cache
+  entry under `max_entries` now uses the insertion-ordered `cache_order:
+  VecDeque<String>` added to `DeduplicatorInner`.  The previous implementation
+  scanned the entire cache with `Iterator::min_by_key` (O(N)) on every insert;
+  `pop_front` is O(1) amortised.  Ghost entries (keys already expired by a prior
+  `retain` call) are skipped with a loop so that a real eviction always occurs.
+- **`GraphStore::subgraph`** (`graph.rs`) — entity-copy phase acquires
+  `new_store`'s mutex **once** for the full batch instead of once per entity,
+  mirroring the same optimisation previously applied to the relationship-copy phase.
+- **`GraphStore::relationship_exists`** (`graph.rs`) — replaced
+  `inner.relationships.iter().any(|r| r.from == *from && r.to == *to)` (O(|E|))
+  with an `adjacency.get(from)` lookup (O(out-degree)), consistent with how all
+  other traversal methods now use the adjacency index.
+- **`AgentRuntime` memory-context builder** (`runtime.rs`) — eliminated the
+  intermediate `Vec<String>` that collected formatted episode strings before
+  joining; replaced with a single `write!` loop directly into a pre-allocated
+  `String`, removing one allocation and the join pass per context-build.
+
+---
+
 ## [1.5.0] - 2026-03-20
 
 ### Changed

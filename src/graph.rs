@@ -1078,6 +1078,54 @@ impl GraphStore {
             .collect())
     }
 
+    /// Return all outgoing relationships from `id` (those where `id` is the source).
+    pub fn get_relationships_for(
+        &self,
+        id: &EntityId,
+    ) -> Result<Vec<Relationship>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "get_relationships_for");
+        Ok(inner
+            .adjacency
+            .get(id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Return all relationships where both endpoints are `from` and `to` (any direction or kind).
+    pub fn relationships_between(
+        &self,
+        from: &EntityId,
+        to: &EntityId,
+    ) -> Result<Vec<Relationship>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "relationships_between");
+        Ok(inner
+            .relationships
+            .iter()
+            .filter(|r| {
+                (r.from == *from && r.to == *to) || (r.from == *to && r.to == *from)
+            })
+            .cloned()
+            .collect())
+    }
+
+    /// Find entities that have a property `key` whose value equals `expected`.
+    ///
+    /// Uses `serde_json::Value` equality; for string properties pass
+    /// `serde_json::Value::String(...)`.
+    pub fn find_entities_by_property(
+        &self,
+        key: &str,
+        expected: &serde_json::Value,
+    ) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "find_entities_by_property");
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| e.properties.get(key) == Some(expected))
+            .cloned()
+            .collect())
+    }
+
     /// Merge another `GraphStore` into this one.
     ///
     /// Entities are inserted (or replaced if the same ID exists); relationships
