@@ -164,6 +164,13 @@ impl RetryPolicy {
         self.max_attempts
     }
 
+    /// Return `true` if this policy performs no retries (max_attempts ≤ 1).
+    ///
+    /// Useful for short-circuiting retry logic in hot paths.
+    pub fn is_no_retry(&self) -> bool {
+        self.max_attempts <= 1
+    }
+
     /// Return a copy of this policy with the base delay changed to `ms` milliseconds.
     ///
     /// # Errors
@@ -1126,6 +1133,16 @@ impl BackpressureGuard {
         Ok(self.depth()? >= self.capacity)
     }
 
+    /// Return `true` if no slots are currently in use.
+    pub fn is_empty(&self) -> Result<bool, AgentRuntimeError> {
+        Ok(self.depth()? == 0)
+    }
+
+    /// Return the number of additional request slots available before the hard cap.
+    pub fn available_capacity(&self) -> Result<usize, AgentRuntimeError> {
+        Ok(self.capacity.saturating_sub(self.depth()?))
+    }
+
     /// Return the hard capacity (maximum concurrent slots) configured for this guard.
     pub fn hard_capacity(&self) -> usize {
         self.capacity
@@ -1308,6 +1325,13 @@ impl Pipeline {
     /// Return the name of the stage at zero-based `index`, or `None` if out of bounds.
     pub fn get_stage_name_at(&self, index: usize) -> Option<&str> {
         self.stages.get(index).map(|s| s.name.as_str())
+    }
+
+    /// Return the zero-based index of the first stage with the given name.
+    ///
+    /// Returns `None` if no stage with that name exists.
+    pub fn stage_index(&self, name: &str) -> Option<usize> {
+        self.stages.iter().position(|s| s.name == name)
     }
 
     /// Remove the first stage whose name equals `name`.
@@ -2354,5 +2378,25 @@ mod tests {
         let p = RetryPolicy::constant(5, 200).unwrap();
         assert_eq!(p.delay_for(0), p.delay_for(1));
         assert_eq!(p.delay_for(1), p.delay_for(3));
+    }
+
+    // ── Round 9: is_no_retry ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_no_retry_true_for_none_policy() {
+        let p = RetryPolicy::none();
+        assert!(p.is_no_retry());
+    }
+
+    #[test]
+    fn test_is_no_retry_false_for_exponential_policy() {
+        let p = RetryPolicy::exponential(3, 50).unwrap();
+        assert!(!p.is_no_retry());
+    }
+
+    #[test]
+    fn test_is_no_retry_false_for_constant_policy_with_multiple_attempts() {
+        let p = RetryPolicy::constant(2, 100).unwrap();
+        assert!(!p.is_no_retry());
     }
 }

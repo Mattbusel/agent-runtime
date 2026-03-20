@@ -181,6 +181,11 @@ impl LatencyHistogram {
         self.percentile(0.99)
     }
 
+    /// Return the 25th-percentile latency in milliseconds.
+    pub fn p25(&self) -> u64 {
+        self.percentile(0.25)
+    }
+
     /// Return the 75th-percentile latency in milliseconds.
     pub fn p75(&self) -> u64 {
         self.percentile(0.75)

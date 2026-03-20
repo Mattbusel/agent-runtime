@@ -732,6 +732,70 @@ impl EpisodicStore {
         Ok(inner.items.get(agent_id).map_or(0, |v| v.len()))
     }
 
+    /// Return all agent IDs that have at least one stored episode, sorted.
+    pub fn agents(&self) -> Result<Vec<AgentId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::agents");
+        let mut ids: Vec<AgentId> = inner
+            .items
+            .keys()
+            .filter(|id| !inner.items[id].is_empty())
+            .cloned()
+            .collect();
+        ids.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        Ok(ids)
+    }
+
+    /// Return up to `n` episodes for `agent_id` sorted by descending importance
+    /// without incrementing recall counts or applying decay.
+    ///
+    /// Use this for read-only importance-ranked snapshots.
+    pub fn recall_top_n(
+        &self,
+        agent_id: &AgentId,
+        n: usize,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::recall_top_n");
+        let mut items: Vec<MemoryItem> = inner
+            .items
+            .get(agent_id)
+            .cloned()
+            .unwrap_or_default();
+        items.sort_unstable_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        items.truncate(n);
+        Ok(items)
+    }
+
+    /// Return all episodes for `agent_id` whose importance is within
+    /// `[min_inclusive, max_inclusive]`, sorted by descending importance.
+    pub fn filter_by_importance(
+        &self,
+        agent_id: &AgentId,
+        min: f32,
+        max: f32,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::filter_by_importance");
+        let mut items: Vec<MemoryItem> = inner
+            .items
+            .get(agent_id)
+            .map(|v| {
+                v.iter()
+                    .filter(|i| i.importance >= min && i.importance <= max)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        items.sort_unstable_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(items)
+    }
+
     /// Return the arithmetic mean importance for `agent_id`, or `0.0` if the
     /// agent has no stored episodes.
     pub fn importance_avg(&self, agent_id: &AgentId) -> Result<f32, AgentRuntimeError> {
@@ -1725,6 +1789,12 @@ impl SemanticStore {
         Ok(distinct.len())
     }
 
+    /// Return the number of entries that have an associated embedding vector.
+    pub fn entry_count_with_embedding(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::entry_count_with_embedding");
+        Ok(inner.entries.iter().filter(|e| e.embedding.is_some()).count())
+    }
+
     /// Return the stored value for the first entry whose key matches `key`,
     /// or `None` if no such entry exists.
     ///
@@ -1798,6 +1868,19 @@ impl SemanticStore {
         } else {
             Ok(false)
         }
+    }
+
+    /// Return all stored entries as a `HashMap<key, value>`.
+    ///
+    /// Useful for serialization or bulk inspection.  Tags and embeddings are
+    /// discarded; use `iter()` / `retrieve_by_key` when those are needed.
+    pub fn to_map(&self) -> Result<std::collections::HashMap<String, String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::to_map");
+        Ok(inner
+            .entries
+            .iter()
+            .map(|e| (e.key.clone(), e.value.clone()))
+            .collect())
     }
 
     /// Update the tags of the first entry whose key matches `key`.
@@ -1980,6 +2063,29 @@ impl WorkingMemory {
         } else {
             Ok(false)
         }
+    }
+
+    /// Update multiple existing keys in a single lock acquisition.
+    ///
+    /// Each `(key, value)` pair is applied only if the key is already present
+    /// (same semantics as [`update_if_exists`]).  Returns the number of keys
+    /// that were found and updated.
+    ///
+    /// [`update_if_exists`]: WorkingMemory::update_if_exists
+    pub fn update_many(
+        &self,
+        pairs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Result<usize, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "WorkingMemory::update_many");
+        let mut updated = 0;
+        for (key, value) in pairs {
+            let key: String = key.into();
+            if let Some(v) = inner.map.get_mut(&key) {
+                *v = value.into();
+                updated += 1;
+            }
+        }
+        Ok(updated)
     }
 
     /// Rename a key without changing its value or insertion order.
@@ -4229,5 +4335,68 @@ mod tests {
     fn test_semantic_get_value_returns_none_for_missing_key() {
         let store = SemanticStore::new();
         assert!(store.get_value("ghost").unwrap().is_none());
+    }
+
+    // ── Round 9: recall_top_n / filter_by_importance / update_many / entry_count_with_embedding ──
+
+    #[test]
+    fn test_recall_top_n_returns_highest_importance_items() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "low", 0.1).unwrap();
+        store.add_episode(agent.clone(), "mid", 0.5).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        let top = store.recall_top_n(&agent, 2).unwrap();
+        assert_eq!(top.len(), 2);
+        assert!((top[0].importance - 0.9).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_recall_top_n_clamps_to_available_items() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "only", 0.5).unwrap();
+        let top = store.recall_top_n(&agent, 100).unwrap();
+        assert_eq!(top.len(), 1);
+    }
+
+    #[test]
+    fn test_filter_by_importance_returns_items_in_range() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("b");
+        store.add_episode(agent.clone(), "low", 0.1).unwrap();
+        store.add_episode(agent.clone(), "mid", 0.5).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        let mid_range = store.filter_by_importance(&agent, 0.3, 0.7).unwrap();
+        assert_eq!(mid_range.len(), 1);
+        assert!((mid_range[0].importance - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_update_many_sets_multiple_keys() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("x", "old_x").unwrap();
+        wm.set("y", "old_y").unwrap();
+        let updated = wm
+            .update_many(vec![("x".to_string(), "new_x".to_string()), ("y".to_string(), "new_y".to_string())])
+            .unwrap();
+        assert_eq!(updated, 2);
+        assert_eq!(wm.get("x").unwrap(), Some("new_x".to_string()));
+        assert_eq!(wm.get("y").unwrap(), Some("new_y".to_string()));
+    }
+
+    #[test]
+    fn test_update_many_returns_zero_for_empty_iter() {
+        let wm = WorkingMemory::new(5).unwrap();
+        let updated = wm.update_many(vec![]).unwrap();
+        assert_eq!(updated, 0);
+    }
+
+    #[test]
+    fn test_entry_count_with_embedding_counts_only_embedded_entries() {
+        let store = SemanticStore::new();
+        store.store("has_emb", "v1", vec![0.1, 0.2]).unwrap();
+        store.store("no_emb", "v2", vec![]).unwrap();
+        assert_eq!(store.entry_count_with_embedding().unwrap(), 1);
     }
 }

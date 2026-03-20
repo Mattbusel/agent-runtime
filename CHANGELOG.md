@@ -11,6 +11,27 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.20.0] - 2026-03-20
+
+### Added
+
+- **`LatencyHistogram::p25`** (`metrics.rs`) — 25th-percentile latency; completes
+  the p25/p50/p75/p90/p95/p99 percentile suite.
+- **`EpisodicStore::agents`** (`memory.rs`) — return all agent IDs that have at
+  least one stored episode, sorted; useful for per-agent bulk operations.
+- **`SemanticStore::to_map`** (`memory.rs`) — return all entries as
+  `HashMap<key, value>`; convenient for serialization or bulk inspection.
+- **`Pipeline::has_stage`** (`orchestrator.rs`) — `true` if any stage has the
+  given name; cheaper than iterating `stage_names()`.
+- **`Pipeline::stage_index`** (`orchestrator.rs`) — zero-based index of the
+  first stage with a given name, or `None` if absent.
+- **`BackpressureGuard::is_empty`** (`orchestrator.rs`) — `true` when no slots
+  are currently in use (depth == 0).
+- **`BackpressureGuard::available_capacity`** (`orchestrator.rs`) — number of
+  additional request slots available before the hard cap.
+
+---
+
 ## [1.19.0] - 2026-03-20
 
 ### Added
