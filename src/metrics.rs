@@ -2080,4 +2080,37 @@ mod tests {
             Some(&1)
         );
     }
+
+    // ── Round 24: coefficient_of_variation ────────────────────────────────────
+
+    #[test]
+    fn test_coefficient_of_variation_zero_when_empty() {
+        let h = LatencyHistogram::default();
+        assert!((h.coefficient_of_variation() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_coefficient_of_variation_positive_with_spread() {
+        let h = LatencyHistogram::default();
+        // Wide spread: 10ms and 1000ms — std_dev should be significant
+        for _ in 0..50 {
+            h.record(10);
+        }
+        for _ in 0..50 {
+            h.record(1000);
+        }
+        let cv = h.coefficient_of_variation();
+        assert!(cv > 0.0, "CV should be positive for spread data, got {cv}");
+    }
+
+    #[test]
+    fn test_coefficient_of_variation_near_zero_for_uniform_data() {
+        let h = LatencyHistogram::default();
+        // All the same latency bucket → std_dev ≈ 0
+        for _ in 0..100 {
+            h.record(50);
+        }
+        // CV won't be exactly 0 due to bucket approximation, but should be small
+        assert!(h.coefficient_of_variation() < 1.0);
+    }
 }

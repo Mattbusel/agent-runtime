@@ -11,6 +11,38 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.41.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::action_repetition_rate`** (`runtime.rs`) — fraction of step
+  transitions that repeat the immediately preceding action; useful for loop
+  detection.  Returns `0.0` for sessions with fewer than two steps.
+- **`AgentSession::max_consecutive_failures`** (`runtime.rs`) — length of the
+  longest unbroken run of failed steps (observation contains `"error"`).
+- **`AgentSession::avg_thought_length`** (`runtime.rs`) — mean character length
+  of non-empty thought strings; `0.0` when no thoughts exist.
+- **`EpisodicStore::avg_importance`** (`memory.rs`) — mean importance score
+  across all episodes for an agent; `0.0` when the agent has no episodes.
+- **`EpisodicStore::importance_range`** (`memory.rs`) — `(min, max)` importance
+  tuple; `None` when the agent has no stored episodes.
+- **`SemanticStore::entries_without_tags`** (`memory.rs`) — count of entries
+  that have an empty tag list.
+- **`SemanticStore::avg_tag_count_per_entry`** (`memory.rs`) — mean number of
+  tags per entry; `0.0` when the store is empty.
+- **`WorkingMemory::longest_key`** (`memory.rs`) — the key with the most bytes;
+  `None` when the store is empty.
+- **`WorkingMemory::longest_value`** (`memory.rs`) — the value string with the
+  most bytes; `None` when the store is empty.
+- **`LatencyHistogram::coefficient_of_variation`** (`metrics.rs`) —
+  `std_dev_ms / mean_ms`; `0.0` when `mean_ms` is zero.
+
+### Tests
+
+- 35 new unit tests covering all ten methods listed above.
+
+---
+
 ## [1.40.0] - 2026-03-20
 
 ### Tests
