@@ -1042,6 +1042,30 @@ impl GraphStore {
         }
     }
 
+    /// Return `true` if the graph is a DAG (directed acyclic graph).
+    ///
+    /// Equivalent to `!detect_cycles()` but reads more naturally in
+    /// condition expressions.
+    pub fn is_dag(&self) -> Result<bool, AgentRuntimeError> {
+        Ok(!self.detect_cycles()?)
+    }
+
+    /// Return the number of outgoing edges (out-degree) for `id`.
+    ///
+    /// Returns `0` if the entity has no outgoing edges or does not exist.
+    pub fn out_degree(&self, id: &EntityId) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "out_degree");
+        Ok(inner.adjacency.get(id).map_or(0, |rels| rels.len()))
+    }
+
+    /// Return the number of incoming edges (in-degree) for `id`.
+    ///
+    /// Scans all relationships in O(|E|).
+    pub fn in_degree(&self, id: &EntityId) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "in_degree");
+        Ok(inner.relationships.iter().filter(|r| &r.to == id).count())
+    }
+
     /// Return `true` if there is any path from `from` to `to`.
     ///
     /// Both nodes must exist or returns `Err`. Uses BFS internally.

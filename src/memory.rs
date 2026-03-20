@@ -37,18 +37,6 @@ fn normalize_in_place(v: &mut Vec<f32>) {
     }
 }
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a < f32::EPSILON || norm_b < f32::EPSILON {
-        return 0.0;
-    }
-    (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
-}
 
 // ── Newtype IDs ───────────────────────────────────────────────────────────────
 
@@ -1247,6 +1235,10 @@ impl SemanticStore {
         } else {
             inner.expected_dim = Some(embedding.len());
         }
+        // Pre-normalize so retrieve_similar can use dot product instead of
+        // full cosine similarity for a ~3× speedup on large stores.
+        let mut embedding = embedding;
+        normalize_in_place(&mut embedding);
         inner.entries.push(SemanticEntry {
             key: key.into(),
             value: value.into(),
@@ -1303,12 +1295,25 @@ impl SemanticStore {
             }
         }
 
+        // Normalize the query so we can use dot product against pre-normalized
+        // stored embeddings (equivalent to cosine similarity, but faster).
+        let query_norm: f32 = query_embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if query_norm < f32::EPSILON {
+            return Ok(vec![]);
+        }
+        let query_unit: Vec<f32> = query_embedding.iter().map(|x| x / query_norm).collect();
+
         let mut scored: Vec<(String, String, f32)> = inner
             .entries
             .iter()
             .filter_map(|entry| {
                 entry.embedding.as_ref().map(|emb| {
-                    let sim = cosine_similarity(query_embedding, emb);
+                    let sim = emb
+                        .iter()
+                        .zip(query_unit.iter())
+                        .map(|(a, b)| a * b)
+                        .sum::<f32>()
+                        .clamp(-1.0, 1.0);
                     (entry.key.clone(), entry.value.clone(), sim)
                 })
             })

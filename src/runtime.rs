@@ -125,6 +125,14 @@ impl AgentSession {
             .count()
     }
 
+    /// Return the sum of all individual step durations in milliseconds.
+    ///
+    /// This is the cumulative inference + tool execution time across all steps,
+    /// which may differ from `duration_ms` due to overhead between steps.
+    pub fn total_step_duration_ms(&self) -> u64 {
+        self.steps.iter().map(|s| s.step_duration_ms).sum()
+    }
+
     /// Persist this session as a checkpoint under `"session:<session_id>"`.
     #[cfg(feature = "persistence")]
     pub async fn save_checkpoint(
@@ -842,6 +850,36 @@ impl AgentRuntime {
         }
 
         tracing::info!("AgentRuntime shutdown complete");
+    }
+
+    /// Run an agent session using a shared [`LlmProvider`].
+    ///
+    /// Convenience wrapper around [`run_agent`] that wires the provider's
+    /// `complete` method as the inference closure.  Inference errors are
+    /// converted to a `FINAL ANSWER` string so the loop terminates gracefully
+    /// rather than panicking.
+    ///
+    /// [`run_agent`]: AgentRuntime::run_agent
+    /// [`LlmProvider`]: crate::providers::LlmProvider
+    #[cfg(feature = "providers")]
+    pub async fn run_agent_with_provider(
+        &self,
+        agent_id: AgentId,
+        prompt: &str,
+        provider: std::sync::Arc<dyn crate::providers::LlmProvider>,
+    ) -> Result<AgentSession, AgentRuntimeError> {
+        let model = self.agent_config.model.clone();
+        self.run_agent(agent_id, prompt, |ctx| {
+            let provider = provider.clone();
+            let model = model.clone();
+            async move {
+                provider
+                    .complete(&ctx, &model)
+                    .await
+                    .unwrap_or_else(|e| format!("FINAL ANSWER: inference error: {e}"))
+            }
+        })
+        .await
     }
 }
 

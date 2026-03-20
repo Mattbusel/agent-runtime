@@ -127,6 +127,17 @@ impl RetryPolicy {
         })
     }
 
+    /// Create a no-retry policy (single attempt, no delay).
+    ///
+    /// Useful for one-shot operations or when the caller manages retry logic externally.
+    pub fn none() -> Self {
+        Self {
+            max_attempts: 1,
+            base_delay: Duration::ZERO,
+            kind: RetryKind::Constant,
+        }
+    }
+
     /// Return a copy of this policy with `max_attempts` changed.
     ///
     /// # Errors
@@ -637,6 +648,10 @@ struct DeduplicatorInner {
     in_flight: HashMap<String, Instant>,       // key → started_at
     /// Insertion-ordered keys for O(1) FIFO eviction when `max_entries` is set.
     cache_order: std::collections::VecDeque<String>,
+    /// Tracks calls since the last full expiry scan. Full scans run every
+    /// `EXPIRY_INTERVAL` calls; per-key inline checks maintain correctness
+    /// between scans.
+    call_count: u64,
 }
 
 impl Deduplicator {
@@ -649,6 +664,7 @@ impl Deduplicator {
                 cache: HashMap::new(),
                 in_flight: HashMap::new(),
                 cache_order: std::collections::VecDeque::new(),
+                call_count: 0,
             })),
         }
     }
@@ -679,20 +695,37 @@ impl Deduplicator {
 
         let now = Instant::now();
 
-        // Expire stale cache entries
-        inner
-            .cache
-            .retain(|_, (_, ts)| now.duration_since(*ts) < self.ttl);
-        inner
-            .in_flight
-            .retain(|_, ts| now.duration_since(*ts) < self.ttl);
-
-        if let Some((result, _)) = inner.cache.get(key) {
-            return Ok(DeduplicationResult::Cached(result.clone()));
+        // Lazy expiry: full O(n) retain scan runs only every EXPIRY_INTERVAL
+        // calls, amortising the cost. Per-key inline checks below keep
+        // correctness between scans.
+        const EXPIRY_INTERVAL: u64 = 64;
+        inner.call_count = inner.call_count.wrapping_add(1);
+        if inner.call_count % EXPIRY_INTERVAL == 0 {
+            let ttl = self.ttl;
+            inner.cache.retain(|_, (_, ts)| now.duration_since(*ts) < ttl);
+            inner
+                .in_flight
+                .retain(|_, ts| now.duration_since(*ts) < ttl);
         }
 
-        if inner.in_flight.contains_key(key) {
-            return Ok(DeduplicationResult::InProgress);
+        // Inline expiry check for this specific key.
+        match inner.cache.get(key) {
+            Some((result, ts)) if now.duration_since(*ts) < self.ttl => {
+                return Ok(DeduplicationResult::Cached(result.clone()));
+            }
+            Some(_) => {
+                inner.cache.remove(key); // entry is expired
+            }
+            None => {}
+        }
+        match inner.in_flight.get(key) {
+            Some(ts) if now.duration_since(*ts) < self.ttl => {
+                return Ok(DeduplicationResult::InProgress);
+            }
+            Some(_) => {
+                inner.in_flight.remove(key); // in-flight entry is expired
+            }
+            None => {}
         }
 
         inner.in_flight.insert(key.to_owned(), now);
@@ -707,15 +740,31 @@ impl Deduplicator {
         let mut inner = timed_lock(&self.inner, "Deduplicator::check");
         let now = Instant::now();
 
-        inner.cache.retain(|_, (_, ts)| now.duration_since(*ts) < ttl);
-        inner.in_flight.retain(|_, ts| now.duration_since(*ts) < ttl);
-
-        if let Some((result, _)) = inner.cache.get(key) {
-            return Ok(DeduplicationResult::Cached(result.clone()));
+        // Lazy expiry: full scan every EXPIRY_INTERVAL calls.
+        const EXPIRY_INTERVAL: u64 = 64;
+        inner.call_count = inner.call_count.wrapping_add(1);
+        if inner.call_count % EXPIRY_INTERVAL == 0 {
+            inner.cache.retain(|_, (_, ts)| now.duration_since(*ts) < ttl);
+            inner.in_flight.retain(|_, ts| now.duration_since(*ts) < ttl);
         }
 
-        if inner.in_flight.contains_key(key) {
-            return Ok(DeduplicationResult::InProgress);
+        match inner.cache.get(key) {
+            Some((result, ts)) if now.duration_since(*ts) < ttl => {
+                return Ok(DeduplicationResult::Cached(result.clone()));
+            }
+            Some(_) => {
+                inner.cache.remove(key);
+            }
+            None => {}
+        }
+        match inner.in_flight.get(key) {
+            Some(ts) if now.duration_since(*ts) < ttl => {
+                return Ok(DeduplicationResult::InProgress);
+            }
+            Some(_) => {
+                inner.in_flight.remove(key);
+            }
+            None => {}
         }
 
         inner.in_flight.insert(key.to_owned(), now);
@@ -808,6 +857,11 @@ impl Deduplicator {
     pub fn cached_count(&self) -> Result<usize, AgentRuntimeError> {
         let inner = timed_lock(&self.inner, "Deduplicator::cached_count");
         Ok(inner.cache.len())
+    }
+
+    /// Return the configured time-to-live for cached results.
+    pub fn ttl(&self) -> Duration {
+        self.ttl
     }
 
     /// Remove all in-flight entries and cached results.
@@ -922,6 +976,11 @@ impl BackpressureGuard {
         let mut depth = timed_lock(&self.inner, "BackpressureGuard::release");
         *depth = depth.saturating_sub(1);
         Ok(())
+    }
+
+    /// Return `true` if the guard is at or over its hard capacity.
+    pub fn is_full(&self) -> Result<bool, AgentRuntimeError> {
+        Ok(self.depth()? >= self.capacity)
     }
 
     /// Return the hard capacity (maximum concurrent slots) configured for this guard.
