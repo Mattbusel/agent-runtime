@@ -461,11 +461,31 @@ impl OpenAiProvider {
 impl LlmProvider for OpenAiProvider {
     #[tracing::instrument(skip(self, prompt), fields(model, provider = "openai"))]
     async fn complete(&self, prompt: &str, model: &str) -> Result<String, AgentRuntimeError> {
+        self.complete_with_options(prompt, CompletionOptions::new(model))
+            .await
+    }
+
+    /// Complete with per-request options (max_tokens, temperature, timeout).
+    ///
+    /// Honours `options.max_tokens` and `options.temperature` when set, falling
+    /// back to the API default when unset.
+    #[tracing::instrument(skip(self, prompt, options), fields(model = options.model, provider = "openai"))]
+    async fn complete_with_options(
+        &self,
+        prompt: &str,
+        options: CompletionOptions<'_>,
+    ) -> Result<String, AgentRuntimeError> {
         let url = format!("{}/chat/completions", self.base_url);
-        let body = serde_json::json!({
-            "model": model,
+        let mut body = serde_json::json!({
+            "model": options.model,
             "messages": [{ "role": "user", "content": prompt }]
         });
+        if let Some(max_tokens) = options.max_tokens {
+            body["max_tokens"] = serde_json::json!(max_tokens);
+        }
+        if let Some(temp) = options.temperature {
+            body["temperature"] = serde_json::json!(temp);
+        }
 
         let response = self
             .client

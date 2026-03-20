@@ -1106,7 +1106,17 @@ impl SemanticStore {
             })
             .collect();
 
-        scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        // Partial sort: when top_k < total candidates, select_nth_unstable_by
+        // partitions in O(n), then sort only the top top_k in O(top_k log top_k).
+        let cmp = |a: &(String, String, f32), b: &(String, String, f32)| {
+            b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
+        };
+        if top_k > 0 && top_k < scored.len() {
+            scored.select_nth_unstable_by(top_k - 1, cmp);
+            scored[..top_k].sort_by(cmp);
+        } else {
+            scored.sort_by(cmp);
+        }
         scored.truncate(top_k);
         Ok(scored)
     }

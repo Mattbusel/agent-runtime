@@ -51,8 +51,19 @@ pub struct EntityId(pub String);
 
 impl EntityId {
     /// Create a new `EntityId` from any string-like value.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Triggers a `debug_assert!` if `id` is empty.  In release builds a
+    /// `tracing::warn!` is emitted instead so that the misconfiguration is
+    /// surfaced in production logs without aborting the process.
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        let id = id.into();
+        if id.is_empty() {
+            debug_assert!(false, "EntityId must not be empty");
+            tracing::warn!("EntityId::new called with an empty string — entity IDs should be non-empty to avoid lookup ambiguity");
+        }
+        Self(id)
     }
 
     /// Return the inner ID string as a `&str`.
@@ -107,6 +118,19 @@ impl Entity {
             label: label.into(),
             properties,
         }
+    }
+
+    /// Add a single key-value property, consuming and returning `self`.
+    ///
+    /// Allows fluent builder-style construction:
+    /// ```rust,ignore
+    /// let e = Entity::new("alice", "Person")
+    ///     .with_property("age", 30.into())
+    ///     .with_property("role", "engineer".into());
+    /// ```
+    pub fn with_property(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.properties.insert(key.into(), value);
+        self
     }
 }
 
@@ -551,13 +575,17 @@ impl GraphStore {
                 return Ok(Some((path, cost)));
             }
 
-            for rel in inner.relationships.iter().filter(|r| &r.from == &current) {
-                let next_cost = cost + rel.weight;
-                let entry = dist.entry(rel.to.clone()).or_insert(f32::INFINITY);
-                if next_cost < *entry {
-                    *entry = next_cost;
-                    prev.insert(rel.to.clone(), current.clone());
-                    heap.push((OrdF32(-next_cost), rel.to.clone()));
+            // Use the adjacency index for O(degree) neighbour lookup instead of
+            // scanning all relationships.
+            if let Some(rels) = inner.adjacency.get(&current) {
+                for rel in rels {
+                    let next_cost = cost + rel.weight;
+                    let entry = dist.entry(rel.to.clone()).or_insert(f32::INFINITY);
+                    if next_cost < *entry {
+                        *entry = next_cost;
+                        prev.insert(rel.to.clone(), current.clone());
+                        heap.push((OrdF32(-next_cost), rel.to.clone()));
+                    }
                 }
             }
         }
@@ -624,23 +652,23 @@ impl GraphStore {
         let inner = recover_lock(self.inner.lock(), "degree_centrality");
         let n = inner.entities.len();
 
-        let mut out_degree: HashMap<EntityId, usize> = HashMap::new();
-        let mut in_degree: HashMap<EntityId, usize> = HashMap::new();
-
-        for id in inner.entities.keys() {
-            out_degree.insert(id.clone(), 0);
-            in_degree.insert(id.clone(), 0);
-        }
+        // Out-degree is already available directly from the adjacency index:
+        // adjacency[id].len() == number of outgoing edges from id.
+        // Only in-degree requires a pass over relationships.
+        let mut in_degree: HashMap<EntityId, usize> = inner
+            .entities
+            .keys()
+            .map(|id| (id.clone(), 0usize))
+            .collect();
 
         for rel in &inner.relationships {
-            *out_degree.entry(rel.from.clone()).or_insert(0) += 1;
             *in_degree.entry(rel.to.clone()).or_insert(0) += 1;
         }
 
         let denom = if n <= 1 { 1.0 } else { (n - 1) as f32 };
         let mut result = HashMap::new();
         for id in inner.entities.keys() {
-            let od = *out_degree.get(id).unwrap_or(&0);
+            let od = inner.adjacency.get(id).map_or(0, |v| v.len());
             let id_ = *in_degree.get(id).unwrap_or(&0);
             let centrality = if n <= 1 {
                 0.0
@@ -974,6 +1002,62 @@ impl GraphStore {
         }
 
         Ok(result)
+    }
+
+    /// Return all entities in the graph.
+    pub fn all_entities(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "all_entities");
+        Ok(inner.entities.values().cloned().collect())
+    }
+
+    /// Return all relationships in the graph.
+    pub fn all_relationships(&self) -> Result<Vec<Relationship>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "all_relationships");
+        Ok(inner.relationships.clone())
+    }
+
+    /// Return all entities whose `label` matches `label` (case-sensitive).
+    pub fn find_entities_by_label(&self, label: &str) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "find_entities_by_label");
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| e.label == label)
+            .cloned()
+            .collect())
+    }
+
+    /// Merge another `GraphStore` into this one.
+    ///
+    /// Entities are inserted (or replaced if the same ID exists); relationships
+    /// are inserted only if the `(from, to, kind)` triple does not already exist.
+    pub fn merge(&self, other: &GraphStore) -> Result<(), AgentRuntimeError> {
+        let other_inner = recover_lock(other.inner.lock(), "merge:read");
+        let other_entities: Vec<Entity> = other_inner.entities.values().cloned().collect();
+        let other_rels: Vec<Relationship> = other_inner.relationships.clone();
+        drop(other_inner);
+
+        let mut inner = recover_lock(self.inner.lock(), "merge:write");
+        inner.cycle_cache = None;
+        for entity in other_entities {
+            inner.adjacency.entry(entity.id.clone()).or_default();
+            inner.entities.insert(entity.id.clone(), entity);
+        }
+        for rel in other_rels {
+            let already_exists = inner
+                .relationships
+                .iter()
+                .any(|r| r.from == rel.from && r.to == rel.to && r.kind == rel.kind);
+            if !already_exists && inner.entities.contains_key(&rel.from) && inner.entities.contains_key(&rel.to) {
+                inner
+                    .adjacency
+                    .entry(rel.from.clone())
+                    .or_default()
+                    .push(rel.clone());
+                inner.relationships.push(rel);
+            }
+        }
+        Ok(())
     }
 
     /// Extract a subgraph containing only the specified entities and the

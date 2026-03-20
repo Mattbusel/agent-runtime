@@ -11,6 +11,35 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.3.0] - 2026-03-20
+
+### Added
+
+- **`OpenAiProvider::complete_with_options`** (`providers.rs`) — proper override that
+  sends `max_tokens` and `temperature` in the request body when set, instead of
+  silently falling back to the API default.  `complete` now delegates to
+  `complete_with_options` for consistency with `AnthropicProvider`.
+
+### Changed
+
+- **`EntityId::new`** (`graph.rs`) — apply the same `if id.is_empty() { debug_assert!;
+  tracing::warn! }` pattern already used by `AgentId::new` and `MemoryId::new`.
+- **`GraphStore::weighted_shortest_path`** Dijkstra loop (`graph.rs`) — replaced
+  `inner.relationships.iter().filter(|r| r.from == current)` with
+  `inner.adjacency.get(&current)`.  The adjacency index was added in Round 1
+  specifically to make BFS/DFS/shortest-path O(degree) per step; Dijkstra was the
+  remaining method that still did an O(|E|) scan per visited node.
+- **`GraphStore::degree_centrality`** (`graph.rs`) — eliminated the separate
+  `out_degree: HashMap` by reading out-degree directly from the adjacency index
+  (`adjacency.get(id).map_or(0, |v| v.len())`).  Saves one HashMap allocation and
+  an O(V) initialization loop.
+- **`SemanticStore::retrieve_similar`** (`memory.rs`) — same partial-sort
+  optimization applied to `EpisodicStore::recall` in 1.2.0: uses
+  `select_nth_unstable_by` (O(n)) + sort of only the top-`top_k` candidates
+  (O(top_k log top_k)) rather than a full O(n log n) sort.
+
+---
+
 ## [1.2.0] - 2026-03-20
 
 ### Added
