@@ -192,6 +192,7 @@ pub struct AgentRuntimeBuilder<S = NeedsConfig> {
     metrics: Arc<RuntimeMetrics>,
     #[cfg(feature = "persistence")]
     checkpoint_backend: Option<Arc<dyn crate::persistence::PersistenceBackend>>,
+    token_estimator: Option<Arc<dyn TokenEstimator>>,
     _state: PhantomData<S>,
 }
 
@@ -246,6 +247,7 @@ impl Default for AgentRuntimeBuilder<NeedsConfig> {
             metrics: RuntimeMetrics::new(),
             #[cfg(feature = "persistence")]
             checkpoint_backend: None,
+            token_estimator: None,
             _state: PhantomData,
         }
     }
@@ -312,6 +314,16 @@ impl<S> AgentRuntimeBuilder<S> {
         self.checkpoint_backend = Some(backend);
         self
     }
+
+    /// Provide a custom [`TokenEstimator`] for memory budget calculations.
+    ///
+    /// Replaces the default `len / 4` byte-counting heuristic.  Use this to
+    /// plug in a model-specific tokenizer (e.g. tiktoken, sentencepiece) so
+    /// that `AgentConfig::max_memory_tokens` is respected accurately.
+    pub fn with_token_estimator(mut self, estimator: Arc<dyn TokenEstimator>) -> Self {
+        self.token_estimator = Some(estimator);
+        self
+    }
 }
 
 // `with_agent_config` transitions NeedsConfig → HasConfig.
@@ -338,6 +350,7 @@ impl AgentRuntimeBuilder<NeedsConfig> {
             metrics: self.metrics,
             #[cfg(feature = "persistence")]
             checkpoint_backend: self.checkpoint_backend,
+            token_estimator: self.token_estimator,
             _state: PhantomData,
         }
     }
@@ -364,9 +377,42 @@ impl AgentRuntimeBuilder<HasConfig> {
             agent_config,
             tools: self.tools,
             metrics: self.metrics,
+            token_estimator: self
+                .token_estimator
+                .unwrap_or_else(|| Arc::new(CharDivTokenEstimator)),
             #[cfg(feature = "persistence")]
             checkpoint_backend: self.checkpoint_backend,
         }
+    }
+}
+
+// ── TokenEstimator ────────────────────────────────────────────────────────────
+
+/// Estimates the number of tokens in a string.
+///
+/// Implement this trait to replace the default `len / 4` heuristic with a
+/// model-specific tokenizer (e.g. tiktoken, sentencepiece).
+///
+/// # Example
+/// ```rust,ignore
+/// struct TiktokenEstimator { enc: tiktoken::Encoding }
+/// impl TokenEstimator for TiktokenEstimator {
+///     fn count_tokens(&self, text: &str) -> usize {
+///         self.enc.encode_ordinary(text).len()
+///     }
+/// }
+/// ```
+pub trait TokenEstimator: Send + Sync {
+    /// Return an approximate token count for `text`.
+    fn count_tokens(&self, text: &str) -> usize;
+}
+
+/// Default heuristic: 1 token ≈ 4 bytes.
+pub struct CharDivTokenEstimator;
+
+impl TokenEstimator for CharDivTokenEstimator {
+    fn count_tokens(&self, text: &str) -> usize {
+        (text.len() / 4).max(1)
     }
 }
 
@@ -385,6 +431,7 @@ pub struct AgentRuntime {
     metrics: Arc<RuntimeMetrics>,
     #[cfg(feature = "persistence")]
     checkpoint_backend: Option<Arc<dyn crate::persistence::PersistenceBackend>>,
+    token_estimator: Arc<dyn TokenEstimator>,
 }
 
 impl std::fmt::Debug for AgentRuntime {
@@ -531,7 +578,7 @@ impl AgentRuntime {
                 memories
                     .into_iter()
                     .filter(|m| {
-                        let tokens = (m.content.len() / 4).max(1);
+                        let tokens = self.token_estimator.count_tokens(&m.content);
                         if used + tokens <= token_budget {
                             used += tokens;
                             true

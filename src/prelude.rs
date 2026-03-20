@@ -7,7 +7,9 @@
 pub use crate::error::AgentRuntimeError;
 
 #[cfg(feature = "memory")]
-pub use crate::runtime::{AgentRuntime, AgentRuntimeBuilder, AgentSession};
+pub use crate::runtime::{
+    AgentRuntime, AgentRuntimeBuilder, AgentSession, CharDivTokenEstimator, TokenEstimator,
+};
 
 #[cfg(feature = "memory")]
 pub use crate::memory::{

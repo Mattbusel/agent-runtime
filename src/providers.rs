@@ -24,6 +24,7 @@ use async_trait::async_trait;
 /// Allows callers to supply per-request parameters (max tokens, temperature,
 /// timeout) in addition to the model name, without changing the base
 /// [`LlmProvider::complete`] signature.
+#[derive(Debug)]
 pub struct CompletionOptions<'a> {
     /// Model identifier (e.g. `"claude-sonnet-4-6"`, `"gpt-4o"`).
     pub model: &'a str,
@@ -209,6 +210,7 @@ impl LlmProvider for AnthropicProvider {
     /// Complete with per-request options (max_tokens, temperature).
     ///
     /// Falls back to `Self::MAX_TOKENS` when `options.max_tokens` is not set.
+    #[tracing::instrument(skip(self, prompt, options), fields(model = options.model, provider = "anthropic"))]
     async fn complete_with_options(
         &self,
         prompt: &str,
@@ -438,6 +440,7 @@ impl OpenAiProvider {
 #[cfg(feature = "openai")]
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
+    #[tracing::instrument(skip(self, prompt), fields(model, provider = "openai"))]
     async fn complete(&self, prompt: &str, model: &str) -> Result<String, AgentRuntimeError> {
         let url = format!("{}/chat/completions", self.base_url);
         let body = serde_json::json!({
@@ -494,7 +497,7 @@ impl LlmProvider for OpenAiProvider {
             "messages": [{ "role": "user", "content": prompt }]
         });
 
-        let response = self
+        let mut response = self
             .client
             .post(&url)
             .bearer_auth(&self.api_key)

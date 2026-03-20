@@ -118,6 +118,7 @@ impl FilePersistenceBackend {
 
 #[async_trait]
 impl PersistenceBackend for FilePersistenceBackend {
+    #[tracing::instrument(skip(self, value), fields(key))]
     async fn save(&self, key: &str, value: &[u8]) -> Result<(), AgentRuntimeError> {
         let path = self.path_for(key);
         // Write to a unique temp file then atomically rename to the target path.
@@ -135,6 +136,7 @@ impl PersistenceBackend for FilePersistenceBackend {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self), fields(key))]
     async fn load(&self, key: &str) -> Result<Option<Vec<u8>>, AgentRuntimeError> {
         let path = self.path_for(key);
         match tokio::fs::read(&path).await {
