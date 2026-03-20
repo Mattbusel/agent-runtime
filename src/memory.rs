@@ -2404,6 +2404,24 @@ impl EpisodicStore {
         Ok(ids)
     }
 
+    /// Return all episodes for `agent_id` whose content byte length exceeds `min_bytes`.
+    ///
+    /// Returns an empty `Vec` when the agent has no episodes or none exceed the
+    /// threshold.
+    pub fn episodes_above_content_bytes(
+        &self,
+        agent_id: &AgentId,
+        min_bytes: usize,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episodes_above_content_bytes");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or_else(Vec::new, |items| {
+                items.iter().filter(|m| m.content.len() > min_bytes).cloned().collect()
+            }))
+    }
+
     /// Return all agent IDs sorted by episode count in descending order.
     ///
     /// Agents with more episodes appear first.  When two agents have the same

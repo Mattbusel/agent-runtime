@@ -1285,6 +1285,25 @@ impl AgentSession {
         self.steps.iter().map(|s| s.thought.len()).max().unwrap_or(0)
     }
 
+    /// Return references to steps whose action starts with `prefix`.
+    ///
+    /// Useful for filtering tool-call steps by tool name prefix (e.g. all
+    /// `"search_"` actions).  Returns an empty `Vec` when no step qualifies.
+    pub fn steps_by_action_prefix<'a>(&'a self, prefix: &str) -> Vec<&'a ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.action.starts_with(prefix))
+            .collect()
+    }
+
+    /// Return the number of tool-call steps in this session.
+    ///
+    /// Counts steps whose action is non-empty and is not a `FINAL_ANSWER`.
+    /// Returns `0` for an empty session.
+    pub fn action_count(&self) -> usize {
+        self.steps.iter().filter(|s| s.is_tool_call()).count()
+    }
+
     /// Return references to steps whose observation byte length exceeds `min_bytes`.
     ///
     /// Useful for finding steps that produced unexpectedly large observations.

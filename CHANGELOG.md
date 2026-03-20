@@ -11,6 +11,28 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.65.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::max_thought_bytes`** — byte length of the longest thought in a session.
+- **`AgentSession::steps_above_observation_bytes`** — steps with observation exceeding a byte threshold.
+- **`AgentRuntime::tool_names`** — sorted names of all registered tools.
+- **`GraphStore::entities_with_label_containing`** — entities whose label contains a substring.
+- **`GraphStore::total_property_count`** — total property key-value pairs across all entities.
+- **`GraphStore::entities_with_no_properties`** — bare entities with empty property maps.
+- **`EpisodicStore::episode_count_by_agent`** — map of agent ID to episode count.
+- **`EpisodicStore::agents_sorted_by_episode_count`** — agents ordered by episode count descending.
+- **`EpisodicStore::episodes_with_min_word_count`** — episodes with at least N words in content.
+- **`WorkingMemory::longest_value_bytes`** — byte length of the longest value in the store.
+- **`WorkingMemory::values_sorted`** — all values sorted alphabetically.
+- **`MetricsSnapshot::tool_call_imbalance`** — max-to-min call ratio across tools.
+- **`RuntimeMetrics::avg_tool_failures_per_session`** — average failures per completed session.
+- **`RuntimeMetrics::avg_memory_recalls_per_step`** — average memory recalls per step.
+- **Fixed**: worktree-added Round 49 tests using wrong API — corrected to proper struct construction patterns.
+
+---
+
 ## [1.64.0] - 2026-03-20
 
 ### Added
