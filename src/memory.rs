@@ -2460,6 +2460,66 @@ impl EpisodicStore {
                     .collect()
             }))
     }
+
+    /// Return the episode with the most tags for `agent_id`, or `None` when
+    /// the agent has no episodes.  Ties are broken by insertion order.
+    pub fn most_tagged_episode(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<MemoryItem>, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "EpisodicStore::most_tagged_episode");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|items| items.iter().max_by_key(|m| m.tag_count()).cloned()))
+    }
+
+    /// Return a map of tag → episode count for all episodes of `agent_id`.
+    ///
+    /// Each entry reports how many episodes carry that particular tag.
+    /// Returns an empty map for unknown agents or agents with no tagged episodes.
+    pub fn tag_frequency(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<std::collections::HashMap<String, usize>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::tag_frequency");
+        let mut freq: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        if let Some(items) = inner.items.get(agent_id) {
+            for item in items {
+                for tag in &item.tags {
+                    *freq.entry(tag.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+        Ok(freq)
+    }
+
+    /// Return the episode with the highest `importance` score for `agent_id`.
+    ///
+    /// When multiple episodes share the maximum importance score the first one
+    /// encountered is returned.  Returns `None` for unknown agents or an empty
+    /// store.
+    pub fn most_important_episode(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::most_important_episode");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|items| {
+                items
+                    .iter()
+                    .max_by(|a, b| {
+                        a.importance
+                            .partial_cmp(&b.importance)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .cloned()
+            }))
+    }
 }
 
 impl Default for EpisodicStore {
@@ -3687,6 +3747,14 @@ impl WorkingMemory {
         Ok(inner.map.keys().map(|k| k.len()).max().unwrap_or(0))
     }
 
+    /// Return the count of values whose byte length exceeds `min_bytes`.
+    ///
+    /// Returns `0` for an empty store or when no value exceeds the threshold.
+    pub fn value_count_above_bytes(&self, min_bytes: usize) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::value_count_above_bytes");
+        Ok(inner.map.values().filter(|v| v.len() > min_bytes).count())
+    }
+
     /// Return a histogram of value byte lengths bucketed by `bucket_size`.
     ///
     /// The returned `Vec` contains `(bucket_start, count)` pairs where
@@ -4100,6 +4168,15 @@ impl WorkingMemory {
         let mut values: Vec<String> = inner.map.values().cloned().collect();
         values.sort_unstable();
         Ok(values)
+    }
+
+    /// Return the number of keys whose byte length is strictly greater than
+    /// `min_bytes`.
+    ///
+    /// Returns `0` for an empty store or when no key qualifies.
+    pub fn count_keys_above_bytes(&self, min_bytes: usize) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::count_keys_above_bytes");
+        Ok(inner.map.keys().filter(|k| k.len() > min_bytes).count())
     }
 }
 
@@ -8900,5 +8977,39 @@ mod tests {
     fn test_working_memory_values_sorted_empty_for_empty_store() {
         let wm = WorkingMemory::new(10).unwrap();
         assert!(wm.values_sorted().unwrap().is_empty());
+    }
+
+    // ── Round 50: episodes_above_content_bytes, value_count_above_bytes ────────
+
+    #[test]
+    fn test_episodes_above_content_bytes_returns_long_episodes() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r50-eacb");
+        store.add_episode(agent.clone(), "hi", 0.5).unwrap();
+        store.add_episode(agent.clone(), "long content here", 0.5).unwrap();
+        let result = store.episodes_above_content_bytes(&agent, 5).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content, "long content here");
+    }
+
+    #[test]
+    fn test_episodes_above_content_bytes_empty_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r50-eacb-missing");
+        assert!(store.episodes_above_content_bytes(&agent, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_value_count_above_bytes_counts_long_values() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "ab").unwrap();
+        wm.set("k2", "abcdef").unwrap();
+        assert_eq!(wm.value_count_above_bytes(3).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_value_count_above_bytes_zero_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.value_count_above_bytes(0).unwrap(), 0);
     }
 }

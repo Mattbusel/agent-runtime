@@ -635,6 +635,13 @@ impl AgentConfig {
     pub fn model_is(&self, name: &str) -> bool {
         self.model == name
     }
+
+    /// Return the number of whitespace-delimited words in `system_prompt`.
+    ///
+    /// Returns `0` for an empty prompt.
+    pub fn system_prompt_word_count(&self) -> usize {
+        self.system_prompt.split_whitespace().count()
+    }
 }
 
 // ── ToolSpec ──────────────────────────────────────────────────────────────────
@@ -1511,6 +1518,37 @@ impl ToolRegistry {
     /// Returns `0` for an empty registry or when no tool has required fields.
     pub fn total_required_fields(&self) -> usize {
         self.tools.values().map(|s| s.required_fields.len()).sum()
+    }
+
+    /// Return `true` if at least one registered tool's description contains
+    /// `keyword` (case-sensitive substring search).
+    pub fn has_tool_with_description_containing(&self, keyword: &str) -> bool {
+        self.tools.values().any(|s| s.description.contains(keyword))
+    }
+
+    /// Return tool names whose description byte length exceeds `min_bytes`, sorted.
+    ///
+    /// Returns an empty `Vec` for an empty registry or when no description
+    /// exceeds the threshold.
+    pub fn tools_with_description_longer_than(&self, min_bytes: usize) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .tools
+            .values()
+            .filter(|s| s.description.len() > min_bytes)
+            .map(|s| s.name.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// Return the byte length of the longest tool description, or `0` when empty.
+    pub fn max_description_bytes(&self) -> usize {
+        self.tools.values().map(|s| s.description.len()).max().unwrap_or(0)
+    }
+
+    /// Return the byte length of the shortest tool description, or `0` when empty.
+    pub fn min_description_bytes(&self) -> usize {
+        self.tools.values().map(|s| s.description.len()).min().unwrap_or(0)
     }
 
     /// Return a reference to the `ToolSpec` with the most required fields.
@@ -4632,5 +4670,38 @@ mod tests {
     fn test_total_required_fields_zero_for_empty_registry() {
         let reg = ToolRegistry::new();
         assert_eq!(reg.total_required_fields(), 0);
+    }
+
+    // ── Round 50: tools_with_description_longer_than, max/min_description_bytes ─
+
+    #[test]
+    fn test_tools_with_description_longer_than_returns_matching_tools() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("short", "hi", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("long", "a much longer description", |_| serde_json::json!({})));
+        let names = reg.tools_with_description_longer_than(5);
+        assert_eq!(names, vec!["long"]);
+    }
+
+    #[test]
+    fn test_max_description_bytes_returns_longest() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "hi", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("t2", "hello world", |_| serde_json::json!({})));
+        assert_eq!(reg.max_description_bytes(), 11);
+    }
+
+    #[test]
+    fn test_min_description_bytes_returns_shortest() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "hi", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("t2", "hello world", |_| serde_json::json!({})));
+        assert_eq!(reg.min_description_bytes(), 2);
+    }
+
+    #[test]
+    fn test_max_description_bytes_zero_for_empty_registry() {
+        let reg = ToolRegistry::new();
+        assert_eq!(reg.max_description_bytes(), 0);
     }
 }

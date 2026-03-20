@@ -1157,6 +1157,34 @@ impl AgentSession {
         self.steps.iter().map(|s| s.action.len()).min().unwrap_or(0)
     }
 
+    /// Return the fraction of steps that are tool calls (not `FINAL_ANSWER`).
+    ///
+    /// Returns `0.0` for sessions with no steps.
+    pub fn proportion_tool_calls(&self) -> f64 {
+        if self.steps.is_empty() {
+            return 0.0;
+        }
+        let tool_calls = self.steps.iter().filter(|s| s.is_tool_call()).count();
+        tool_calls as f64 / self.steps.len() as f64
+    }
+
+    /// Return the ratio of total thought bytes to the total bytes across all
+    /// step fields (thoughts + actions + observations).
+    ///
+    /// Returns `0.0` for sessions with no steps or where no bytes exist.
+    pub fn thought_density(&self) -> f64 {
+        let thought_bytes: usize = self.steps.iter().map(|s| s.thought.len()).sum();
+        let total_bytes: usize = self
+            .steps
+            .iter()
+            .map(|s| s.thought.len() + s.action.len() + s.observation.len())
+            .sum();
+        if total_bytes == 0 {
+            return 0.0;
+        }
+        thought_bytes as f64 / total_bytes as f64
+    }
+
     /// Return the average number of ReAct steps completed per second.
     ///
     /// Computed as `step_count / (duration_ms / 1000.0)`.  Returns `0.0` for
@@ -5769,5 +5797,76 @@ mod tests {
     fn test_total_step_chars_zero_for_empty_session() {
         let session = make_session(vec![], 0);
         assert_eq!(session.total_step_chars(), 0);
+    }
+
+    // ── Round 50: steps_by_action_prefix, action_count ────────────────────────
+
+    #[test]
+    fn test_steps_by_action_prefix_returns_matching_steps() {
+        let steps = vec![
+            make_step("t", "search_web", "o"),
+            make_step("t", "search_db", "o"),
+            make_step("t", "write_file", "o"),
+        ];
+        let session = make_session(steps, 0);
+        let result = session.steps_by_action_prefix("search");
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_steps_by_action_prefix_empty_when_no_match() {
+        let steps = vec![make_step("t", "write_file", "o")];
+        let session = make_session(steps, 0);
+        assert!(session.steps_by_action_prefix("search").is_empty());
+    }
+
+    #[test]
+    fn test_action_count_counts_tool_call_steps() {
+        let steps = vec![
+            make_step("t", "search_web", "o"),
+            make_step("t", "FINAL_ANSWER: done", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.action_count(), 1);
+    }
+
+    #[test]
+    fn test_action_count_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.action_count(), 0);
+    }
+
+    // ── Round 47: total_thought_bytes, total_observation_bytes ─────────────────
+
+    #[test]
+    fn test_total_thought_bytes_sums_thought_lengths() {
+        let steps = vec![
+            make_step("ab", "a", "o"),    // 2
+            make_step("abcde", "b", "o"), // 5
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_thought_bytes(), 7);
+    }
+
+    #[test]
+    fn test_total_thought_bytes_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.total_thought_bytes(), 0);
+    }
+
+    #[test]
+    fn test_total_observation_bytes_sums_observation_lengths() {
+        let steps = vec![
+            make_step("t", "a", "hello"), // obs=5
+            make_step("t", "b", "world"), // obs=5
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_observation_bytes(), 10);
+    }
+
+    #[test]
+    fn test_total_observation_bytes_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.total_observation_bytes(), 0);
     }
 }

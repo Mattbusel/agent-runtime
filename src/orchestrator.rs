@@ -350,6 +350,23 @@ impl RetryPolicy {
             }
         }
     }
+
+    /// Return `true` if the policy has a finite retry limit.
+    ///
+    /// A policy with `max_attempts < u32::MAX` is considered bounded.
+    /// In practice all policies created via the public constructors are bounded.
+    pub fn is_bounded(&self) -> bool {
+        self.max_attempts < u32::MAX
+    }
+
+    /// Return the remaining wait budget in milliseconds after `attempts_done`
+    /// have been completed.
+    ///
+    /// Computed as `max_total_delay_ms().saturating_sub(delay_sum_ms(attempts_done))`.
+    /// Returns `0` when `attempts_done` equals or exceeds `max_attempts`.
+    pub fn remaining_wait_budget_ms(&self, attempts_done: u32) -> u64 {
+        self.max_total_delay_ms().saturating_sub(self.delay_sum_ms(attempts_done))
+    }
 }
 
 impl std::fmt::Display for RetryPolicy {
@@ -2025,6 +2042,16 @@ impl Pipeline {
             .collect()
     }
 
+    /// Return `true` if any stage name starts with `prefix`.
+    ///
+    /// A convenience predicate over [`stage_names_with_prefix`] that avoids
+    /// allocating a `Vec` when only existence is needed.
+    ///
+    /// [`stage_names_with_prefix`]: Pipeline::stage_names_with_prefix
+    pub fn contains_stage_with_prefix(&self, prefix: &str) -> bool {
+        self.stages.iter().any(|s| s.name.starts_with(prefix))
+    }
+
     /// Return the names of all stages whose name ends with `suffix`.
     ///
     /// Complementary to [`stage_names_with_prefix`]; useful for filtering
@@ -2054,6 +2081,14 @@ impl Pipeline {
     /// Returns `0` for an empty pipeline.
     pub fn stage_name_bytes_total(&self) -> usize {
         self.stages.iter().map(|s| s.name.len()).sum()
+    }
+
+    /// Return the number of stages whose name byte length exceeds `min_bytes`.
+    ///
+    /// Useful for identifying long stage names that may indicate over-verbose
+    /// naming conventions.  Returns `0` for an empty pipeline.
+    pub fn stage_count_above_name_bytes(&self, min_bytes: usize) -> usize {
+        self.stages.iter().filter(|s| s.name.len() > min_bytes).count()
     }
 
     /// Return the position of the stage named `name` counted from the end of
@@ -4267,5 +4302,21 @@ mod tests {
     fn test_stage_count_below_name_len_zero_for_empty_pipeline() {
         let p = Pipeline::new();
         assert_eq!(p.stage_count_below_name_len(10), 0);
+    }
+
+    // ── Round 50: stage_count_above_name_bytes ────────────────────────────────
+
+    #[test]
+    fn test_stage_count_above_name_bytes_counts_long_names() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))
+            .add_stage("a_very_long_name", |s: String| Ok(s));
+        assert_eq!(p.stage_count_above_name_bytes(3), 1);
+    }
+
+    #[test]
+    fn test_stage_count_above_name_bytes_zero_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert_eq!(p.stage_count_above_name_bytes(0), 0);
     }
 }

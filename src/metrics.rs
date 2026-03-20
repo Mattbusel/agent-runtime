@@ -780,6 +780,27 @@ impl MetricsSnapshot {
         self.per_tool_failures.values().any(|&v| v > 0)
     }
 
+    /// Return sorted names of all tracked tools that have zero recorded failures.
+    ///
+    /// A tool that has never been called is included if it appears in the
+    /// `per_tool_calls` map with a count of zero.
+    pub fn tools_with_zero_failures(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .per_tool_calls
+            .keys()
+            .filter(|name| {
+                self.per_tool_failures
+                    .get(*name)
+                    .copied()
+                    .unwrap_or(0)
+                    == 0
+            })
+            .cloned()
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
     /// Return the sum of call counts across all tracked tools.
     ///
     /// This is the per-tool sum, which may differ from `total_tool_calls` if
@@ -951,6 +972,14 @@ impl MetricsSnapshot {
         }
         let count = self.per_tool_calls.get(name).copied().unwrap_or(0);
         count as f64 / self.total_tool_calls as f64
+    }
+
+    /// Return the number of distinct tool names that have at least one
+    /// recorded call.
+    ///
+    /// Returns `0` when no tool calls have been recorded.
+    pub fn distinct_tool_count(&self) -> usize {
+        self.per_tool_calls.len()
     }
 }
 
@@ -1473,6 +1502,13 @@ impl RuntimeMetrics {
             .collect();
         names.sort_unstable();
         names
+    }
+
+    /// Return `true` if any tool has recorded at least one failure.
+    ///
+    /// A convenience shorthand for `failed_tool_calls() > 0`.
+    pub fn has_failed_tools(&self) -> bool {
+        self.failed_tool_calls() > 0
     }
 
     /// Return the average number of memory recalls per recorded step.
@@ -3741,5 +3777,21 @@ mod tests {
         let m = RuntimeMetrics::new();
         let snap = m.snapshot();
         assert!((snap.tool_call_imbalance() - 1.0).abs() < 1e-9);
+    }
+
+    // ── Round 50: has_failed_tools ────────────────────────────────────────────
+
+    #[test]
+    fn test_has_failed_tools_true_when_failure_recorded() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_failure("search");
+        assert!(m.has_failed_tools());
+    }
+
+    #[test]
+    fn test_has_failed_tools_false_when_no_failures() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        assert!(!m.has_failed_tools());
     }
 }

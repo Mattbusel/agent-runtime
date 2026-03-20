@@ -3134,6 +3134,14 @@ impl GraphStore {
         Ok(inner.entities.values().filter(|e| e.label.contains(substr)).cloned().collect())
     }
 
+    /// Return the number of outgoing neighbors (out-degree) for `entity_id`.
+    ///
+    /// Returns `0` if the entity has no outgoing edges or does not exist.
+    pub fn entity_neighbor_count(&self, entity_id: &EntityId) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entity_neighbor_count");
+        Ok(inner.adjacency.get(entity_id).map_or(0, |rels| rels.len()))
+    }
+
     /// Return all entities whose out-degree is at least `min_degree`.
     ///
     /// Entities with no outgoing edges have an out-degree of 0 and are
@@ -3206,6 +3214,76 @@ impl GraphStore {
             .filter(|e| e.properties_is_empty())
             .cloned()
             .collect())
+    }
+
+    /// Return the fraction of relationships whose weight is strictly greater
+    /// than `threshold`.
+    ///
+    /// Returns `0.0` when the graph has no relationships.
+    pub fn weight_above_threshold_ratio(
+        &self,
+        threshold: f32,
+    ) -> Result<f64, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "GraphStore::weight_above_threshold_ratio");
+        let all: Vec<f32> = inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter().map(|r| r.weight))
+            .collect();
+        if all.is_empty() {
+            return Ok(0.0);
+        }
+        let above = all.iter().filter(|&&w| w > threshold).count();
+        Ok(above as f64 / all.len() as f64)
+    }
+
+    /// Return all entities sorted by out-degree in descending order.
+    ///
+    /// Entities with the most outgoing relationships appear first.  Ties are
+    /// broken by entity ID in ascending lexicographic order.
+    pub fn entities_sorted_by_out_degree(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "GraphStore::entities_sorted_by_out_degree");
+        let mut pairs: Vec<(Entity, usize)> = inner
+            .entities
+            .values()
+            .map(|e| {
+                let degree = inner
+                    .adjacency
+                    .get(&e.id)
+                    .map_or(0, |rels| rels.len());
+                (e.clone(), degree)
+            })
+            .collect();
+        pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.id.as_str().cmp(b.0.id.as_str())));
+        Ok(pairs.into_iter().map(|(e, _)| e).collect())
+    }
+
+    /// Return the first entity whose label exactly matches `label`, or `None`.
+    ///
+    /// When multiple entities share the same label the returned entity is
+    /// arbitrary (HashMap iteration order).  Returns `None` for an empty graph.
+    pub fn entity_by_label(&self, label: &str) -> Result<Option<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entity_by_label");
+        Ok(inner.entities.values().find(|e| e.label == label).cloned())
+    }
+
+    /// Return the number of distinct relationship kinds (types) in the graph.
+    ///
+    /// Returns `0` for an empty graph or one with no relationships.
+    pub fn distinct_relationship_kind_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(
+            self.inner.lock(),
+            "GraphStore::distinct_relationship_kind_count",
+        );
+        let kinds: std::collections::HashSet<&str> = inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter())
+            .map(|r| r.kind.as_str())
+            .collect();
+        Ok(kinds.len())
     }
 }
 
@@ -6598,5 +6676,27 @@ mod tests {
         let g = GraphStore::new();
         g.add_entity(Entity::new("a", "N").with_property("k", serde_json::json!(1))).unwrap();
         assert!(g.entities_with_no_properties().unwrap().is_empty());
+    }
+
+    // ── Round 50: entity_neighbor_count ───────────────────────────────────────
+
+    #[test]
+    fn test_entity_neighbor_count_returns_out_degree() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "E", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "E", 1.0)).unwrap();
+        let a_id = EntityId("a".to_string());
+        assert_eq!(g.entity_neighbor_count(&a_id).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_entity_neighbor_count_zero_for_isolated_entity() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("lone", "N")).unwrap();
+        let id = EntityId("lone".to_string());
+        assert_eq!(g.entity_neighbor_count(&id).unwrap(), 0);
     }
 }
