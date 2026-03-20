@@ -1361,6 +1361,20 @@ impl AgentSession {
         self.steps.iter().map(|s| s.action.len()).collect()
     }
 
+    /// Return `true` if any step's thought starts with `prefix`.
+    ///
+    /// Returns `false` for an empty session.
+    pub fn has_thought_starting_with(&self, prefix: &str) -> bool {
+        self.steps.iter().any(|s| s.thought.starts_with(prefix))
+    }
+
+    /// Return the number of steps whose action byte length exceeds `min_bytes`.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn step_count_above_action_bytes(&self, min_bytes: usize) -> usize {
+        self.steps.iter().filter(|s| s.action.len() > min_bytes).count()
+    }
+
     /// Return the 0-based index of the first `FINAL_ANSWER` step, or `None` if
     /// no such step exists in the session.
     ///
@@ -2229,6 +2243,11 @@ impl AgentRuntime {
         let mut names: Vec<&str> = self.tools.iter().map(|t| t.name.as_str()).collect();
         names.sort_unstable();
         names
+    }
+
+    /// Return a reference to the runtime's agent configuration.
+    pub fn config(&self) -> &AgentConfig {
+        &self.agent_config
     }
 
     /// Gracefully shut down the runtime.
@@ -5955,5 +5974,52 @@ mod tests {
     fn test_step_action_lengths_empty_for_empty_session() {
         let session = make_session(vec![], 0);
         assert!(session.step_action_lengths().is_empty());
+    }
+
+    // ── Round 52: has_thought_starting_with, step_count_above_action_bytes, config ──
+
+    #[test]
+    fn test_has_thought_starting_with_true_when_match() {
+        let steps = vec![
+            make_step("Plan: do something", "act", "obs"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(session.has_thought_starting_with("Plan:"));
+    }
+
+    #[test]
+    fn test_has_thought_starting_with_false_when_no_match() {
+        let steps = vec![make_step("think", "act", "obs")];
+        let session = make_session(steps, 0);
+        assert!(!session.has_thought_starting_with("Plan:"));
+    }
+
+    #[test]
+    fn test_has_thought_starting_with_false_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(!session.has_thought_starting_with("Plan:"));
+    }
+
+    #[test]
+    fn test_step_count_above_action_bytes_counts_correctly() {
+        let steps = vec![
+            make_step("t", "short", "o"),
+            make_step("t", "a_very_long_action_string", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.step_count_above_action_bytes(5), 1);
+    }
+
+    #[test]
+    fn test_step_count_above_action_bytes_zero_when_all_small() {
+        let steps = vec![make_step("t", "ab", "o")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.step_count_above_action_bytes(100), 0);
+    }
+
+    #[test]
+    fn test_runtime_config_returns_agent_config() {
+        let rt = AgentRuntime::quick(3, "test-model");
+        assert_eq!(rt.config().max_iterations, 3);
     }
 }

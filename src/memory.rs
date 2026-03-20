@@ -9247,12 +9247,9 @@ mod tests {
         let store = EpisodicStore::new();
         let agent = AgentId::new("r52-ewtc-1");
         store.add_episode(agent.clone(), "no tags episode", 0.5).unwrap();
-        // Add a tagged item directly
-        {
-            let mut inner = store.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let item = MemoryItem::new(agent.clone(), "tagged content", 0.8, vec!["relevant".to_string()]);
-            inner.items.entry(agent.clone()).or_default().push(item);
-        }
+        store
+            .add_episode_with_tags(agent.clone(), "tagged content", 0.8, vec!["relevant".to_string()])
+            .unwrap();
         assert_eq!(store.episodes_with_tag_count(&agent).unwrap(), 1);
     }
 
