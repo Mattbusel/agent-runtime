@@ -81,4 +81,37 @@ mod tests {
         // djb2("a") = 5381 * 33 + 97 = 177670
         assert_eq!(djb2("a"), 177670);
     }
+
+    // ── Round 28: recover_lock, timed_lock ────────────────────────────────────
+
+    #[test]
+    fn test_recover_lock_returns_guard_for_healthy_mutex() {
+        use std::sync::Mutex;
+        let m = Mutex::new(42u32);
+        let guard = recover_lock(m.lock(), "test");
+        assert_eq!(*guard, 42);
+    }
+
+    #[test]
+    fn test_recover_lock_recovers_from_poisoned_mutex() {
+        use std::sync::{Arc, Mutex};
+        let m = Arc::new(Mutex::new(99u32));
+        let m2 = Arc::clone(&m);
+        let _ = std::thread::spawn(move || {
+            let _guard = m2.lock().unwrap();
+            panic!("intentional panic to poison mutex");
+        })
+        .join();
+        // Mutex is now poisoned; recover_lock should still return the guard
+        let guard = recover_lock(m.lock(), "poisoned test");
+        assert_eq!(*guard, 99);
+    }
+
+    #[test]
+    fn test_timed_lock_returns_guard_for_healthy_mutex() {
+        use std::sync::Mutex;
+        let m = Mutex::new("hello");
+        let guard = timed_lock(&m, "test");
+        assert_eq!(*guard, "hello");
+    }
 }

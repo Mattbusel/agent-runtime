@@ -198,6 +198,14 @@ impl RetryPolicy {
         self.base_delay.as_millis() as u64
     }
 
+    /// Return the delay before the first retry in milliseconds.
+    ///
+    /// Alias for `base_delay_ms`; the name communicates intent more clearly at
+    /// call sites that only care about the first-retry delay.
+    pub fn first_delay_ms(&self) -> u64 {
+        self.base_delay_ms()
+    }
+
     /// Return a copy of this policy with the base delay changed to `ms` milliseconds.
     ///
     /// # Errors
@@ -3097,19 +3105,29 @@ mod tests {
         assert!(p.will_retry_at_all());
     }
 
+    // ── Round 31: Deduplicator::fail ─────────────────────────────────────────
+
     #[test]
-    fn test_agent_config_stop_sequence_count_zero_by_default() {
-        // Tested via AgentConfig but placed in orchestrator block for proximity
-        use crate::agent::AgentConfig;
-        let cfg = AgentConfig::new(5, "m");
-        assert_eq!(cfg.stop_sequence_count(), 0);
+    fn test_deduplicator_fail_removes_in_flight_key() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("failing-req").unwrap();
+        assert!(!d.is_idle().unwrap());
+        d.fail("failing-req").unwrap();
+        assert!(d.is_idle().unwrap());
     }
 
     #[test]
-    fn test_agent_config_stop_sequence_count_after_adding() {
-        use crate::agent::AgentConfig;
-        let cfg = AgentConfig::new(5, "m")
-            .with_stop_sequences(vec!["STOP".to_string(), "END".to_string()]);
-        assert_eq!(cfg.stop_sequence_count(), 2);
+    fn test_deduplicator_fail_on_unknown_key_is_noop() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        assert!(d.fail("nonexistent").is_ok());
+    }
+
+    #[test]
+    fn test_deduplicator_fail_allows_reregistration() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("retry-key").unwrap();
+        d.fail("retry-key").unwrap();
+        let result = d.check_and_register("retry-key").unwrap();
+        assert_eq!(result, DeduplicationResult::New);
     }
 }

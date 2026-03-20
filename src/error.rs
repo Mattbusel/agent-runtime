@@ -358,4 +358,30 @@ mod tests {
         let e = AgentRuntimeError::Persistence("file not found".into());
         assert!(e.to_string().contains("file not found"));
     }
+
+    // ── Round 28: is_agent_loop, is_orchestration ─────────────────────────────
+
+    #[test]
+    fn test_is_agent_loop_true_for_agent_loop_variant() {
+        let e = AgentRuntimeError::AgentLoop("step failed".into());
+        assert!(e.is_agent_loop());
+    }
+
+    #[test]
+    fn test_is_agent_loop_false_for_other_variants() {
+        let e = AgentRuntimeError::Memory("oom".into());
+        assert!(!e.is_agent_loop());
+    }
+
+    #[test]
+    fn test_is_orchestration_true_for_orchestration_variant() {
+        let e = AgentRuntimeError::Orchestration("pipeline stalled".into());
+        assert!(e.is_orchestration());
+    }
+
+    #[test]
+    fn test_is_orchestration_false_for_other_variants() {
+        let e = AgentRuntimeError::Graph("cycle".into());
+        assert!(!e.is_orchestration());
+    }
 }

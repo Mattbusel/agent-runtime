@@ -3403,25 +3403,25 @@ mod tests {
         assert_eq!(results.len(), 2);
     }
 
-    // ── Round 31: ConversationMessage::is_user/is_assistant,
+    // ── Round 31: Message::is_user/is_assistant,
     //             AgentConfig::stop_sequence_count/has_request_timeout ─────────
 
     #[test]
-    fn test_conversation_message_is_user_true_for_user_role() {
-        let msg = ConversationMessage::user("hello");
+    fn test_message_is_user_true_for_user_role_r31() {
+        let msg = Message::user("hello");
         assert!(msg.is_user());
         assert!(!msg.is_assistant());
     }
 
     #[test]
-    fn test_conversation_message_is_assistant_true_for_assistant_role() {
-        let msg = ConversationMessage::assistant("hi there");
+    fn test_message_is_assistant_true_for_assistant_role_r31() {
+        let msg = Message::assistant("hi there");
         assert!(msg.is_assistant());
         assert!(!msg.is_user());
     }
 
     #[test]
-    fn test_agent_config_stop_sequence_count_zero_by_default() {
+    fn test_agent_config_stop_sequence_count_zero_for_new_config() {
         let cfg = AgentConfig::new(5, "model");
         assert_eq!(cfg.stop_sequence_count(), 0);
     }
