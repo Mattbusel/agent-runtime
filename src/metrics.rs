@@ -1077,6 +1077,15 @@ impl MetricsSnapshot {
         }
         self.tool_call_count(name) as f64 / self.total_tool_calls as f64
     }
+
+    /// Return the sum of all per-tool failure counts across every tracked tool.
+    ///
+    /// This is the total number of error observations emitted by tool handlers,
+    /// regardless of which tool generated them.  Returns `0` when no failures
+    /// have been recorded.
+    pub fn total_failures_across_all_tools(&self) -> u64 {
+        self.per_tool_failures.values().sum()
+    }
 }
 
 impl std::fmt::Display for MetricsSnapshot {
@@ -1756,6 +1765,22 @@ impl RuntimeMetrics {
         failures as f64 / calls as f64
     }
 
+    /// Return a sorted list of tool names whose total call count exceeds
+    /// `threshold`.
+    ///
+    /// Useful for identifying heavily-exercised tools above a given activity
+    /// level.  Returns an empty `Vec` when no tool meets the criterion.
+    pub fn tools_with_calls_above(&self, threshold: u64) -> Vec<String> {
+        let snap = self.per_tool_calls_snapshot();
+        let mut names: Vec<String> = snap
+            .into_iter()
+            .filter(|(_, count)| *count > threshold)
+            .map(|(name, _)| name)
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
     /// Return the total number of tool calls recorded for the given `agent_id`.
     ///
     /// Returns `0` when the agent has never called a tool.
@@ -1764,6 +1789,28 @@ impl RuntimeMetrics {
         snap.get(agent_id)
             .map(|m| m.values().sum())
             .unwrap_or(0)
+    }
+
+    /// Return the average number of tool calls per total session.
+    ///
+    /// Returns `0.0` when no sessions have been started.
+    pub fn tool_calls_per_session(&self) -> f64 {
+        let sessions = self.total_sessions();
+        if sessions == 0 {
+            return 0.0;
+        }
+        self.total_tool_calls() as f64 / sessions as f64
+    }
+
+    /// Return the names of all tools that have been called at least once but
+    /// have recorded zero failures.
+    pub fn failure_free_tools(&self) -> Vec<String> {
+        let calls = self.per_tool_calls_snapshot();
+        let failures = self.per_tool_failures_snapshot();
+        calls
+            .into_keys()
+            .filter(|name| failures.get(name).copied().unwrap_or(0) == 0)
+            .collect()
     }
 
     /// Return the top `n` tools by total call count, sorted descending.
@@ -1895,6 +1942,18 @@ impl RuntimeMetrics {
     /// Return the current count of active (in-progress) sessions.
     pub fn active_session_count(&self) -> usize {
         self.active_sessions.load(Ordering::Relaxed)
+    }
+
+    /// Return the ratio of `memory_recall_count` to `total_sessions`.
+    ///
+    /// Returns `0.0` when no sessions have been recorded (avoids
+    /// division-by-zero).
+    pub fn memory_to_session_ratio(&self) -> f64 {
+        let sessions = self.total_sessions.load(Ordering::Relaxed);
+        if sessions == 0 {
+            return 0.0;
+        }
+        self.memory_recall_count.load(Ordering::Relaxed) as f64 / sessions as f64
     }
 
     /// Capture a snapshot of global counters as plain integers.
@@ -4506,6 +4565,22 @@ mod tests {
         assert_eq!(m.active_session_count(), 0);
     }
 
+    // ── Round 62: memory_to_session_ratio ────────────────────────────────────
+
+    #[test]
+    fn test_memory_to_session_ratio_correct() {
+        let m = RuntimeMetrics::new();
+        m.total_sessions.store(4, Ordering::Relaxed);
+        m.memory_recall_count.store(8, Ordering::Relaxed);
+        assert!((m.memory_to_session_ratio() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_memory_to_session_ratio_zero_when_no_sessions() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.memory_to_session_ratio(), 0.0);
+    }
+
     // ── Round 57: failure_ratio_for_tool, any_tool_exceeds_calls ─────────────
 
     #[test]
@@ -4713,5 +4788,92 @@ mod tests {
         let m = RuntimeMetrics::new();
         m.record_tool_call("browse");
         assert_eq!(m.failure_rate_for("browse"), 0.0);
+    }
+
+    // ── Round 62: tool_calls_per_session, failure_free_tools ──────────────────
+
+    #[test]
+    fn test_tool_calls_per_session_returns_correct_ratio() {
+        let m = RuntimeMetrics::new();
+        m.total_sessions
+            .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        m.record_tool_call("search");
+        m.record_tool_call("browse");
+        m.record_tool_call("search");
+        assert!((m.tool_calls_per_session() - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_tool_calls_per_session_zero_when_no_sessions() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.tool_calls_per_session(), 0.0);
+    }
+
+    #[test]
+    fn test_failure_free_tools_returns_tools_without_failures() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        m.record_tool_call("browse");
+        m.record_tool_failure("search");
+        let tools = m.failure_free_tools();
+        assert!(tools.contains(&"browse".to_string()));
+        assert!(!tools.contains(&"search".to_string()));
+    }
+
+    #[test]
+    fn test_failure_free_tools_empty_when_all_failed() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("a");
+        m.record_tool_failure("a");
+        let tools = m.failure_free_tools();
+        assert!(!tools.contains(&"a".to_string()));
+    }
+
+    // ── Round 62: total_failures_across_all_tools, tools_with_calls_above ────
+
+    #[test]
+    fn test_total_failures_across_all_tools_sums_all_failures() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("a");
+        m.record_tool_failure("a");
+        m.record_tool_call("b");
+        m.record_tool_failure("b");
+        m.record_tool_failure("b");
+        let snap = m.snapshot();
+        assert_eq!(snap.total_failures_across_all_tools(), 3);
+    }
+
+    #[test]
+    fn test_total_failures_across_all_tools_zero_when_none() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("a");
+        let snap = m.snapshot();
+        assert_eq!(snap.total_failures_across_all_tools(), 0);
+    }
+
+    #[test]
+    fn test_tools_with_calls_above_returns_tools_exceeding_threshold() {
+        let m = RuntimeMetrics::new();
+        for _ in 0..5 { m.record_tool_call("busy"); }
+        m.record_tool_call("idle");
+        let result = m.tools_with_calls_above(3);
+        assert!(result.contains(&"busy".to_string()));
+        assert!(!result.contains(&"idle".to_string()));
+    }
+
+    #[test]
+    fn test_tools_with_calls_above_empty_when_none_qualify() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("once");
+        assert!(m.tools_with_calls_above(5).is_empty());
+    }
+
+    #[test]
+    fn test_tools_with_calls_above_returns_sorted_names() {
+        let m = RuntimeMetrics::new();
+        for _ in 0..3 { m.record_tool_call("zebra"); }
+        for _ in 0..3 { m.record_tool_call("apple"); }
+        let result = m.tools_with_calls_above(2);
+        assert_eq!(result, vec!["apple", "zebra"]);
     }
 }

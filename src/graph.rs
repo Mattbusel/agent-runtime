@@ -3685,6 +3685,31 @@ impl GraphStore {
         Ok(inner.entities.is_empty() && inner.adjacency.is_empty())
     }
 
+    /// Return a sorted list of all unique relationship kinds present in the
+    /// graph.
+    ///
+    /// Returns an empty `Vec` for a graph with no relationships.
+    pub fn unique_relationship_kinds(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "GraphStore::unique_relationship_kinds");
+        let mut kinds: Vec<String> = inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter())
+            .map(|r| r.kind.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        kinds.sort_unstable();
+        Ok(kinds)
+    }
+
+    /// Return `true` if the graph has at least one relationship.
+    pub fn has_any_relationships(&self) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::has_any_relationships");
+        Ok(inner.adjacency.values().any(|rels| !rels.is_empty()))
+    }
+
     /// Return all entities that have at least one **incoming** relationship
     /// (in-degree ≥ 1).
     ///
@@ -3832,6 +3857,19 @@ impl GraphStore {
             .adjacency
             .iter()
             .filter(|(from, rels)| rels.iter().any(|r| &r.to == *from))
+            .count();
+        Ok(count)
+    }
+
+    /// Return the total number of self-loop edges in the graph — relationships
+    /// where `from == to`.
+    pub fn cycle_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::cycle_count");
+        let count = inner
+            .adjacency
+            .iter()
+            .flat_map(|(from, rels)| rels.iter().map(move |r| (from, r)))
+            .filter(|(from, r)| &r.to == *from)
             .count();
         Ok(count)
     }
@@ -7967,6 +8005,42 @@ mod tests {
         assert!(!g.graph_is_empty().unwrap());
     }
 
+    // ── Round 62: unique_relationship_kinds, has_any_relationships ────────────
+
+    #[test]
+    fn test_unique_relationship_kinds_returns_sorted_kinds() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("x", "N")).unwrap();
+        g.add_entity(Entity::new("y", "N")).unwrap();
+        g.add_entity(Entity::new("z", "N")).unwrap();
+        g.add_relationship(Relationship::new("x", "y", "ZEBRA", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("x", "z", "APPLE", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("y", "z", "APPLE", 1.0)).unwrap();
+        let kinds = g.unique_relationship_kinds().unwrap();
+        assert_eq!(kinds, vec!["APPLE".to_string(), "ZEBRA".to_string()]);
+    }
+
+    #[test]
+    fn test_unique_relationship_kinds_empty_for_new_graph() {
+        let g = GraphStore::new();
+        assert!(g.unique_relationship_kinds().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_has_any_relationships_true_when_edge_added() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "R", 1.0)).unwrap();
+        assert!(g.has_any_relationships().unwrap());
+    }
+
+    #[test]
+    fn test_has_any_relationships_false_for_new_graph() {
+        let g = GraphStore::new();
+        assert!(!g.has_any_relationships().unwrap());
+    }
+
     // ── Round 58: nodes_with_no_outgoing ──────────────────────────────────────
 
     #[test]
@@ -8160,5 +8234,27 @@ mod tests {
         g.add_entity(Entity::new("lone", "N")).unwrap();
         let id = EntityId("lone".to_string());
         assert!(g.relationships_from(&id).unwrap().is_empty());
+    }
+
+    // ── Round 62: cycle_count ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_cycle_count_counts_self_loops() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "a", "self", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "b", "self", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "edge", 1.0)).unwrap();
+        assert_eq!(g.cycle_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_cycle_count_zero_when_no_self_loops() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("x", "N")).unwrap();
+        g.add_entity(Entity::new("y", "N")).unwrap();
+        g.add_relationship(Relationship::new("x", "y", "link", 1.0)).unwrap();
+        assert_eq!(g.cycle_count().unwrap(), 0);
     }
 }

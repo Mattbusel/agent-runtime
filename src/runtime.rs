@@ -1742,6 +1742,23 @@ impl AgentSession {
         self.steps.first().map_or(0, |s| s.thought.chars().count())
     }
 
+    /// Return the character count of the last step's `observation` field.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn last_observation_chars(&self) -> usize {
+        self.steps.last().map_or(0, |s| s.observation.chars().count())
+    }
+
+    /// Return the total word count across all `observation` fields.
+    ///
+    /// Words are split on whitespace.  Returns `0` for an empty session.
+    pub fn observation_word_count_total(&self) -> usize {
+        self.steps
+            .iter()
+            .map(|s| s.observation.split_whitespace().count())
+            .sum()
+    }
+
     /// Return the statistical variance of thought byte lengths across all steps.
     ///
     /// Returns `0.0` for a session with fewer than two steps.
@@ -2172,6 +2189,30 @@ impl AgentSession {
             .iter()
             .filter(|s| s.observation.len() > min_bytes)
             .count()
+    }
+
+    /// Return a `Vec` of word counts for each step's `thought`, in order.
+    pub fn thought_word_counts(&self) -> Vec<usize> {
+        self.steps
+            .iter()
+            .map(|s| s.thought.split_whitespace().count())
+            .collect()
+    }
+
+    /// Return steps sorted by `thought` byte length in ascending order.
+    pub fn steps_sorted_by_thought_len(&self) -> Vec<&ReActStep> {
+        let mut sorted: Vec<&ReActStep> = self.steps.iter().collect();
+        sorted.sort_by_key(|s| s.thought.len());
+        sorted
+    }
+
+    /// Return all steps whose `thought` byte length strictly exceeds
+    /// `min_bytes`.
+    pub fn steps_with_thought_longer_than(&self, min_bytes: usize) -> Vec<&ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.thought.len() > min_bytes)
+            .collect()
     }
 }
 
@@ -7441,6 +7482,40 @@ mod tests {
         assert_eq!(session.first_thought_chars(), 0);
     }
 
+    // ── Round 62: last_observation_chars, observation_word_count_total ────────
+
+    #[test]
+    fn test_last_observation_chars_returns_last_step() {
+        let steps = vec![
+            make_step("t", "a", "first"),
+            make_step("t", "a", "last one"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.last_observation_chars(), "last one".chars().count());
+    }
+
+    #[test]
+    fn test_last_observation_chars_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.last_observation_chars(), 0);
+    }
+
+    #[test]
+    fn test_observation_word_count_total_sums_all_words() {
+        let steps = vec![
+            make_step("t", "a", "one two"),    // 2
+            make_step("t", "a", "three"),      // 1
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.observation_word_count_total(), 3);
+    }
+
+    #[test]
+    fn test_observation_word_count_total_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.observation_word_count_total(), 0);
+    }
+
     // ── Round 58: steps_matching_thought, median_observation_chars, cumulative_thought_chars, count_steps_with_thought_containing ──
 
     #[test]
@@ -7771,5 +7846,46 @@ mod tests {
         ];
         let session = make_session(steps, 0);
         assert!(!session.has_step_with_both("search", "foo"));
+    }
+
+    // ── Round 62: thought_word_counts, steps_sorted_by_thought_len, steps_with_thought_longer_than ──
+
+    #[test]
+    fn test_thought_word_counts_returns_per_step_counts() {
+        let steps = vec![
+            make_step("one two three", "a", "o"),
+            make_step("hello", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.thought_word_counts(), vec![3, 1]);
+    }
+
+    #[test]
+    fn test_thought_word_counts_empty_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.thought_word_counts().is_empty());
+    }
+
+    #[test]
+    fn test_steps_sorted_by_thought_len_ascending_order() {
+        let steps = vec![
+            make_step("longest thought here", "a", "o"),
+            make_step("hi", "a", "o"),
+            make_step("medium thought", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        let sorted = session.steps_sorted_by_thought_len();
+        assert!(sorted[0].thought.len() <= sorted[1].thought.len());
+        assert!(sorted[1].thought.len() <= sorted[2].thought.len());
+    }
+
+    #[test]
+    fn test_steps_with_thought_longer_than_filters_correctly() {
+        let steps = vec![
+            make_step("short", "a", "o"),
+            make_step("this is a longer thought", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_with_thought_longer_than(5).len(), 1);
     }
 }

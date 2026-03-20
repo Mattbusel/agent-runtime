@@ -2204,6 +2204,13 @@ impl Pipeline {
             .join(sep)
     }
 
+    /// Return the count of stages whose name contains `substr`.
+    ///
+    /// Returns `0` for an empty pipeline or when no stage name matches.
+    pub fn stage_count_with_name_containing(&self, substr: &str) -> usize {
+        self.stages.iter().filter(|s| s.name.contains(substr)).count()
+    }
+
     /// Return `true` if **all** stage names start with `prefix`.
     ///
     /// Returns `true` for an empty pipeline (vacuously true) and for an empty
@@ -2220,6 +2227,18 @@ impl Pipeline {
     /// single name without requiring slice syntax.
     pub fn any_stage_has_name(&self, name: &str) -> bool {
         self.stages.iter().any(|s| s.name == name)
+    }
+
+    /// Return the name of the stage at `idx`, or `None` if the index is
+    /// out of bounds.
+    ///
+    /// Convenience wrapper around [`stage_at_index`] that returns `Option<&str>`
+    /// directly instead of `Option<&Stage>`, avoiding the need to project
+    /// through the `Stage` struct at the call site.
+    ///
+    /// [`stage_at_index`]: Pipeline::stage_at_index
+    pub fn stage_name_at(&self, idx: usize) -> Option<&str> {
+        self.stages.get(idx).map(|s| s.name.as_str())
     }
 
 }
@@ -4713,6 +4732,24 @@ mod tests {
         assert_eq!(p.stage_names_joined("|"), "");
     }
 
+    // ── Round 62: stage_count_with_name_containing ────────────────────────────
+
+    #[test]
+    fn test_stage_count_with_name_containing_correct() {
+        let p = Pipeline::new()
+            .add_stage("preprocess_input", |s: String| Ok(s))
+            .add_stage("process_data", |s: String| Ok(s))
+            .add_stage("postprocess_output", |s: String| Ok(s));
+        assert_eq!(p.stage_count_with_name_containing("process"), 3);
+        assert_eq!(p.stage_count_with_name_containing("pre"), 1);
+    }
+
+    #[test]
+    fn test_stage_count_with_name_containing_zero_when_none_match() {
+        let p = Pipeline::new().add_stage("alpha", |s: String| Ok(s));
+        assert_eq!(p.stage_count_with_name_containing("beta"), 0);
+    }
+
     // ── Round 57: any_stage_has_name ─────────────────────────────────────────
 
     #[test]
@@ -4772,5 +4809,28 @@ mod tests {
     fn test_last_stage_name_none_for_empty_pipeline() {
         let p = Pipeline::new();
         assert!(p.last_stage_name().is_none());
+    }
+
+    // ── Round 62: stage_name_at ───────────────────────────────────────────────
+
+    #[test]
+    fn test_stage_name_at_returns_correct_name() {
+        let p = Pipeline::new()
+            .add_stage("alpha", |s: String| Ok(s))
+            .add_stage("beta", |s: String| Ok(s));
+        assert_eq!(p.stage_name_at(0), Some("alpha"));
+        assert_eq!(p.stage_name_at(1), Some("beta"));
+    }
+
+    #[test]
+    fn test_stage_name_at_none_for_out_of_bounds() {
+        let p = Pipeline::new().add_stage("only", |s: String| Ok(s));
+        assert!(p.stage_name_at(1).is_none());
+    }
+
+    #[test]
+    fn test_stage_name_at_none_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.stage_name_at(0).is_none());
     }
 }

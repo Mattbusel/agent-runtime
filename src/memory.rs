@@ -1097,6 +1097,38 @@ impl EpisodicStore {
             .map(|(id, _)| id.clone()))
     }
 
+    /// Return the maximum word count among all episode content strings for
+    /// `agent_id`.
+    ///
+    /// Returns `0` when the agent has no recorded episodes.
+    pub fn episode_max_content_words(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(
+            self.inner.lock(),
+            "EpisodicStore::episode_max_content_words",
+        );
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|v| v.iter().map(|m| m.content.split_whitespace().count()).max())
+            .unwrap_or(0))
+    }
+
+    /// Return the total number of episodes stored across all agents.
+    pub fn total_items(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::total_items");
+        Ok(inner.items.values().map(|v| v.len()).sum())
+    }
+
+    /// Return a cloned `Vec` of all `MemoryItem`s across all agents, in an
+    /// unspecified order.
+    pub fn all_episodes(&self) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::all_episodes");
+        Ok(inner.items.values().flat_map(|v| v.iter().cloned()).collect())
+    }
+
     /// Return all agent IDs that have at least one stored episode, sorted.
     pub fn agents(&self) -> Result<Vec<AgentId>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "EpisodicStore::agents");
@@ -2514,6 +2546,40 @@ impl EpisodicStore {
                 .map(|m| m.importance)
                 .reduce(f32::min)
         }))
+    }
+
+    /// Return the count of episodes for `agent_id` whose importance is
+    /// strictly greater than `threshold`.
+    ///
+    /// Returns `0` for unknown agents.
+    pub fn episodes_above_importance_count(
+        &self,
+        agent_id: &AgentId,
+        threshold: f32,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "EpisodicStore::episodes_above_importance_count");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or(0, |items| items.iter().filter(|m| m.importance > threshold).count()))
+    }
+
+    /// Return the union of all tags across all episodes for `agent_id`.
+    ///
+    /// Returns an empty set for unknown agents or when all episodes have no
+    /// tags.
+    pub fn tag_union(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<std::collections::HashSet<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::tag_union");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or_else(std::collections::HashSet::new, |items| {
+                items.iter().flat_map(|m| m.tags.iter().cloned()).collect()
+            }))
     }
 
     /// Return the number of episodes for `agent_id` whose timestamp falls
@@ -4265,6 +4331,24 @@ impl WorkingMemory {
         Ok(inner.map.keys().map(|k| k.len()).sum())
     }
 
+    /// Return all key-value pairs sorted by key byte length ascending, then
+    /// alphabetically for equal lengths.
+    ///
+    /// Returns an empty `Vec` for an empty store.
+    pub fn entries_sorted_by_key_length(
+        &self,
+    ) -> Result<Vec<(String, String)>, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "WorkingMemory::entries_sorted_by_key_length");
+        let mut pairs: Vec<(String, String)> = inner
+            .map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        pairs.sort_unstable_by(|(a, _), (b, _)| a.len().cmp(&b.len()).then(a.cmp(b)));
+        Ok(pairs)
+    }
+
     /// Return all keys whose string representation ends with `suffix`,
     /// sorted alphabetically.
     ///
@@ -4494,6 +4578,13 @@ impl WorkingMemory {
     pub fn count_values_equal_to(&self, val: &str) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::count_values_equal_to");
         Ok(inner.map.values().filter(|v| v.as_str() == val).count())
+    }
+
+    /// Return the number of keys whose byte length is strictly less than
+    /// `max_bytes`.
+    pub fn count_keys_below_bytes(&self, max_bytes: usize) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::count_keys_below_bytes");
+        Ok(inner.map.keys().filter(|k| k.len() < max_bytes).count())
     }
 
     /// Return the number of Unicode scalar values (chars) in the value stored
@@ -10820,6 +10911,66 @@ mod tests {
         assert_eq!(wm.avg_key_length().unwrap(), 0.0);
     }
 
+    // ── Round 62: episodes_above_importance_count, tag_union, entries_sorted_by_key_length ──
+
+    #[test]
+    fn test_episodes_above_importance_count_correct() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r62-above");
+        store.add_episode(agent.clone(), "e1", 0.8).unwrap();
+        store.add_episode(agent.clone(), "e2", 0.3).unwrap();
+        store.add_episode(agent.clone(), "e3", 0.6).unwrap();
+        assert_eq!(store.episodes_above_importance_count(&agent, 0.5).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_episodes_above_importance_count_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r62-above-unknown");
+        assert_eq!(store.episodes_above_importance_count(&agent, 0.5).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_tag_union_collects_all_unique_tags() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r62-union");
+        store
+            .add_episode_with_tags(agent.clone(), "e1", 0.5, vec!["a".to_string(), "b".to_string()])
+            .unwrap();
+        store
+            .add_episode_with_tags(agent.clone(), "e2", 0.5, vec!["b".to_string(), "c".to_string()])
+            .unwrap();
+        let union = store.tag_union(&agent).unwrap();
+        assert_eq!(union.len(), 3);
+        assert!(union.contains("a"));
+        assert!(union.contains("b"));
+        assert!(union.contains("c"));
+    }
+
+    #[test]
+    fn test_tag_union_empty_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r62-union-unknown");
+        assert!(store.tag_union(&agent).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_entries_sorted_by_key_length_orders_by_length_then_alpha() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("cc", "v").unwrap();
+        wm.set("a", "v").unwrap();
+        wm.set("bbb", "v").unwrap();
+        let pairs = wm.entries_sorted_by_key_length().unwrap();
+        let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["a", "cc", "bbb"]);
+    }
+
+    #[test]
+    fn test_entries_sorted_by_key_length_empty_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(wm.entries_sorted_by_key_length().unwrap().is_empty());
+    }
+
     #[test]
     fn test_total_content_words_returns_total_word_count() {
         let store = EpisodicStore::new();
@@ -11029,5 +11180,60 @@ mod tests {
         let wm = WorkingMemory::new(10).unwrap();
         wm.set("long_key", "v").unwrap();
         assert!(wm.keys_shorter_than(1).unwrap().is_empty());
+    }
+
+    // ── Round 62: episode_max_content_words, total_items, all_episodes, count_keys_below_bytes ──
+
+    #[test]
+    fn test_episode_max_content_words_returns_maximum() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r62-max-words");
+        store.add_episode_with_tags(agent.clone(), "one", 0.5, vec![]).unwrap();
+        store.add_episode_with_tags(agent.clone(), "one two three four", 0.5, vec![]).unwrap();
+        assert_eq!(store.episode_max_content_words(&agent).unwrap(), 4);
+    }
+
+    #[test]
+    fn test_episode_max_content_words_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r62-max-words-unknown");
+        assert_eq!(store.episode_max_content_words(&agent).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_total_items_counts_across_all_agents() {
+        let store = EpisodicStore::new();
+        let a = AgentId::new("r62-total-a");
+        let b = AgentId::new("r62-total-b");
+        store.add_episode_with_tags(a.clone(), "x", 0.5, vec![]).unwrap();
+        store.add_episode_with_tags(a.clone(), "y", 0.5, vec![]).unwrap();
+        store.add_episode_with_tags(b.clone(), "z", 0.5, vec![]).unwrap();
+        assert_eq!(store.total_items().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_all_episodes_returns_all_items() {
+        let store = EpisodicStore::new();
+        let a = AgentId::new("r62-all-a");
+        let b = AgentId::new("r62-all-b");
+        store.add_episode_with_tags(a.clone(), "ep1", 0.5, vec![]).unwrap();
+        store.add_episode_with_tags(b.clone(), "ep2", 0.5, vec![]).unwrap();
+        assert_eq!(store.all_episodes().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_count_keys_below_bytes_correct() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("a", "v").unwrap();
+        wm.set("ab", "v").unwrap();
+        wm.set("abcdefgh", "v").unwrap();
+        assert_eq!(wm.count_keys_below_bytes(3).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_count_keys_below_bytes_zero_when_none_qualify() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("long_key", "v").unwrap();
+        assert_eq!(wm.count_keys_below_bytes(1).unwrap(), 0);
     }
 }
