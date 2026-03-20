@@ -5186,4 +5186,59 @@ mod tests {
         let session = make_session(vec![], 0);
         assert_eq!(session.avg_observation_bytes(), 0.0);
     }
+
+    // ── Round 44: steps_with_long_thoughts, action_count_containing, total_thought_count
+
+    #[test]
+    fn test_steps_with_long_thoughts_returns_steps_exceeding_threshold() {
+        let steps = vec![
+            make_step("short", "a", "o"),
+            make_step("this is a much longer thought string", "b", "o"),
+            make_step("hi", "c", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_with_long_thoughts(10).len(), 1);
+    }
+
+    #[test]
+    fn test_steps_with_long_thoughts_empty_when_none_exceed() {
+        let steps = vec![make_step("hi", "a", "o")];
+        let session = make_session(steps, 0);
+        assert!(session.steps_with_long_thoughts(100).is_empty());
+    }
+
+    #[test]
+    fn test_action_count_containing_counts_matching_steps() {
+        let steps = vec![
+            make_step("t", "search(query)", "o"),
+            make_step("t", "write(data)", "o"),
+            make_step("t", "search(other)", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.action_count_containing("search"), 2);
+    }
+
+    #[test]
+    fn test_action_count_containing_zero_when_no_match() {
+        let steps = vec![make_step("t", "write(x)", "o")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.action_count_containing("read"), 0);
+    }
+
+    #[test]
+    fn test_total_thought_count_counts_non_empty_thoughts() {
+        let steps = vec![
+            make_step("thought", "a", "o"),
+            make_step("", "b", "o"),
+            make_step("another", "c", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_thought_count(), 2);
+    }
+
+    #[test]
+    fn test_total_thought_count_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.total_thought_count(), 0);
+    }
 }
