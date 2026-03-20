@@ -999,6 +999,20 @@ impl MetricsSnapshot {
         names.sort_unstable();
         names
     }
+
+    /// Return the average number of failures per distinct tool.
+    ///
+    /// Computed as total recorded failures divided by the number of distinct
+    /// tool names in `per_tool_calls`.  Returns `0.0` when no tool calls have
+    /// been recorded.
+    pub fn avg_failures_per_tool(&self) -> f64 {
+        let count = self.per_tool_calls.len();
+        if count == 0 {
+            return 0.0;
+        }
+        let total_failures: u64 = self.per_tool_failures.values().sum();
+        total_failures as f64 / count as f64
+    }
 }
 
 impl std::fmt::Display for MetricsSnapshot {
@@ -1576,6 +1590,18 @@ impl RuntimeMetrics {
         self.total_tool_calls() as f64 / recalls as f64
     }
 
+    /// Return the ratio of memory recalls to total tool calls.
+    ///
+    /// Returns `0.0` when no tool calls have been recorded to avoid division
+    /// by zero.
+    pub fn memory_recalls_per_tool_call(&self) -> f64 {
+        let calls = self.total_tool_calls();
+        if calls == 0 {
+            return 0.0;
+        }
+        self.memory_recall_count() as f64 / calls as f64
+    }
+
     /// Return the top `n` tools by total call count, sorted descending.
     ///
     /// Returns fewer than `n` entries if fewer tools have been called.
@@ -1604,6 +1630,30 @@ impl RuntimeMetrics {
     /// Return the sum of all recorded step latencies in milliseconds.
     pub fn total_step_latency_ms(&self) -> u64 {
         self.step_latency.sum_ms()
+    }
+
+    /// Return the ratio of memory recall events to total steps recorded.
+    ///
+    /// Indicates how memory-intensive the agent's operation is. Returns `0.0`
+    /// when no steps have been recorded to avoid division by zero.
+    pub fn memory_pressure_ratio(&self) -> f64 {
+        let steps = self.total_steps.load(Ordering::Relaxed);
+        if steps == 0 {
+            return 0.0;
+        }
+        self.memory_recall_count.load(Ordering::Relaxed) as f64 / steps as f64
+    }
+
+    /// Return the ratio of total sessions to total steps recorded.
+    ///
+    /// Higher values indicate shorter average sessions. Returns `0.0` when no
+    /// steps have been recorded to avoid division by zero.
+    pub fn sessions_per_step(&self) -> f64 {
+        let steps = self.total_steps.load(Ordering::Relaxed);
+        if steps == 0 {
+            return 0.0;
+        }
+        self.total_sessions.load(Ordering::Relaxed) as f64 / steps as f64
     }
 
     /// Capture a snapshot of global counters as plain integers.
@@ -3958,5 +4008,80 @@ mod tests {
     fn test_tool_calls_per_memory_recall_zero_for_empty_metrics() {
         let m = RuntimeMetrics::new();
         assert_eq!(m.tool_calls_per_memory_recall(), 0.0);
+    }
+
+    // ── Round 53: memory_recalls_per_tool_call ─────────────────────────────────
+
+    #[test]
+    fn test_memory_recalls_per_tool_call_returns_ratio() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("a");
+        m.record_tool_call("b");
+        m.memory_recall_count.store(4, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(m.memory_recalls_per_tool_call(), 2.0);
+    }
+
+    #[test]
+    fn test_memory_recalls_per_tool_call_zero_when_no_tool_calls() {
+        let m = RuntimeMetrics::new();
+        m.memory_recall_count.store(5, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(m.memory_recalls_per_tool_call(), 0.0);
+    }
+
+    #[test]
+    fn test_memory_recalls_per_tool_call_zero_for_empty_metrics() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.memory_recalls_per_tool_call(), 0.0);
+    }
+
+    // ── Round 53 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_avg_failures_per_tool_zero_when_no_calls() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.snapshot().avg_failures_per_tool(), 0.0);
+    }
+
+    #[test]
+    fn test_avg_failures_per_tool_correct_value() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        m.record_tool_failure("search");
+        m.record_tool_call("write");
+        // search: 1 failure, write: 0 failures; avg = 0.5
+        let avg = m.snapshot().avg_failures_per_tool();
+        assert!((avg - 0.5).abs() < 1e-9);
+    }
+
+    // ── Round 48 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_memory_pressure_ratio_correct_ratio() {
+        use std::sync::atomic::Ordering;
+        let m = RuntimeMetrics::new();
+        m.total_steps.store(4, Ordering::Relaxed);
+        m.memory_recall_count.store(2, Ordering::Relaxed);
+        assert!((m.memory_pressure_ratio() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_memory_pressure_ratio_zero_when_no_steps() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.memory_pressure_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_sessions_per_step_correct_ratio() {
+        use std::sync::atomic::Ordering;
+        let m = RuntimeMetrics::new();
+        m.total_steps.store(10, Ordering::Relaxed);
+        m.total_sessions.store(2, Ordering::Relaxed);
+        assert!((m.sessions_per_step() - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_sessions_per_step_zero_when_no_steps() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.sessions_per_step(), 0.0);
     }
 }

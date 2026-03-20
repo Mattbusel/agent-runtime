@@ -1375,6 +1375,77 @@ impl AgentSession {
         self.steps.iter().filter(|s| s.action.len() > min_bytes).count()
     }
 
+    /// Return the smallest byte length of non-empty observation strings in this
+    /// session.
+    ///
+    /// Steps with an empty observation are excluded. Returns `0` if no non-empty
+    /// observations exist.
+    pub fn min_observation_bytes(&self) -> usize {
+        self.steps
+            .iter()
+            .map(|s| s.observation.len())
+            .filter(|&n| n > 0)
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// Return the smallest byte length of non-empty thought strings in this
+    /// session.
+    ///
+    /// Steps with an empty thought are excluded. Returns `0` if no non-empty
+    /// thoughts exist.
+    pub fn min_thought_bytes(&self) -> usize {
+        self.steps
+            .iter()
+            .map(|s| s.thought.len())
+            .filter(|&n| n > 0)
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// Return the proportion of steps whose `thought` field is empty.
+    ///
+    /// Returns `0.0` for an empty session.
+    pub fn proportion_empty_thoughts(&self) -> f64 {
+        if self.steps.is_empty() {
+            return 0.0;
+        }
+        let empty = self.steps.iter().filter(|s| s.thought.is_empty()).count();
+        empty as f64 / self.steps.len() as f64
+    }
+
+    /// Return `true` if any step in this session is marked as failed.
+    ///
+    /// A step is considered failed when its `observation` starts with
+    /// `"[error]"` (the convention used by the built-in tool dispatcher).
+    pub fn has_failed_steps(&self) -> bool {
+        self.steps
+            .iter()
+            .any(|s| s.observation.starts_with("[error]"))
+    }
+
+    /// Return the total number of UTF-8 characters across all step `thought` fields.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn total_thought_chars(&self) -> usize {
+        self.steps.iter().map(|s| s.thought.chars().count()).sum()
+    }
+
+    /// Return the total number of UTF-8 characters across all step `action` fields.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn total_action_chars(&self) -> usize {
+        self.steps.iter().map(|s| s.action.chars().count()).sum()
+    }
+
+    /// Return the total number of UTF-8 characters across all step `observation`
+    /// fields.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn total_observation_chars(&self) -> usize {
+        self.steps.iter().map(|s| s.observation.chars().count()).sum()
+    }
+
     /// Return the 0-based index of the first `FINAL_ANSWER` step, or `None` if
     /// no such step exists in the session.
     ///
@@ -1557,6 +1628,33 @@ impl AgentSession {
     /// `steps.len()` directly and is easy to read at the call site.
     pub fn has_at_least_steps(&self, n: usize) -> bool {
         self.steps.len() >= n
+    }
+
+    /// Return `true` if every step in this session has a non-empty observation.
+    ///
+    /// Returns `true` for an empty session (vacuously true).
+    pub fn all_observations_non_empty(&self) -> bool {
+        self.steps.iter().all(|s| !s.observation.is_empty())
+    }
+
+    /// Return the average combined byte length (thought + action + observation)
+    /// per step.
+    ///
+    /// Returns `0.0` for an empty session.
+    pub fn avg_combined_step_bytes(&self) -> f64 {
+        if self.steps.is_empty() {
+            return 0.0;
+        }
+        let total: usize = self.steps.iter().map(|s| s.combined_byte_length()).sum();
+        total as f64 / self.steps.len() as f64
+    }
+
+    /// Return a reference to the step with the shortest `observation` field.
+    ///
+    /// When multiple steps share the minimum observation length the first is
+    /// returned.  Returns `None` for an empty session.
+    pub fn shortest_observation_step(&self) -> Option<&ReActStep> {
+        self.steps.iter().min_by_key(|s| s.observation.len())
     }
 }
 
@@ -2248,6 +2346,11 @@ impl AgentRuntime {
     /// Return a reference to the runtime's agent configuration.
     pub fn config(&self) -> &AgentConfig {
         &self.agent_config
+    }
+
+    /// Return the model identifier configured for this runtime.
+    pub fn model_name(&self) -> &str {
+        &self.agent_config.model
     }
 
     /// Gracefully shut down the runtime.
@@ -6021,5 +6124,192 @@ mod tests {
     fn test_runtime_config_returns_agent_config() {
         let rt = AgentRuntime::quick(3, "test-model");
         assert_eq!(rt.config().max_iterations, 3);
+    }
+
+    // ── Round 53: total_thought_chars, total_action_chars, total_observation_chars, model_name ──
+
+    #[test]
+    fn test_total_thought_chars_sums_all_thoughts() {
+        let steps = vec![
+            make_step("ab", "x", "y"),
+            make_step("cde", "x", "y"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_thought_chars(), 5);
+    }
+
+    #[test]
+    fn test_total_thought_chars_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.total_thought_chars(), 0);
+    }
+
+    #[test]
+    fn test_total_action_chars_sums_all_actions() {
+        let steps = vec![
+            make_step("t", "hello", "o"),
+            make_step("t", "world", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_action_chars(), 10);
+    }
+
+    #[test]
+    fn test_total_observation_chars_sums_all_observations() {
+        let steps = vec![
+            make_step("t", "a", "abc"),
+            make_step("t", "a", "de"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_observation_chars(), 5);
+    }
+
+    #[test]
+    fn test_model_name_returns_configured_model() {
+        let rt = AgentRuntime::quick(5, "gpt-4o");
+        assert_eq!(rt.model_name(), "gpt-4o");
+    }
+
+    // ── Round 48 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_min_observation_bytes_returns_smallest_nonempty() {
+        let steps = vec![
+            make_step("t", "a", "hello"),
+            make_step("t", "a", "hi"),
+            make_step("t", "a", ""),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.min_observation_bytes(), 2);
+    }
+
+    #[test]
+    fn test_min_observation_bytes_zero_when_all_empty() {
+        let steps = vec![make_step("t", "a", "")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.min_observation_bytes(), 0);
+    }
+
+    #[test]
+    fn test_min_thought_bytes_returns_smallest_nonempty() {
+        let steps = vec![
+            make_step("abc", "a", "o"),
+            make_step("xy", "a", "o"),
+            make_step("", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.min_thought_bytes(), 2);
+    }
+
+    #[test]
+    fn test_min_thought_bytes_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.min_thought_bytes(), 0);
+    }
+
+    #[test]
+    fn test_proportion_empty_thoughts_all_empty() {
+        let steps = vec![
+            make_step("", "a", "o"),
+            make_step("", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.proportion_empty_thoughts() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_proportion_empty_thoughts_none_empty() {
+        let steps = vec![make_step("think", "a", "o")];
+        let session = make_session(steps, 0);
+        assert!((session.proportion_empty_thoughts()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_proportion_empty_thoughts_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!((session.proportion_empty_thoughts()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_has_failed_steps_true_when_error_observation() {
+        let steps = vec![make_step("t", "a", "[error] something broke")];
+        let session = make_session(steps, 0);
+        assert!(session.has_failed_steps());
+    }
+
+    #[test]
+    fn test_has_failed_steps_false_when_no_errors() {
+        let steps = vec![make_step("t", "a", "success")];
+        let session = make_session(steps, 0);
+        assert!(!session.has_failed_steps());
+    }
+
+    #[test]
+    fn test_has_failed_steps_false_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(!session.has_failed_steps());
+    }
+
+    // ── Round 53 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_all_observations_non_empty_true_when_all_have_obs() {
+        let steps = vec![
+            make_step("t1", "a1", "result1"),
+            make_step("t2", "a2", "result2"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(session.all_observations_non_empty());
+    }
+
+    #[test]
+    fn test_all_observations_non_empty_false_when_one_is_empty() {
+        let steps = vec![
+            make_step("t1", "a1", "result1"),
+            make_step("t2", "a2", ""),
+        ];
+        let session = make_session(steps, 0);
+        assert!(!session.all_observations_non_empty());
+    }
+
+    #[test]
+    fn test_all_observations_non_empty_true_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.all_observations_non_empty());
+    }
+
+    #[test]
+    fn test_avg_combined_step_bytes_correct() {
+        let steps = vec![
+            make_step("hi", "go", "ok"),
+            make_step("hello", "world", "result"),
+        ];
+        let session = make_session(steps, 0);
+        // step1: 2+2+2=6, step2: 5+5+6=16, avg=11
+        let avg = session.avg_combined_step_bytes();
+        assert!((avg - 11.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_combined_step_bytes_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.avg_combined_step_bytes(), 0.0);
+    }
+
+    #[test]
+    fn test_shortest_observation_step_returns_shortest() {
+        let steps = vec![
+            make_step("t1", "a1", "longer observation"),
+            make_step("t2", "a2", "short"),
+        ];
+        let session = make_session(steps, 0);
+        let s = session.shortest_observation_step().unwrap();
+        assert_eq!(s.observation, "short");
+    }
+
+    #[test]
+    fn test_shortest_observation_step_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.shortest_observation_step().is_none());
     }
 }

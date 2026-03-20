@@ -292,6 +292,11 @@ impl ReActStep {
     pub fn combined_byte_length(&self) -> usize {
         self.thought.len() + self.action.len() + self.observation.len()
     }
+
+    /// Return `true` if the action string is empty or whitespace-only.
+    pub fn action_is_empty(&self) -> bool {
+        self.action.trim().is_empty()
+    }
 }
 
 /// Configuration for the ReAct agent loop.
@@ -658,6 +663,23 @@ impl AgentConfig {
     /// `steps_done` exceeds `max_iterations`.
     pub fn iteration_budget_remaining(&self, steps_done: usize) -> usize {
         self.max_iterations.saturating_sub(steps_done)
+    }
+
+    /// Return `true` if this config is "minimal" — no system prompt and only
+    /// one allowed iteration.
+    ///
+    /// Useful as a quick sanity-check predicate in tests and diagnostics.
+    pub fn is_minimal(&self) -> bool {
+        self.system_prompt.trim().is_empty() && self.max_iterations == 1
+    }
+
+    /// Return `true` if the configured model name starts with `prefix`.
+    ///
+    /// Useful for branching logic based on provider family without an exact
+    /// string match (e.g. `config.model_starts_with("claude")` or
+    /// `config.model_starts_with("gpt")`).
+    pub fn model_starts_with(&self, prefix: &str) -> bool {
+        self.model.starts_with(prefix)
     }
 }
 
@@ -1637,6 +1659,16 @@ impl ToolRegistry {
     /// Returns `true` for an empty `names` slice (vacuously true).
     pub fn has_all_tools(&self, names: &[&str]) -> bool {
         names.iter().all(|n| self.tools.contains_key(*n))
+    }
+
+    /// Return the number of tools that have at least one required field defined.
+    ///
+    /// Returns `0` for an empty registry.
+    pub fn tools_with_required_fields_count(&self) -> usize {
+        self.tools
+            .values()
+            .filter(|t| !t.required_fields.is_empty())
+            .count()
     }
 }
 
@@ -4905,5 +4937,43 @@ mod tests {
     fn test_tools_without_validators_empty_for_empty_registry() {
         let reg = ToolRegistry::new();
         assert!(reg.tools_without_validators().is_empty());
+    }
+
+    // ── Round 53 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_action_is_empty_true_for_empty_action() {
+        let step = ReActStep::new("thought", "", "obs");
+        assert!(step.action_is_empty());
+    }
+
+    #[test]
+    fn test_action_is_empty_false_for_nonempty_action() {
+        let step = ReActStep::new("thought", "search", "obs");
+        assert!(!step.action_is_empty());
+    }
+
+    #[test]
+    fn test_action_is_empty_true_for_whitespace_only() {
+        let step = ReActStep::new("thought", "   ", "obs");
+        assert!(step.action_is_empty());
+    }
+
+    #[test]
+    fn test_is_minimal_true_for_single_iteration_no_prompt() {
+        let cfg = AgentConfig::new(1, "m").with_system_prompt("");
+        assert!(cfg.is_minimal());
+    }
+
+    #[test]
+    fn test_is_minimal_false_when_max_iterations_above_one() {
+        let cfg = AgentConfig::new(5, "m");
+        assert!(!cfg.is_minimal());
+    }
+
+    #[test]
+    fn test_is_minimal_false_when_system_prompt_set() {
+        let cfg = AgentConfig::new(1, "m").with_system_prompt("prompt");
+        assert!(!cfg.is_minimal());
     }
 }

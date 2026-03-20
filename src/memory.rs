@@ -1795,6 +1795,20 @@ impl EpisodicStore {
             .cloned())
     }
 
+    /// Return the most recently stored episode for `agent_id` by timestamp, or
+    /// `None` if the agent has no episodes.
+    pub fn newest_episode(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::newest_episode");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|v| v.iter().max_by_key(|i| i.timestamp))
+            .cloned())
+    }
+
     /// Return the `n` most recently stored episodes for `agent_id`, sorted by
     /// timestamp descending (newest first).
     ///
@@ -3812,6 +3826,32 @@ impl WorkingMemory {
         Ok(inner.map.keys().any(|k| k.starts_with(prefix)))
     }
 
+    /// Return the number of keys whose names begin with `prefix`.
+    ///
+    /// Returns `0` for an empty store or when no key matches.
+    pub fn key_count_starting_with(&self, prefix: &str) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::key_count_starting_with");
+        Ok(inner.map.keys().filter(|k| k.starts_with(prefix)).count())
+    }
+
+    /// Return the sum of byte lengths of all values currently stored.
+    ///
+    /// Returns `0` for an empty store.
+    pub fn value_bytes_total(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::value_bytes_total");
+        Ok(inner.map.values().map(|v| v.len()).sum())
+    }
+
+    /// Return all keys sorted alphabetically.
+    ///
+    /// Returns an empty `Vec` for an empty store.
+    pub fn all_keys_sorted(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::all_keys_sorted");
+        let mut keys: Vec<String> = inner.map.keys().cloned().collect();
+        keys.sort_unstable();
+        Ok(keys)
+    }
+
     /// Return a histogram of value byte lengths bucketed by `bucket_size`.
     ///
     /// The returned `Vec` contains `(bucket_start, count)` pairs where
@@ -4248,6 +4288,19 @@ impl WorkingMemory {
             }
         }
         Ok(false)
+    }
+
+    /// Return the value with the fewest bytes, or `None` for an empty store.
+    ///
+    /// When multiple values share the minimum byte length the lexicographically
+    /// smallest one is returned for deterministic output.
+    pub fn shortest_value(&self) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::shortest_value");
+        Ok(inner
+            .map
+            .values()
+            .min_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)))
+            .cloned())
     }
 }
 
@@ -9278,5 +9331,103 @@ mod tests {
     fn test_has_key_starting_with_false_for_empty_store() {
         let wm = WorkingMemory::new(10).unwrap();
         assert!(!wm.has_key_starting_with("any").unwrap());
+    }
+
+    // ── Round 53: newest_episode, value_bytes_total, all_keys_sorted ──────────
+
+    #[test]
+    fn test_newest_episode_returns_most_recent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r53-ne-1");
+        store.add_episode(agent.clone(), "first", 0.5).unwrap();
+        store.add_episode(agent.clone(), "second", 0.7).unwrap();
+        let newest = store.newest_episode(&agent).unwrap();
+        assert!(newest.is_some());
+        assert_eq!(newest.unwrap().content, "second");
+    }
+
+    #[test]
+    fn test_newest_episode_none_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r53-ne-unknown");
+        assert!(store.newest_episode(&agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_value_bytes_total_sums_value_lengths() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "abc").unwrap();
+        wm.set("k2", "de").unwrap();
+        assert_eq!(wm.value_bytes_total().unwrap(), 5);
+    }
+
+    #[test]
+    fn test_value_bytes_total_zero_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.value_bytes_total().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_all_keys_sorted_returns_alphabetical_keys() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("zebra", "v").unwrap();
+        wm.set("alpha", "v").unwrap();
+        wm.set("mango", "v").unwrap();
+        let keys = wm.all_keys_sorted().unwrap();
+        assert_eq!(keys, vec!["alpha", "mango", "zebra"]);
+    }
+
+    #[test]
+    fn test_all_keys_sorted_empty_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(wm.all_keys_sorted().unwrap().is_empty());
+    }
+
+    // ── Round 53 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_shortest_value_returns_smallest_value() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "hi").unwrap();
+        wm.set("k2", "hello").unwrap();
+        assert_eq!(wm.shortest_value().unwrap(), Some("hi".to_string()));
+    }
+
+    #[test]
+    fn test_shortest_value_none_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.shortest_value().unwrap(), None);
+    }
+
+    #[test]
+    fn test_shortest_value_tie_broken_lexicographically() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "bb").unwrap();
+        wm.set("k2", "aa").unwrap();
+        assert_eq!(wm.shortest_value().unwrap(), Some("aa".to_string()));
+    }
+
+    // ── Round 48 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_key_count_starting_with_counts_matching_keys() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("cfg_host", "localhost").unwrap();
+        wm.set("cfg_port", "8080").unwrap();
+        wm.set("debug_mode", "true").unwrap();
+        assert_eq!(wm.key_count_starting_with("cfg_").unwrap(), 2);
+    }
+
+    #[test]
+    fn test_key_count_starting_with_zero_when_no_match() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("alpha", "v").unwrap();
+        assert_eq!(wm.key_count_starting_with("zzz").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_key_count_starting_with_zero_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.key_count_starting_with("any").unwrap(), 0);
     }
 }

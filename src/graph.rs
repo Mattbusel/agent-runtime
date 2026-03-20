@@ -3184,6 +3184,33 @@ impl GraphStore {
         Ok(inner.entities.values().filter(|e| e.label == label).cloned().collect())
     }
 
+    /// Return the average relationship weight across all edges in the graph.
+    ///
+    /// Returns `0.0` when the graph has no edges.
+    pub fn average_weight(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::average_weight");
+        let all: Vec<f64> = inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter().map(|r| r.weight as f64))
+            .collect();
+        if all.is_empty() {
+            return Ok(0.0);
+        }
+        Ok(all.iter().sum::<f64>() / all.len() as f64)
+    }
+
+    /// Return the maximum relationship weight in the graph, or `None` if there
+    /// are no edges.
+    pub fn max_weight(&self) -> Result<Option<f64>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::max_weight");
+        Ok(inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter().map(|r| r.weight as f64))
+            .reduce(f64::max))
+    }
+
     /// Return all entities whose out-degree is at least `min_degree`.
     ///
     /// Entities with no outgoing edges have an out-degree of 0 and are
@@ -3348,6 +3375,71 @@ impl GraphStore {
             .map(|r| r.weight)
             .reduce(f32::min);
         Ok(min)
+    }
+
+    /// Return the number of relationships whose `kind` field matches `kind`
+    /// exactly (case-sensitive).
+    ///
+    /// Returns `0` when no relationships of that kind exist or the graph is
+    /// empty.
+    pub fn relationships_of_kind_count(&self, kind: &str) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(
+            self.inner.lock(),
+            "GraphStore::relationships_of_kind_count",
+        );
+        let count = inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter())
+            .filter(|r| r.kind == kind)
+            .count();
+        Ok(count)
+    }
+
+    /// Return all entities that have at least one **incoming** relationship
+    /// (in-degree ≥ 1).
+    ///
+    /// Complements [`entities_without_incoming`].  Returns an empty `Vec` for
+    /// a graph with no relationships.
+    ///
+    /// [`entities_without_incoming`]: GraphStore::entities_without_incoming
+    pub fn entities_with_incoming(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entities_with_incoming");
+        let mut has_in: std::collections::HashSet<&EntityId> =
+            std::collections::HashSet::new();
+        for rels in inner.adjacency.values() {
+            for r in rels {
+                has_in.insert(&r.to);
+            }
+        }
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| has_in.contains(&e.id))
+            .cloned()
+            .collect())
+    }
+
+    /// Return all entities that have no outgoing relationships in the graph.
+    ///
+    /// These are "sink" nodes — they may still have incoming edges from other
+    /// entities but emit none themselves.
+    pub fn entities_with_no_relationships(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(
+            self.inner.lock(),
+            "GraphStore::entities_with_no_relationships",
+        );
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| {
+                inner
+                    .adjacency
+                    .get(&e.id)
+                    .map_or(true, |rels| rels.is_empty())
+            })
+            .cloned()
+            .collect())
     }
 }
 
@@ -6939,5 +7031,87 @@ mod tests {
     fn test_entities_with_exact_label_empty_for_empty_graph() {
         let g = GraphStore::new();
         assert!(g.entities_with_exact_label("Person").unwrap().is_empty());
+    }
+
+    // ── Round 53: average_weight, max_weight ──────────────────────────────────
+
+    #[test]
+    fn test_average_weight_returns_mean_of_all_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "k", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "k", 3.0)).unwrap();
+        assert_eq!(g.average_weight().unwrap(), 2.0);
+    }
+
+    #[test]
+    fn test_average_weight_zero_for_graph_with_no_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        assert_eq!(g.average_weight().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_max_weight_returns_largest_weight() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "k", 0.5)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "k", 10.0)).unwrap();
+        assert_eq!(g.max_weight().unwrap(), Some(10.0));
+    }
+
+    #[test]
+    fn test_max_weight_none_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.max_weight().unwrap(), None);
+    }
+
+    // ── Round 53 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_relationships_of_kind_count_returns_correct_count() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "FOLLOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "FOLLOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "LIKES", 1.0)).unwrap();
+        assert_eq!(g.relationships_of_kind_count("FOLLOWS").unwrap(), 2);
+        assert_eq!(g.relationships_of_kind_count("LIKES").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_relationships_of_kind_count_zero_for_absent_kind() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        assert_eq!(g.relationships_of_kind_count("MISSING").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_entities_with_incoming_returns_targets() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("src", "N")).unwrap();
+        g.add_entity(Entity::new("dst", "N")).unwrap();
+        g.add_entity(Entity::new("iso", "N")).unwrap();
+        g.add_relationship(Relationship::new("src", "dst", "E", 1.0)).unwrap();
+        let with_in: Vec<_> = g.entities_with_incoming().unwrap();
+        let ids: Vec<&str> = with_in.iter().map(|e| e.id.as_str()).collect();
+        assert!(ids.contains(&"dst"));
+        assert!(!ids.contains(&"src"));
+        assert!(!ids.contains(&"iso"));
+    }
+
+    #[test]
+    fn test_entities_with_incoming_empty_for_no_relationships() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        assert!(g.entities_with_incoming().unwrap().is_empty());
     }
 }
