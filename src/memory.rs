@@ -2381,6 +2381,15 @@ impl EpisodicStore {
             .map_or_else(Vec::new, |items| items.iter().map(|m| m.content.len()).collect()))
     }
 
+    /// Return the number of distinct agents that have at least one episode.
+    ///
+    /// Provides a quick count of how many agents have recorded any episodic
+    /// memory.  Returns `0` for an empty store.
+    pub fn episode_count_by_agent(&self) -> Result<std::collections::HashMap<AgentId, usize>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episode_count_by_agent");
+        Ok(inner.items.iter().map(|(id, items)| (id.clone(), items.len())).collect())
+    }
+
     /// Return all episode IDs across every agent in the store.
     ///
     /// The returned `Vec` is unsorted.  Returns an empty `Vec` for an empty
@@ -2393,6 +2402,45 @@ impl EpisodicStore {
             .flat_map(|items| items.iter().map(|m| m.id.clone()))
             .collect();
         Ok(ids)
+    }
+
+    /// Return all agent IDs sorted by episode count in descending order.
+    ///
+    /// Agents with more episodes appear first.  When two agents have the same
+    /// count the tie is broken alphabetically by agent ID.
+    pub fn agents_sorted_by_episode_count(&self) -> Result<Vec<AgentId>, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "EpisodicStore::agents_sorted_by_episode_count");
+        let mut pairs: Vec<(AgentId, usize)> = inner
+            .items
+            .iter()
+            .map(|(id, items)| (id.clone(), items.len()))
+            .collect();
+        pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.as_str().cmp(b.0.as_str())));
+        Ok(pairs.into_iter().map(|(id, _)| id).collect())
+    }
+
+    /// Return all episodes for `agent_id` whose content has at least `min_words`
+    /// whitespace-delimited words.
+    ///
+    /// Returns an empty `Vec` for unknown agents or when no episode qualifies.
+    pub fn episodes_with_min_word_count(
+        &self,
+        agent_id: &AgentId,
+        min_words: usize,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "EpisodicStore::episodes_with_min_word_count");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or_else(Vec::new, |items| {
+                items
+                    .iter()
+                    .filter(|m| m.word_count() >= min_words)
+                    .cloned()
+                    .collect()
+            }))
     }
 }
 
@@ -3656,6 +3704,15 @@ impl WorkingMemory {
         Ok(inner.map.keys().filter(|k| k.contains(substr)).count())
     }
 
+    /// Return the byte length of the longest stored value, or `0` when empty.
+    ///
+    /// Helpful for detecting unusually large values that might indicate a
+    /// working-memory bloat.  Returns `0` for an empty store.
+    pub fn longest_value_bytes(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::longest_value_bytes");
+        Ok(inner.map.values().map(|v| v.len()).max().unwrap_or(0))
+    }
+
     /// Return the shortest key length, or `0` if the store is empty.
     pub fn min_key_length(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::min_key_length");
@@ -4014,6 +4071,16 @@ impl WorkingMemory {
             .filter(|v| !v.is_empty())
             .cloned()
             .collect();
+        Ok(values)
+    }
+
+    /// Return all values sorted alphabetically.
+    ///
+    /// The sort is lexicographic (byte order).  Duplicate values are preserved.
+    pub fn values_sorted(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::values_sorted");
+        let mut values: Vec<String> = inner.map.values().cloned().collect();
+        values.sort_unstable();
         Ok(values)
     }
 }
@@ -8612,6 +8679,41 @@ mod tests {
         assert_eq!(wm.semantic_key_count("intent").unwrap(), 0);
     }
 
+    // ── Round 49: episode_count_by_agent, longest_value_bytes ─────────────────
+
+    #[test]
+    fn test_episode_count_by_agent_maps_agents_to_counts() {
+        let store = EpisodicStore::new();
+        let a1 = AgentId::new("r49-ecba-1");
+        let a2 = AgentId::new("r49-ecba-2");
+        store.add_episode(a1.clone(), "ep1", 0.5).unwrap();
+        store.add_episode(a1.clone(), "ep2", 0.5).unwrap();
+        store.add_episode(a2.clone(), "ep3", 0.5).unwrap();
+        let counts = store.episode_count_by_agent().unwrap();
+        assert_eq!(*counts.get(&a1).unwrap(), 2);
+        assert_eq!(*counts.get(&a2).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_episode_count_by_agent_empty_for_empty_store() {
+        let store = EpisodicStore::new();
+        assert!(store.episode_count_by_agent().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_working_memory_longest_value_bytes_returns_max_value_len() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "ab").unwrap();
+        wm.set("k2", "abcde").unwrap();
+        assert_eq!(wm.longest_value_bytes().unwrap(), 5);
+    }
+
+    #[test]
+    fn test_working_memory_longest_value_bytes_zero_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.longest_value_bytes().unwrap(), 0);
+    }
+
     // ── Round 47: episodes_between, max_key_bytes, value_length_histogram,
     //              episodes_tagged_with_all, content_word_count_total ──────────
 
@@ -8720,5 +8822,65 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    // ── Round 49: agents_sorted_by_episode_count, episodes_with_min_word_count,
+    //              values_sorted ───────────────────────────────────────────────
+
+    #[test]
+    fn test_agents_sorted_by_episode_count_most_episodes_first() {
+        let store = EpisodicStore::new();
+        let a = AgentId::new("r49-asbec-a");
+        let b = AgentId::new("r49-asbec-b");
+        store.add_episode(a.clone(), "e1", 0.5).unwrap();
+        store.add_episode(b.clone(), "e2", 0.5).unwrap();
+        store.add_episode(b.clone(), "e3", 0.5).unwrap();
+        let sorted = store.agents_sorted_by_episode_count().unwrap();
+        assert_eq!(sorted[0].as_str(), b.as_str());
+        assert_eq!(sorted[1].as_str(), a.as_str());
+    }
+
+    #[test]
+    fn test_agents_sorted_by_episode_count_empty_for_empty_store() {
+        let store = EpisodicStore::new();
+        assert!(store.agents_sorted_by_episode_count().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_episodes_with_min_word_count_returns_qualifying_episodes() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r49-ewmwc-a");
+        store.add_episode(agent.clone(), "one", 0.5).unwrap();            // 1 word
+        store.add_episode(agent.clone(), "one two three", 0.5).unwrap();   // 3 words
+        let result = store.episodes_with_min_word_count(&agent, 2).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content, "one two three");
+    }
+
+    #[test]
+    fn test_episodes_with_min_word_count_empty_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        assert!(
+            store
+                .episodes_with_min_word_count(&AgentId::new("nobody-r49"), 1)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_working_memory_values_sorted_returns_alphabetically_sorted_values() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "banana").unwrap();
+        wm.set("k2", "apple").unwrap();
+        wm.set("k3", "cherry").unwrap();
+        let sorted = wm.values_sorted().unwrap();
+        assert_eq!(sorted, vec!["apple", "banana", "cherry"]);
+    }
+
+    #[test]
+    fn test_working_memory_values_sorted_empty_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(wm.values_sorted().unwrap().is_empty());
     }
 }

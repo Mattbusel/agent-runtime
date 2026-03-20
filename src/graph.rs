@@ -3124,6 +3124,16 @@ impl GraphStore {
         Ok(entities)
     }
 
+    /// Return all entities whose label contains `substr` as a substring.
+    ///
+    /// Case-sensitive.  Useful for filtering entities by a partial label
+    /// token (e.g. `"Person"` substring matches `"PersonA"` and `"PersonB"`).
+    /// Returns an empty `Vec` for an empty graph or when no label matches.
+    pub fn entities_with_label_containing(&self, substr: &str) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entities_with_label_containing");
+        Ok(inner.entities.values().filter(|e| e.label.contains(substr)).cloned().collect())
+    }
+
     /// Return all entities whose out-degree is at least `min_degree`.
     ///
     /// Entities with no outgoing edges have an out-degree of 0 and are
@@ -3173,6 +3183,29 @@ impl GraphStore {
             .cloned()
             .collect();
         Ok(entities)
+    }
+
+    /// Return the total number of properties across all entities in the graph.
+    ///
+    /// Counts every key-value pair in every entity's property map.
+    /// Returns `0` for an empty graph or when no entity carries any properties.
+    pub fn total_property_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::total_property_count");
+        Ok(inner.entities.values().map(|e| e.property_count()).sum())
+    }
+
+    /// Return all entities that have no properties.
+    ///
+    /// Useful for identifying bare "stub" nodes that have not yet been annotated.
+    pub fn entities_with_no_properties(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "GraphStore::entities_with_no_properties");
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| e.properties_is_empty())
+            .cloned()
+            .collect())
     }
 }
 
@@ -6471,6 +6504,28 @@ mod tests {
         assert!(g.label_frequency().unwrap().is_empty());
     }
 
+    // ── Round 49: entities_with_label_containing ───────────────────────────────
+
+    #[test]
+    fn test_entities_with_label_containing_returns_matching_entities() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "PersonA")).unwrap();
+        g.add_entity(Entity::new("b", "PersonB")).unwrap();
+        g.add_entity(Entity::new("c", "Location")).unwrap();
+        let mut result = g.entities_with_label_containing("Person").unwrap();
+        result.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].id.as_str(), "a");
+        assert_eq!(result[1].id.as_str(), "b");
+    }
+
+    #[test]
+    fn test_entities_with_label_containing_empty_when_no_match() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Node")).unwrap();
+        assert!(g.entities_with_label_containing("Person").unwrap().is_empty());
+    }
+
     // ── Round 47: entities_with_min_in_degree ─────────────────────────────────
 
     #[test]
@@ -6502,5 +6557,46 @@ mod tests {
     fn test_entities_with_min_in_degree_empty_for_empty_graph() {
         let g = GraphStore::new();
         assert!(g.entities_with_min_in_degree(1).unwrap().is_empty());
+    }
+
+    // ── Round 49: total_property_count, entities_with_no_properties ───────────
+
+    #[test]
+    fn test_total_property_count_sums_across_entities() {
+        let g = GraphStore::new();
+        g.add_entity(
+            Entity::new("a", "Node")
+                .with_property("x", serde_json::json!(1))
+                .with_property("y", serde_json::json!(2)),
+        )
+        .unwrap();
+        g.add_entity(Entity::new("b", "Node").with_property("z", serde_json::json!(3))).unwrap();
+        assert_eq!(g.total_property_count().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_total_property_count_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.total_property_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_entities_with_no_properties_returns_bare_entities() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("bare", "Node")).unwrap();
+        g.add_entity(
+            Entity::new("annotated", "Node").with_property("k", serde_json::json!("v")),
+        )
+        .unwrap();
+        let result = g.entities_with_no_properties().unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id.as_str(), "bare");
+    }
+
+    #[test]
+    fn test_entities_with_no_properties_empty_when_all_have_properties() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N").with_property("k", serde_json::json!(1))).unwrap();
+        assert!(g.entities_with_no_properties().unwrap().is_empty());
     }
 }

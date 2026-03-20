@@ -1969,6 +1969,16 @@ impl Pipeline {
         self.stages.iter().filter(|s| s.name.len() > min_len).count()
     }
 
+    /// Return the number of stages whose name is strictly shorter than
+    /// `max_len` bytes.
+    ///
+    /// Complement of [`stage_count_above_name_len`].
+    ///
+    /// [`stage_count_above_name_len`]: Pipeline::stage_count_above_name_len
+    pub fn stage_count_below_name_len(&self, max_len: usize) -> usize {
+        self.stages.iter().filter(|s| s.name.len() < max_len).count()
+    }
+
     /// Return the name of the stage at position `idx`, or `None` if `idx` is
     /// out of bounds.
     ///
@@ -2028,6 +2038,22 @@ impl Pipeline {
             .filter(|s| s.name.ends_with(suffix))
             .map(|s| s.name.as_str())
             .collect()
+    }
+
+    /// Return `true` if any stage name contains `substr` as a substring.
+    ///
+    /// A quick existence check that avoids allocating a full `Vec`.
+    /// Returns `false` for an empty pipeline.
+    pub fn has_stage_with_name_containing(&self, substr: &str) -> bool {
+        self.stages.iter().any(|s| s.name.contains(substr))
+    }
+
+    /// Return the total number of bytes across all stage name strings.
+    ///
+    /// Useful for estimating the overhead of storing pipeline metadata.
+    /// Returns `0` for an empty pipeline.
+    pub fn stage_name_bytes_total(&self) -> usize {
+        self.stages.iter().map(|s| s.name.len()).sum()
     }
 
     /// Return the position of the stage named `name` counted from the end of
@@ -4170,6 +4196,36 @@ mod tests {
         assert!(p.stages_with_suffix("validate").is_empty());
     }
 
+    // ── Round 49: has_stage_with_name_containing, stage_name_bytes_total ───────
+
+    #[test]
+    fn test_has_stage_with_name_containing_true_when_match_exists() {
+        let p = Pipeline::new()
+            .add_stage("transform_input", |s: String| Ok(s))
+            .add_stage("write_output", |s: String| Ok(s));
+        assert!(p.has_stage_with_name_containing("transform"));
+    }
+
+    #[test]
+    fn test_has_stage_with_name_containing_false_when_no_match() {
+        let p = Pipeline::new().add_stage("write", |s: String| Ok(s));
+        assert!(!p.has_stage_with_name_containing("transform"));
+    }
+
+    #[test]
+    fn test_stage_name_bytes_total_sums_name_lengths() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))
+            .add_stage("cde", |s: String| Ok(s));
+        assert_eq!(p.stage_name_bytes_total(), 5);
+    }
+
+    #[test]
+    fn test_stage_name_bytes_total_zero_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert_eq!(p.stage_name_bytes_total(), 0);
+    }
+
     // ── Round 47: failure_headroom ────────────────────────────────────────────
 
     #[test]
@@ -4193,5 +4249,23 @@ mod tests {
         cb.record_failure();
         cb.record_failure();
         assert_eq!(cb.failure_headroom(), 0);
+    }
+
+    // ── Round 49: stage_count_below_name_len ──────────────────────────────────
+
+    #[test]
+    fn test_stage_count_below_name_len_counts_short_names() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))      // len=2
+            .add_stage("abcde", |s: String| Ok(s))   // len=5
+            .add_stage("xyz", |s: String| Ok(s));     // len=3
+        // strictly less than 4: "ab" (2) and "xyz" (3)
+        assert_eq!(p.stage_count_below_name_len(4), 2);
+    }
+
+    #[test]
+    fn test_stage_count_below_name_len_zero_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert_eq!(p.stage_count_below_name_len(10), 0);
     }
 }

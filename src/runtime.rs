@@ -1077,6 +1077,34 @@ impl AgentSession {
             .collect()
     }
 
+    /// Return steps whose observation is strictly longer than `min_bytes`.
+    ///
+    /// Equivalent to [`steps_with_long_observations`] but uses the name
+    /// "above" for consistency with other filtering predicates.
+    ///
+    /// [`steps_with_long_observations`]: AgentSession::steps_with_long_observations
+    pub fn observations_above_bytes(&self, min_bytes: usize) -> Vec<&ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.observation.len() > min_bytes)
+            .collect()
+    }
+
+    /// Return the total character count across all steps.
+    ///
+    /// Sums `thought.chars().count() + action.chars().count() + observation.chars().count()`
+    /// for every step.  Useful as a proxy for token budget estimation.
+    pub fn total_step_chars(&self) -> usize {
+        self.steps
+            .iter()
+            .map(|s| {
+                s.thought.chars().count()
+                    + s.action.chars().count()
+                    + s.observation.chars().count()
+            })
+            .sum()
+    }
+
     /// Return the number of distinct observation strings across all steps.
     ///
     /// Two steps with the same observation text are counted as one.
@@ -1247,6 +1275,24 @@ impl AgentSession {
         self.steps
             .iter()
             .filter(|s| !seen.insert(s.thought.as_str()))
+            .collect()
+    }
+
+    /// Return the byte length of the longest thought in this session.
+    ///
+    /// Returns `0` for an empty session or when all thoughts are empty strings.
+    pub fn max_thought_bytes(&self) -> usize {
+        self.steps.iter().map(|s| s.thought.len()).max().unwrap_or(0)
+    }
+
+    /// Return references to steps whose observation byte length exceeds `min_bytes`.
+    ///
+    /// Useful for finding steps that produced unexpectedly large observations.
+    /// Returns an empty `Vec` for an empty session or when no step qualifies.
+    pub fn steps_above_observation_bytes(&self, min_bytes: usize) -> Vec<&ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.observation.len() > min_bytes)
             .collect()
     }
 
@@ -2108,6 +2154,16 @@ impl AgentRuntime {
     /// `ToolSpec`.
     pub fn tool_count(&self) -> usize {
         self.tools.len()
+    }
+
+    /// Return the names of all registered tools, sorted alphabetically.
+    ///
+    /// Provides a stable, deterministic list independent of registration order.
+    /// Returns an empty `Vec` when no tools have been registered.
+    pub fn tool_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.tools.iter().map(|t| t.name.as_str()).collect();
+        names.sort_unstable();
+        names
     }
 
     /// Gracefully shut down the runtime.
@@ -5537,6 +5593,49 @@ mod tests {
     fn test_agent_runtime_tool_count_reflects_registered_tools() {
         let rt = AgentRuntime::quick(1, "model");
         assert_eq!(rt.tool_count(), 0);
+    }
+
+    // ── Round 49: max_thought_bytes, steps_above_observation_bytes, tool_names ──
+
+    #[test]
+    fn test_max_thought_bytes_returns_longest_thought_length() {
+        let steps = vec![
+            make_step("hi", "a", "o"),
+            make_step("hello world", "b", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.max_thought_bytes(), 11);
+    }
+
+    #[test]
+    fn test_max_thought_bytes_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.max_thought_bytes(), 0);
+    }
+
+    #[test]
+    fn test_steps_above_observation_bytes_filters_by_threshold() {
+        let steps = vec![
+            make_step("t", "a", "tiny"),
+            make_step("t", "b", "a much longer observation"),
+        ];
+        let session = make_session(steps, 0);
+        let above = session.steps_above_observation_bytes(5);
+        assert_eq!(above.len(), 1);
+        assert_eq!(above[0].action, "b");
+    }
+
+    #[test]
+    fn test_steps_above_observation_bytes_empty_when_all_below() {
+        let steps = vec![make_step("t", "a", "hi")];
+        let session = make_session(steps, 0);
+        assert!(session.steps_above_observation_bytes(100).is_empty());
+    }
+
+    #[test]
+    fn test_agent_runtime_tool_names_empty_when_no_tools() {
+        let rt = AgentRuntime::quick(1, "model");
+        assert!(rt.tool_names().is_empty());
     }
 
     // ── Round 47: steps_between, has_duplicate_actions, step_indices_with_tool ──

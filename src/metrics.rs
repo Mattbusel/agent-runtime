@@ -788,6 +788,25 @@ impl MetricsSnapshot {
         self.per_tool_calls.values().sum()
     }
 
+    /// Return the ratio of the most-called tool's count to the least-called
+    /// tool's count.
+    ///
+    /// Returns `1.0` when fewer than two tools are tracked (no imbalance
+    /// measurable) or when the minimum is zero.  A high ratio indicates that
+    /// load is concentrated on a single tool.
+    pub fn tool_call_imbalance(&self) -> f64 {
+        let counts: Vec<u64> = self.per_tool_calls.values().copied().collect();
+        if counts.len() < 2 {
+            return 1.0;
+        }
+        let max = counts.iter().copied().max().unwrap_or(0);
+        let min = counts.iter().copied().min().unwrap_or(0);
+        if min == 0 {
+            return 1.0;
+        }
+        max as f64 / min as f64
+    }
+
     /// Return the failure rate for a specific tool (failures / calls).
     ///
     /// Returns `0.0` if the tool has no recorded calls.
@@ -1466,6 +1485,18 @@ impl RuntimeMetrics {
             return 0.0;
         }
         self.memory_recall_count() as f64 / steps as f64
+    }
+
+    /// Return the average number of tool failures per completed session.
+    ///
+    /// Computed as `failed_tool_calls / total_sessions`.  Returns `0.0`
+    /// when no sessions have been recorded to avoid division by zero.
+    pub fn avg_tool_failures_per_session(&self) -> f64 {
+        let sessions = self.total_sessions();
+        if sessions == 0 {
+            return 0.0;
+        }
+        self.failed_tool_calls() as f64 / sessions as f64
     }
 
     /// Return the top `n` tools by total call count, sorted descending.
@@ -3629,6 +3660,23 @@ mod tests {
         assert_eq!(m.avg_memory_recalls_per_step(), 0.0);
     }
 
+    // ── Round 49: avg_tool_failures_per_session ────────────────────────────────
+
+    #[test]
+    fn test_avg_tool_failures_per_session_computes_ratio() {
+        use std::sync::atomic::Ordering;
+        let m = RuntimeMetrics::default();
+        m.total_sessions.store(4, Ordering::Relaxed);
+        m.failed_tool_calls.store(2, Ordering::Relaxed);
+        assert!((m.avg_tool_failures_per_session() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_tool_failures_per_session_zero_when_no_sessions() {
+        let m = RuntimeMetrics::default();
+        assert_eq!(m.avg_tool_failures_per_session(), 0.0);
+    }
+
     // ── Round 47: has_any_tool_failures, total_tool_calls_count ───────────────
 
     #[test]
@@ -3663,5 +3711,35 @@ mod tests {
         let m = RuntimeMetrics::new();
         let snap = m.snapshot();
         assert_eq!(snap.total_tool_calls_count(), 0);
+    }
+
+    // ── Round 49: tool_call_imbalance ─────────────────────────────────────────
+
+    #[test]
+    fn test_tool_call_imbalance_one_for_single_tool() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        m.record_tool_call("search");
+        let snap = m.snapshot();
+        assert!((snap.tool_call_imbalance() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_tool_call_imbalance_computes_max_over_min() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("a");
+        m.record_tool_call("a");
+        m.record_tool_call("a");
+        m.record_tool_call("b");
+        let snap = m.snapshot();
+        // max=3, min=1 → ratio=3.0
+        assert!((snap.tool_call_imbalance() - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_tool_call_imbalance_one_for_empty_snapshot() {
+        let m = RuntimeMetrics::new();
+        let snap = m.snapshot();
+        assert!((snap.tool_call_imbalance() - 1.0).abs() < 1e-9);
     }
 }

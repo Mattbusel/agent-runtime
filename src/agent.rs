@@ -132,6 +132,14 @@ impl Message {
     pub fn byte_len(&self) -> usize {
         self.content.len()
     }
+
+    /// Return `true` if the content string starts with `prefix`.
+    ///
+    /// The check is byte-exact (case-sensitive).  Returns `true` for an empty
+    /// `prefix` regardless of content.
+    pub fn content_starts_with(&self, prefix: &str) -> bool {
+        self.content.starts_with(prefix)
+    }
 }
 
 impl std::fmt::Display for Role {
@@ -580,6 +588,13 @@ impl AgentConfig {
     /// Return the configured system prompt string.
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
+    }
+
+    /// Return `true` if the system prompt is empty or whitespace-only.
+    ///
+    /// A default `AgentConfig` has an empty system prompt.
+    pub fn system_prompt_is_empty(&self) -> bool {
+        self.system_prompt.trim().is_empty()
     }
 
     /// Return the model name this config targets.
@@ -1480,6 +1495,22 @@ impl ToolRegistry {
             .values()
             .map(|spec| spec.description.split_ascii_whitespace().count())
             .sum()
+    }
+
+    /// Return `true` if any registered tool has a blank description.
+    ///
+    /// A blank description is one that is empty or contains only whitespace.
+    /// Returns `false` for an empty registry (vacuously no blank descriptions).
+    pub fn has_tools_with_empty_descriptions(&self) -> bool {
+        self.tools.values().any(|s| s.description.trim().is_empty())
+    }
+
+    /// Return the total number of required fields across all registered tools.
+    ///
+    /// Sums the `required_fields` lengths of every `ToolSpec`.
+    /// Returns `0` for an empty registry or when no tool has required fields.
+    pub fn total_required_fields(&self) -> usize {
+        self.tools.values().map(|s| s.required_fields.len()).sum()
     }
 
     /// Return a reference to the `ToolSpec` with the most required fields.
@@ -4533,5 +4564,73 @@ mod tests {
     fn test_tool_descriptions_total_words_zero_for_empty_registry() {
         let reg = ToolRegistry::new();
         assert_eq!(reg.tool_descriptions_total_words(), 0);
+    }
+
+    // ── Round 49: content_starts_with, system_prompt_is_empty ─────────────────
+
+    #[test]
+    fn test_content_starts_with_true_for_matching_prefix() {
+        let msg = Message::user("Hello, world!");
+        assert!(msg.content_starts_with("Hello"));
+    }
+
+    #[test]
+    fn test_content_starts_with_false_for_non_matching_prefix() {
+        let msg = Message::user("Hello, world!");
+        assert!(!msg.content_starts_with("World"));
+    }
+
+    #[test]
+    fn test_content_starts_with_empty_prefix_always_true() {
+        let msg = Message::assistant("anything");
+        assert!(msg.content_starts_with(""));
+    }
+
+    #[test]
+    fn test_system_prompt_is_empty_true_for_blank_prompt() {
+        let cfg = AgentConfig::new(5, "m").with_system_prompt("");
+        assert!(cfg.system_prompt_is_empty());
+    }
+
+    #[test]
+    fn test_system_prompt_is_empty_false_when_set() {
+        let cfg = AgentConfig::new(5, "m").with_system_prompt("You are helpful.");
+        assert!(!cfg.system_prompt_is_empty());
+    }
+
+    // ── Round 49: has_tools_with_empty_descriptions, total_required_fields ─────
+
+    #[test]
+    fn test_has_tools_with_empty_descriptions_true_when_blank_present() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "  ", |_| serde_json::json!({})));
+        assert!(reg.has_tools_with_empty_descriptions());
+    }
+
+    #[test]
+    fn test_has_tools_with_empty_descriptions_false_when_all_filled() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "desc", |_| serde_json::json!({})));
+        assert!(!reg.has_tools_with_empty_descriptions());
+    }
+
+    #[test]
+    fn test_total_required_fields_sums_across_tools() {
+        let mut reg = ToolRegistry::new();
+        reg.register(
+            ToolSpec::new("t1", "d", |_| serde_json::json!({}))
+                .with_required_fields(vec!["a".to_string(), "b".to_string()]),
+        );
+        reg.register(
+            ToolSpec::new("t2", "d", |_| serde_json::json!({}))
+                .with_required_fields(vec!["c".to_string()]),
+        );
+        assert_eq!(reg.total_required_fields(), 3);
+    }
+
+    #[test]
+    fn test_total_required_fields_zero_for_empty_registry() {
+        let reg = ToolRegistry::new();
+        assert_eq!(reg.total_required_fields(), 0);
     }
 }
