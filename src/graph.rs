@@ -884,6 +884,13 @@ impl GraphStore {
         self.relationship_count()
     }
 
+    /// Return `true` if the directed graph contains **no** cycles.
+    ///
+    /// Shorthand for `!self.contains_cycle()`.
+    pub fn is_acyclic(&self) -> Result<bool, AgentRuntimeError> {
+        Ok(!self.contains_cycle()?)
+    }
+
     /// Return all entity IDs in the graph without allocating full `Entity` objects.
     ///
     /// Cheaper than [`all_entities`] when only IDs are needed.
@@ -3950,6 +3957,35 @@ mod tests {
     fn test_contains_cycle_false_for_empty_graph() {
         let g = GraphStore::new();
         assert!(!g.contains_cycle().unwrap());
+    }
+
+    // ── Round 15: GraphStore::is_acyclic ─────────────────────────────────────
+
+    #[test]
+    fn test_is_acyclic_true_for_dag() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "e", 1.0)).unwrap();
+        assert!(g.is_acyclic().unwrap());
+    }
+
+    #[test]
+    fn test_is_acyclic_false_for_cyclic_graph() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("x", "N")).unwrap();
+        g.add_entity(Entity::new("y", "N")).unwrap();
+        g.add_relationship(Relationship::new("x", "y", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("y", "x", "e", 1.0)).unwrap();
+        assert!(!g.is_acyclic().unwrap());
+    }
+
+    #[test]
+    fn test_is_acyclic_true_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(g.is_acyclic().unwrap());
     }
 
     // ── Round 15: count_relationships_by_kind, merge, top_nodes_by_in/out_degree ──

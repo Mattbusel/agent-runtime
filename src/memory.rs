@@ -5115,4 +5115,81 @@ mod tests {
         let wm = WorkingMemory::new(5).unwrap();
         assert!(wm.snapshot().unwrap().is_empty());
     }
+
+    // ── Round 15: agent_count, is_at_capacity, remove_keys_starting_with,
+    //              has_key, entry_count_with_tag ─────────────────────────────
+
+    #[test]
+    fn test_episodic_store_agent_count_zero_when_empty() {
+        let store = EpisodicStore::new();
+        assert_eq!(store.agent_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_episodic_store_agent_count_distinct_agents() {
+        let store = EpisodicStore::new();
+        store.add_episode(AgentId::new("a"), "ep1", 0.5).unwrap();
+        store.add_episode(AgentId::new("b"), "ep2", 0.7).unwrap();
+        store.add_episode(AgentId::new("a"), "ep3", 0.3).unwrap();
+        assert_eq!(store.agent_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_working_memory_is_at_capacity_true_when_full() {
+        let wm = WorkingMemory::new(2).unwrap();
+        wm.set("k1", "v1").unwrap();
+        wm.set("k2", "v2").unwrap();
+        assert!(wm.is_at_capacity().unwrap());
+    }
+
+    #[test]
+    fn test_working_memory_is_at_capacity_false_when_not_full() {
+        let wm = WorkingMemory::new(5).unwrap();
+        wm.set("k1", "v1").unwrap();
+        assert!(!wm.is_at_capacity().unwrap());
+    }
+
+    #[test]
+    fn test_remove_keys_starting_with_removes_matching_keys() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("prefix_a", "1").unwrap();
+        wm.set("prefix_b", "2").unwrap();
+        wm.set("other", "3").unwrap();
+        let removed = wm.remove_keys_starting_with("prefix_").unwrap();
+        assert_eq!(removed, 2);
+        assert!(wm.get("prefix_a").unwrap().is_none());
+        assert!(wm.get("prefix_b").unwrap().is_none());
+        assert_eq!(wm.get("other").unwrap(), Some("3".into()));
+    }
+
+    #[test]
+    fn test_remove_keys_starting_with_returns_zero_when_no_match() {
+        let wm = WorkingMemory::new(5).unwrap();
+        wm.set("foo", "bar").unwrap();
+        assert_eq!(wm.remove_keys_starting_with("xyz_").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_semantic_store_has_key_true_when_exists() {
+        let store = SemanticStore::new();
+        store.store("mykey", "val", vec![]).unwrap();
+        assert!(store.has_key("mykey").unwrap());
+    }
+
+    #[test]
+    fn test_semantic_store_has_key_false_when_absent() {
+        let store = SemanticStore::new();
+        assert!(!store.has_key("ghost").unwrap());
+    }
+
+    #[test]
+    fn test_entry_count_with_tag_counts_correctly() {
+        let store = SemanticStore::new();
+        store.store("k1", "v1", vec!["rust".into(), "async".into()]).unwrap();
+        store.store("k2", "v2", vec!["rust".into()]).unwrap();
+        store.store("k3", "v3", vec!["python".into()]).unwrap();
+        assert_eq!(store.entry_count_with_tag("rust").unwrap(), 2);
+        assert_eq!(store.entry_count_with_tag("async").unwrap(), 1);
+        assert_eq!(store.entry_count_with_tag("absent").unwrap(), 0);
+    }
 }

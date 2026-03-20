@@ -11,6 +11,65 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.32.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::total_memory_hits`** (`runtime.rs`) — raw count of episodic
+  memory hits for the session; direct getter for the `memory_hits` field.
+- **`AgentSession::action_diversity`** (`runtime.rs`) — ratio of unique actions
+  to total steps; `0.0` for empty sessions, `1.0` when every step uses a
+  distinct action.
+- **`GraphStore::is_acyclic`** (`graph.rs`) — shorthand for `!contains_cycle()`;
+  returns `true` for empty graphs.
+- **`EpisodicStore::agent_count`** (`memory.rs`) — number of distinct agents
+  that have at least one stored episode.
+- **`WorkingMemory::is_at_capacity`** (`memory.rs`) — `true` when the number of
+  stored entries equals the configured capacity.
+- **`WorkingMemory::remove_keys_starting_with`** (`memory.rs`) — batch-remove all
+  entries whose key begins with a given prefix; returns the removed count.
+- **`SemanticStore::has_key`** (`memory.rs`) — `true` if any entry with the given
+  key exists.
+- **`SemanticStore::entry_count_with_tag`** (`memory.rs`) — count of entries that
+  include a specific tag in their tag list.
+- **`LatencyHistogram::is_empty`** (`metrics.rs`) — `true` when no samples have
+  been recorded yet.
+- **`RuntimeMetrics::checkpoint_error_rate`** (`metrics.rs`) — ratio of checkpoint
+  errors to total completed sessions; `0.0` when no sessions recorded.
+
+---
+
+## [1.31.0] - 2026-03-20
+
+### Added
+
+- **`Entity::property_value(key)`** (`graph.rs`) — returns `Option<&Value>` for a
+  property key; wraps `HashMap::get` for ergonomic typed property access.
+- **`GraphStore::find_relationships_by_kind(kind)`** (`graph.rs`) — filter all
+  stored relationships by `kind` (case-sensitive), returning a `Vec<Relationship>`.
+- **`GraphStore::count_relationships_by_kind(kind)`** (`graph.rs`) — count of
+  relationships matching `kind` without allocating a full `Vec`.
+- **`LatencyHistogram::interquartile_range_ms()`** (`metrics.rs`) — p75 − p25 as a
+  measure of spread less sensitive to outliers than `range_ms`.
+- **`MetricsSnapshot::avg_steps_per_session()`** (`metrics.rs`) — `total_steps /
+  total_sessions` as `f64`; returns `0.0` when no sessions recorded.
+- **`WorkingMemory::peek_oldest()`** (`memory.rs`) — read the oldest entry without
+  removing it; read-only counterpart to `pop_oldest`.
+- **`SemanticStore::values()`** (`memory.rs`) — all stored values in insertion
+  order as `Vec<String>`.
+- **`SemanticStore::get_tags(key)`** (`memory.rs`) — tags for the first entry
+  matching `key`, or `None` if absent.
+- **`Deduplicator::get_result(key)`** (`orchestrator.rs`) — look up the cached
+  result for `key` if present and not expired; read-only, no state changes.
+- **`Pipeline::rename_stage(old, new)`** (`orchestrator.rs`) — rename an existing
+  stage in place; returns `false` if no stage with `old` name exists.
+- **`CircuitBreaker::failure_rate()`** (`orchestrator.rs`) — `failure_count /
+  threshold` as `f64`; useful for dashboards and alerting thresholds.
+- **`RunResult::failed_tool_call_count()`** (`runtime.rs`) — count of steps with
+  error observations; equivalent to `failed_steps().len()` without the allocation.
+
+---
+
 ## [1.30.0] - 2026-03-20
 
 ### Added

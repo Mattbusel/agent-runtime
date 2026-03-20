@@ -1646,4 +1646,33 @@ mod tests {
         };
         assert!((snap.avg_steps_per_session() - 5.0).abs() < 1e-9);
     }
+
+    // ── Round 15: LatencyHistogram::is_empty, RuntimeMetrics::checkpoint_error_rate
+
+    #[test]
+    fn test_latency_histogram_is_empty_true_initially() {
+        let h = LatencyHistogram::default();
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn test_latency_histogram_is_empty_false_after_record() {
+        let h = LatencyHistogram::default();
+        h.record(10);
+        assert!(!h.is_empty());
+    }
+
+    #[test]
+    fn test_checkpoint_error_rate_zero_when_no_sessions() {
+        let m = RuntimeMetrics::new();
+        assert!((m.checkpoint_error_rate() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_checkpoint_error_rate_ratio_correct() {
+        let m = RuntimeMetrics::new();
+        m.total_sessions.fetch_add(4, std::sync::atomic::Ordering::Relaxed);
+        m.checkpoint_errors.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        assert!((m.checkpoint_error_rate() - 0.5).abs() < 1e-9);
+    }
 }
