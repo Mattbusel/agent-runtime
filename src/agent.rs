@@ -1182,6 +1182,13 @@ impl ToolRegistry {
         self.tools.clear();
     }
 
+    /// Return a sorted list of all tool descriptions.
+    pub fn all_descriptions(&self) -> Vec<&str> {
+        let mut descs: Vec<&str> = self.tools.values().map(|s| s.description.as_str()).collect();
+        descs.sort_unstable();
+        descs
+    }
+
     /// Return the names of tools whose description contains `keyword` (case-insensitive).
     pub fn tool_names_with_keyword(&self, keyword: &str) -> Vec<&str> {
         let kw = keyword.to_ascii_lowercase();
@@ -3643,5 +3650,19 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.register(ToolSpec::new("t", "some tool", |_| serde_json::json!({})));
         assert!(reg.tool_names_with_keyword("missing").is_empty());
+    }
+
+    #[test]
+    fn test_all_descriptions_returns_sorted_descriptions() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "z description", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("t2", "a description", |_| serde_json::json!({})));
+        assert_eq!(reg.all_descriptions(), vec!["a description", "z description"]);
+    }
+
+    #[test]
+    fn test_all_descriptions_empty_registry_returns_empty() {
+        let reg = ToolRegistry::new();
+        assert!(reg.all_descriptions().is_empty());
     }
 }

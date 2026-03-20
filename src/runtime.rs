@@ -773,6 +773,25 @@ impl AgentSession {
             .map(|s| s.observation.as_str())
     }
 
+    /// Return the byte length of each step's thought string, in step order.
+    pub fn thought_lengths(&self) -> Vec<usize> {
+        self.steps.iter().map(|s| s.thought.len()).collect()
+    }
+
+    /// Return the action string that appears most often across all steps.
+    ///
+    /// Returns `None` if the session has no steps.
+    pub fn most_common_action(&self) -> Option<&str> {
+        if self.steps.is_empty() {
+            return None;
+        }
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for s in &self.steps {
+            *counts.entry(s.action.as_str()).or_insert(0) += 1;
+        }
+        counts.into_iter().max_by_key(|(_, c)| *c).map(|(a, _)| a)
+    }
+
     /// Return the fraction of steps that had a tool failure observation.
     ///
     /// Computed as `failed_tool_call_count / step_count`.  Returns `0.0` for
@@ -3905,5 +3924,32 @@ mod tests {
     fn test_avg_action_length_empty_returns_zero() {
         let session = make_session(vec![], 0);
         assert_eq!(session.avg_action_length(), 0.0);
+    }
+
+    #[test]
+    fn test_thought_lengths_returns_lengths_in_order() {
+        let steps = vec![
+            make_step("hi", "a", "o"),
+            make_step("hello", "b", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.thought_lengths(), vec![2, 5]);
+    }
+
+    #[test]
+    fn test_most_common_action_returns_most_frequent() {
+        let steps = vec![
+            make_step("t", "search", "o"),
+            make_step("t", "search", "o"),
+            make_step("t", "other", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.most_common_action(), Some("search"));
+    }
+
+    #[test]
+    fn test_most_common_action_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.most_common_action().is_none());
     }
 }

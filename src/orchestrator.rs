@@ -1405,6 +1405,17 @@ impl BackpressureGuard {
     pub fn acquired_count(&self) -> Result<usize, AgentRuntimeError> {
         Ok(self.capacity - self.available_capacity()?)
     }
+
+    /// Return `true` if the current depth exceeds the configured soft limit.
+    ///
+    /// Returns `false` if no soft limit is set.
+    pub fn over_soft_limit(&self) -> Result<bool, AgentRuntimeError> {
+        let soft = match self.soft_limit() {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+        Ok(self.depth()? > soft)
+    }
 }
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -3295,5 +3306,23 @@ mod tests {
     fn test_pipeline_count_stages_matching_case_insensitive() {
         let p = Pipeline::new().add_stage("TEXT-CLEAN", |s| Ok(s));
         assert_eq!(p.count_stages_matching("text"), 1);
+    }
+
+    #[test]
+    fn test_backpressure_guard_over_soft_limit_true_when_exceeded() {
+        let guard = BackpressureGuard::new(10)
+            .unwrap()
+            .with_soft_limit(1)
+            .unwrap();
+        guard.try_acquire().unwrap();
+        guard.try_acquire().unwrap();
+        assert!(guard.over_soft_limit().unwrap());
+    }
+
+    #[test]
+    fn test_backpressure_guard_over_soft_limit_false_when_no_soft_limit() {
+        let guard = BackpressureGuard::new(10).unwrap();
+        guard.try_acquire().unwrap();
+        assert!(!guard.over_soft_limit().unwrap());
     }
 }

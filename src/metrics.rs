@@ -355,6 +355,14 @@ impl LatencyHistogram {
             .map(|(&bound, _)| bound)
     }
 
+    /// Return the number of buckets that have at least one recorded sample.
+    pub fn occupied_bucket_count(&self) -> usize {
+        self.buckets
+            .iter()
+            .filter(|b| b.load(std::sync::atomic::Ordering::Relaxed) > 0)
+            .count()
+    }
+
     /// Return `true` if all recorded samples fall into exactly one bucket.
     ///
     /// An empty histogram is considered uniform.
@@ -661,6 +669,11 @@ impl MetricsSnapshot {
     /// Return `true` if any tool-call failures have been recorded.
     pub fn has_failures(&self) -> bool {
         self.failed_tool_calls > 0
+    }
+
+    /// Return the number of distinct tool names that have been called at least once.
+    pub fn tool_diversity(&self) -> usize {
+        self.per_tool_calls.len()
     }
 }
 
@@ -2540,5 +2553,36 @@ mod tests {
     fn test_latency_histogram_max_occupied_ms_empty_returns_none() {
         let h = LatencyHistogram::default();
         assert_eq!(h.max_occupied_ms(), None);
+    }
+
+    #[test]
+    fn test_latency_histogram_occupied_bucket_count_correct() {
+        let h = LatencyHistogram::default();
+        h.record(5);   // bucket 1
+        h.record(200); // bucket 5
+        assert_eq!(h.occupied_bucket_count(), 2);
+    }
+
+    #[test]
+    fn test_latency_histogram_occupied_bucket_count_empty_returns_zero() {
+        let h = LatencyHistogram::default();
+        assert_eq!(h.occupied_bucket_count(), 0);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_tool_diversity_counts_distinct_tools() {
+        let snap = MetricsSnapshot {
+            per_tool_calls: [("a".to_string(), 1u64), ("b".to_string(), 2u64)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(snap.tool_diversity(), 2);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_tool_diversity_empty_returns_zero() {
+        let snap = MetricsSnapshot::default();
+        assert_eq!(snap.tool_diversity(), 0);
     }
 }

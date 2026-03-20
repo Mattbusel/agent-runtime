@@ -365,6 +365,17 @@ impl GraphStore {
         Ok(inner.adjacency.get(id).map_or(0, |v| v.len()))
     }
 
+    /// Return the count of entities that have no incoming edges (source nodes).
+    pub fn source_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::source_count");
+        let count = inner
+            .entities
+            .keys()
+            .filter(|id| inner.reverse_adjacency.get(*id).map_or(true, |v| v.is_empty()))
+            .count();
+        Ok(count)
+    }
+
     /// Return the number of entities that have no outgoing relationships.
     pub fn orphan_count(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "GraphStore::orphan_count");
@@ -4676,5 +4687,25 @@ mod tests {
         g.add_relationship(Relationship::new("a", "c", "link", 1.0)).unwrap();
         assert_eq!(g.outgoing_count_for(&EntityId::new("a")).unwrap(), 2);
         assert_eq!(g.outgoing_count_for(&EntityId::new("b")).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_source_count_returns_number_of_nodes_with_no_incoming_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Node")).unwrap();
+        g.add_entity(Entity::new("b", "Node")).unwrap();
+        g.add_entity(Entity::new("c", "Node")).unwrap();
+        // a→b, a→c: b and c have incoming edges; a has none
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "link", 1.0)).unwrap();
+        assert_eq!(g.source_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_source_count_all_isolated_nodes_are_sources() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("x", "Node")).unwrap();
+        g.add_entity(Entity::new("y", "Node")).unwrap();
+        assert_eq!(g.source_count().unwrap(), 2);
     }
 }

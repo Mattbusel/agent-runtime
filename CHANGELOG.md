@@ -11,6 +11,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.52.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::thought_lengths`** — byte lengths of all step thoughts in step order.
+- **`AgentSession::most_common_action`** — the action string used most frequently across steps.
+- **`EpisodicStore::total_content_bytes`** — sum of byte lengths of episode content for an agent.
+- **`EpisodicStore::avg_content_length`** — average content byte length for one agent.
+- **`SemanticStore::keys_for_tag`** — list of entry keys that have a specific tag.
+- **`LatencyHistogram::occupied_bucket_count`** — number of buckets with at least one recorded sample.
+- **`MetricsSnapshot::tool_diversity`** — count of distinct tool names that have been called.
+- **`BackpressureGuard::over_soft_limit`** — true if current depth exceeds the soft limit.
+- **`GraphStore::source_count`** — count of entities with no incoming edges.
+- **`ToolRegistry::all_descriptions`** — sorted list of all tool descriptions.
+
+---
+
 ## [1.51.0] - 2026-03-20
 
 ### Added

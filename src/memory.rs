@@ -1067,6 +1067,31 @@ impl EpisodicStore {
         Ok(count)
     }
 
+    /// Return the total byte length of all episode content strings for `agent_id`.
+    ///
+    /// Returns `0` if the agent has no stored episodes.
+    pub fn total_content_bytes(&self, agent_id: &AgentId) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::total_content_bytes");
+        let total = inner
+            .items
+            .get(agent_id)
+            .map_or(0, |items| items.iter().map(|i| i.content.len()).sum());
+        Ok(total)
+    }
+
+    /// Return the average byte length of episode content strings for `agent_id`.
+    ///
+    /// Returns `0.0` if the agent has no stored episodes.
+    pub fn avg_content_length(&self, agent_id: &AgentId) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::avg_content_length");
+        let items = match inner.items.get(agent_id) {
+            Some(v) if !v.is_empty() => v,
+            _ => return Ok(0.0),
+        };
+        let total: usize = items.iter().map(|i| i.content.len()).sum();
+        Ok(total as f64 / items.len() as f64)
+    }
+
     /// Return the sum of all importance scores for `agent_id`.
     ///
     /// Returns `0.0` if the agent has no stored episodes.
@@ -2055,6 +2080,18 @@ impl SemanticStore {
             }
         }
         Ok(tags.into_iter().collect())
+    }
+
+    /// Return the keys of all entries that have the given tag.
+    pub fn keys_for_tag(&self, tag: &str) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::keys_for_tag");
+        let keys = inner
+            .entries
+            .iter()
+            .filter(|e| e.tags.iter().any(|t| t == tag))
+            .map(|e| e.key.clone())
+            .collect();
+        Ok(keys)
     }
 
     /// Return a sorted list of every distinct tag appearing across all entries.
@@ -6528,5 +6565,53 @@ mod tests {
         assert_eq!(wm.count_matching_prefix("user:").unwrap(), 2);
         assert_eq!(wm.count_matching_prefix("other").unwrap(), 1);
         assert_eq!(wm.count_matching_prefix("none").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_episodic_store_total_content_bytes_sums_lengths() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "hi", 0.5).unwrap();   // 2 bytes
+        store.add_episode(agent.clone(), "hello", 0.5).unwrap(); // 5 bytes
+        assert_eq!(store.total_content_bytes(&agent).unwrap(), 7);
+    }
+
+    #[test]
+    fn test_episodic_store_total_content_bytes_unknown_agent_returns_zero() {
+        let store = EpisodicStore::new();
+        assert_eq!(store.total_content_bytes(&AgentId::new("x")).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_episodic_store_avg_content_length_correct_mean() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "hi", 0.5).unwrap();    // 2
+        store.add_episode(agent.clone(), "hello", 0.5).unwrap(); // 5
+        assert!((store.avg_content_length(&agent).unwrap() - 3.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_episodic_store_avg_content_length_empty_returns_zero() {
+        let store = EpisodicStore::new();
+        assert_eq!(store.avg_content_length(&AgentId::new("x")).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_semantic_store_keys_for_tag_returns_matching_keys() {
+        let store = SemanticStore::new();
+        store.store("k1", "v1", vec!["rust".to_string()]).unwrap();
+        store.store("k2", "v2", vec!["python".to_string()]).unwrap();
+        store.store("k3", "v3", vec!["rust".to_string(), "async".to_string()]).unwrap();
+        let mut keys = store.keys_for_tag("rust").unwrap();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["k1", "k3"]);
+    }
+
+    #[test]
+    fn test_semantic_store_keys_for_tag_nonexistent_tag_returns_empty() {
+        let store = SemanticStore::new();
+        store.store("k", "v", vec!["rust".to_string()]).unwrap();
+        assert!(store.keys_for_tag("missing").unwrap().is_empty());
     }
 }
