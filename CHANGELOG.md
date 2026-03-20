@@ -11,6 +11,33 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.4.0] - 2026-03-20
+
+### Added
+
+- **`Deduplicator::dedup_many`** (`orchestrator.rs`) — rewritten to acquire the
+  internal mutex **once** for the entire batch instead of once per key.  The previous
+  implementation called `self.check(key, ttl)` in a loop, taking and releasing the
+  lock on every iteration.
+
+### Changed
+
+- **`GraphStore::betweenness_centrality`** (`graph.rs`) — two improvements in one:
+  1. The inner BFS now uses `inner.adjacency.get(&v)` (O(degree)) instead of
+     `inner.relationships.iter().filter(...)` (O(|E|)) per visited node.
+  2. Work buffers (`stack`, `predecessors`, `sigma`, `dist`, `delta`, `queue`)
+     are pre-allocated once and cleared at the top of each source-node iteration
+     rather than being re-allocated from scratch, reducing total allocation cost
+     from O(V²) to O(V).
+- **`GraphStore::label_propagation_communities`** (`graph.rs`) — replaced the
+  O(V·|E|) neighbour scan (`relationships.iter().filter(r.from==node||r.to==node)`)
+  with a reverse-adjacency index built once before the iteration loop.  Each
+  node now queries its out-neighbours via the existing adjacency index and its
+  in-neighbours via the new reverse index, making each iteration O(V + E)
+  instead of O(V · E).
+
+---
+
 ## [1.3.0] - 2026-03-20
 
 ### Added
