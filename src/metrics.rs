@@ -578,6 +578,29 @@ impl RuntimeMetrics {
         self.step_latency.reset();
     }
 
+    /// Return the fraction of tool calls that failed: `failed / total`.
+    ///
+    /// Returns `0.0` if no tool calls have been recorded.
+    pub fn failure_rate(&self) -> f64 {
+        let total = self.total_tool_calls.load(Ordering::Relaxed);
+        if total == 0 {
+            return 0.0;
+        }
+        let failed = self.failed_tool_calls.load(Ordering::Relaxed);
+        failed as f64 / total as f64
+    }
+
+    /// Return the top `n` tools by total call count, sorted descending.
+    ///
+    /// Returns fewer than `n` entries if fewer tools have been called.
+    pub fn top_tools_by_calls(&self, n: usize) -> Vec<(String, u64)> {
+        let snap = self.per_tool_calls_snapshot();
+        let mut pairs: Vec<(String, u64)> = snap.into_iter().collect();
+        pairs.sort_by(|a, b| b.1.cmp(&a.1));
+        pairs.truncate(n);
+        pairs
+    }
+
     /// Capture a snapshot of global counters as plain integers.
     ///
     /// Returns `(active_sessions, total_sessions, total_steps,

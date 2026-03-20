@@ -1036,6 +1036,17 @@ impl EpisodicStore {
         self.recall(agent_id, usize::MAX)
     }
 
+    /// Return the sum of `recall_count` across all episodes for `agent_id`.
+    ///
+    /// Useful for tracking aggregate access frequency per agent.
+    pub fn total_recall_count(&self, agent_id: &AgentId) -> Result<u64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::total_recall_count");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or(0, |items| items.iter().map(|i| i.recall_count).sum()))
+    }
+
     /// Return the total number of stored episodes across all agents.
     pub fn len(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "EpisodicStore::len");
@@ -1375,6 +1386,16 @@ impl SemanticStore {
         Ok(())
     }
 
+    /// Count entries that contain `tag` (case-sensitive).
+    pub fn count_by_tag(&self, tag: &str) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::count_by_tag");
+        Ok(inner
+            .entries
+            .iter()
+            .filter(|e| e.tags.iter().any(|t| t.as_str() == tag))
+            .count())
+    }
+
     /// Return all unique tags present across all stored entries, in sorted order.
     pub fn list_tags(&self) -> Result<Vec<String>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::list_tags");
@@ -1531,6 +1552,15 @@ impl WorkingMemory {
         }
     }
 
+    /// Retrieve multiple values in a single lock acquisition.
+    ///
+    /// Returns a `Vec` of the same length as `keys`.  Each entry is `Some(value)`
+    /// if the key is present, `None` if not.
+    pub fn get_many(&self, keys: &[&str]) -> Result<Vec<Option<String>>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::get_many");
+        Ok(keys.iter().map(|k| inner.map.get(*k).cloned()).collect())
+    }
+
     /// Return `true` if a value is stored under `key`.
     pub fn contains(&self, key: &str) -> Result<bool, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::contains");
@@ -1561,6 +1591,18 @@ impl WorkingMemory {
     pub fn keys(&self) -> Result<Vec<String>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::keys");
         Ok(inner.order.iter().cloned().collect())
+    }
+
+    /// Return all values in insertion order (parallel to [`keys`]).
+    ///
+    /// [`keys`]: WorkingMemory::keys
+    pub fn values(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::values");
+        Ok(inner
+            .order
+            .iter()
+            .filter_map(|k| inner.map.get(k).cloned())
+            .collect())
     }
 
     /// Remove all entries from working memory.

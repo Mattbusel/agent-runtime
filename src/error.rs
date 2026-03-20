@@ -80,6 +80,38 @@ pub enum AgentRuntimeError {
     },
 }
 
+impl AgentRuntimeError {
+    /// Return `true` if this is a `CircuitOpen` error.
+    pub fn is_circuit_open(&self) -> bool {
+        matches!(self, Self::CircuitOpen { .. })
+    }
+
+    /// Return `true` if this is a `BackpressureShed` error.
+    pub fn is_backpressure(&self) -> bool {
+        matches!(self, Self::BackpressureShed { .. })
+    }
+
+    /// Return `true` if this is a `Provider` error.
+    pub fn is_provider(&self) -> bool {
+        matches!(self, Self::Provider(_))
+    }
+
+    /// Return `true` if this is a `Validation` error.
+    pub fn is_validation(&self) -> bool {
+        matches!(self, Self::Validation { .. })
+    }
+
+    /// Return `true` if this is a `Memory` error.
+    pub fn is_memory(&self) -> bool {
+        matches!(self, Self::Memory(_))
+    }
+
+    /// Return `true` if this is a `Graph` error.
+    pub fn is_graph(&self) -> bool {
+        matches!(self, Self::Graph(_))
+    }
+}
+
 impl From<serde_json::Error> for AgentRuntimeError {
     fn from(e: serde_json::Error) -> Self {
         AgentRuntimeError::AgentLoop(format!("JSON error: {e}"))

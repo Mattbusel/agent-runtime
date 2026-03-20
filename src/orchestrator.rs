@@ -487,6 +487,11 @@ impl CircuitBreaker {
         }
     }
 
+    /// Return the service name this circuit breaker is protecting.
+    pub fn service_name(&self) -> &str {
+        &self.service
+    }
+
     /// Force the circuit back to `Closed` state, resetting all failure counters.
     ///
     /// Useful for tests and manual operator recovery.  Under normal operation
@@ -890,7 +895,15 @@ impl Deduplicator {
         inner.cache.retain(|_, (_, inserted_at)| {
             now.duration_since(*inserted_at) <= ttl
         });
-        Ok(before - inner.cache.len())
+        let removed = before - inner.cache.len();
+        // Rebuild cache_order to drop ghost entries (keys purged from cache but
+        // still referenced in the VecDeque).
+        if removed > 0 {
+            let live_keys: std::collections::HashSet<String> =
+                inner.cache.keys().cloned().collect();
+            inner.cache_order.retain(|k| live_keys.contains(k));
+        }
+        Ok(removed)
     }
 }
 
@@ -1018,6 +1031,15 @@ impl BackpressureGuard {
         let depth = self.depth()?;
         Ok(depth as f32 / self.capacity as f32)
     }
+
+    /// Return the number of additional slots that can be acquired before hitting
+    /// the hard capacity limit.
+    ///
+    /// Returns `0` when the guard is full.
+    pub fn remaining_capacity(&self) -> Result<usize, AgentRuntimeError> {
+        let depth = self.depth()?;
+        Ok(self.capacity.saturating_sub(depth))
+    }
 }
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -1098,6 +1120,11 @@ impl Pipeline {
             handler: Box::new(handler),
         });
         self
+    }
+
+    /// Return `true` if the pipeline has no stages.
+    pub fn is_empty(&self) -> bool {
+        self.stages.is_empty()
     }
 
     /// Return the number of stages in the pipeline.

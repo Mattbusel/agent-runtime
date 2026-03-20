@@ -1050,6 +1050,67 @@ impl GraphStore {
         Ok(!self.detect_cycles()?)
     }
 
+    /// Count the number of weakly connected components in the graph.
+    ///
+    /// Treats all edges as undirected for component assignment.  Isolated
+    /// nodes (no edges) each count as their own component.  Uses Union-Find.
+    pub fn connected_components(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "connected_components");
+        let ids: Vec<&EntityId> = inner.entities.keys().collect();
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        // Map EntityId → index for Union-Find.
+        let idx: HashMap<&EntityId, usize> =
+            ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        let mut parent: Vec<usize> = (0..ids.len()).collect();
+
+        fn find(parent: &mut Vec<usize>, x: usize) -> usize {
+            if parent[x] != x {
+                parent[x] = find(parent, parent[x]);
+            }
+            parent[x]
+        }
+
+        fn union(parent: &mut Vec<usize>, a: usize, b: usize) {
+            let ra = find(parent, a);
+            let rb = find(parent, b);
+            if ra != rb {
+                parent[ra] = rb;
+            }
+        }
+
+        for rel in &inner.relationships {
+            if let (Some(&a), Some(&b)) = (idx.get(&rel.from), idx.get(&rel.to)) {
+                union(&mut parent, a, b);
+            }
+        }
+
+        let components = ids
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| find(&mut parent, *i) == *i)
+            .count();
+        Ok(components)
+    }
+
+    /// Return all entities that have no edges (neither incoming nor outgoing).
+    pub fn isolates(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "isolates");
+        let mut has_edge: std::collections::HashSet<&EntityId> = std::collections::HashSet::new();
+        for rel in &inner.relationships {
+            has_edge.insert(&rel.from);
+            has_edge.insert(&rel.to);
+        }
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| !has_edge.contains(&e.id))
+            .cloned()
+            .collect())
+    }
+
     /// Return the number of outgoing edges (out-degree) for `id`.
     ///
     /// Returns `0` if the entity has no outgoing edges or does not exist.
