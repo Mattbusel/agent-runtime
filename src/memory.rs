@@ -885,6 +885,37 @@ impl EpisodicStore {
         Ok(items)
     }
 
+    /// Return all episodes for `agent_id` whose content contains `substr`.
+    ///
+    /// Returns an empty `Vec` for an unknown agent or when no episode matches.
+    pub fn episodes_matching_content(
+        &self,
+        agent_id: &AgentId,
+        substr: &str,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episodes_matching_content");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map(|v| v.iter().filter(|m| m.content.contains(substr)).cloned().collect())
+            .unwrap_or_default())
+    }
+
+    /// Return the agent ID whose episodes have the highest total importance
+    /// score, or `None` if the store is empty.
+    pub fn top_agent_by_importance(&self) -> Result<Option<AgentId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::top_agent_by_importance");
+        Ok(inner
+            .items
+            .iter()
+            .map(|(id, items)| {
+                let total: f32 = items.iter().map(|m| m.importance).sum();
+                (id.clone(), total)
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(id, _)| id))
+    }
+
     /// Return the number of episodes stored for the given agent.
     ///
     /// Returns `0` if the agent has no recorded episodes.

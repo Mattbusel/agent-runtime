@@ -1444,6 +1444,36 @@ impl AgentSession {
             .any(|s| !seen.insert(s.action.as_str()))
     }
 
+    /// Return `true` if any step thought starts with one of the given `prefixes`.
+    ///
+    /// Returns `false` for an empty session or when no prefix matches.
+    pub fn thought_starts_with_any(&self, prefixes: &[&str]) -> bool {
+        self.steps
+            .iter()
+            .any(|s| prefixes.iter().any(|p| s.thought.starts_with(p)))
+    }
+
+    /// Return the total number of whitespace-delimited words across all action
+    /// strings in this session.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn action_word_count(&self) -> usize {
+        self.steps
+            .iter()
+            .map(|s| s.action.split_whitespace().count())
+            .sum()
+    }
+
+    /// Return the number of steps whose thought character count exceeds `min`.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn steps_above_thought_chars(&self, min: usize) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| s.thought.chars().count() > min)
+            .count()
+    }
+
     /// Return the smallest byte length of non-empty observation strings in this
     /// session.
     ///
