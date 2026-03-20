@@ -1486,6 +1486,20 @@ impl EpisodicStore {
         Ok(count)
     }
 
+    /// Return the episode with the earliest timestamp for `agent_id`, or `None`
+    /// if the agent has no stored episodes.
+    pub fn oldest_episode(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::oldest_episode");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|v| v.iter().min_by_key(|i| i.timestamp))
+            .cloned())
+    }
+
     /// Return the episode with the highest importance score for `agent_id`, or `None`
     /// if the agent has no stored episodes.  Ties are broken in favour of the
     /// later-inserted episode.
@@ -1960,6 +1974,16 @@ impl SemanticStore {
     pub fn has_key(&self, key: &str) -> Result<bool, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::has_key");
         Ok(inner.entries.iter().any(|e| e.key == key))
+    }
+
+    /// Remove all entries whose key equals `key`.
+    ///
+    /// Returns the number of entries removed.
+    pub fn remove_by_key(&self, key: &str) -> Result<usize, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "SemanticStore::remove_by_key");
+        let before = inner.entries.len();
+        inner.entries.retain(|e| e.key != key);
+        Ok(before - inner.entries.len())
     }
 
     /// Return the number of entries that include `tag` in their tag list.
@@ -2522,6 +2546,14 @@ impl WorkingMemory {
         let before = inner.map.len();
         inner.map.retain(|k, _| !k.starts_with(prefix));
         Ok(before - inner.map.len())
+    }
+
+    /// Return the total number of bytes used by all stored values.
+    ///
+    /// Useful for estimating memory pressure without allocating a full snapshot.
+    pub fn total_value_bytes(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::total_value_bytes");
+        Ok(inner.map.values().map(|v| v.len()).sum())
     }
 
     /// Remove all entries for which `predicate(key, value)` returns `false`.
@@ -5191,5 +5223,80 @@ mod tests {
         assert_eq!(store.entry_count_with_tag("rust").unwrap(), 2);
         assert_eq!(store.entry_count_with_tag("async").unwrap(), 1);
         assert_eq!(store.entry_count_with_tag("absent").unwrap(), 0);
+    }
+
+    // ── Round 18: importance_sum, update_content, recall_all, top_n, search_by_importance_range ──
+
+    #[test]
+    fn test_importance_sum_returns_sum_of_all_importances() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "e1", 0.2).unwrap();
+        store.add_episode(agent.clone(), "e2", 0.3).unwrap();
+        store.add_episode(agent.clone(), "e3", 0.5).unwrap();
+        let sum = store.importance_sum(&agent).unwrap();
+        assert!((sum - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_importance_sum_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("nobody");
+        assert!((store.importance_sum(&agent).unwrap() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_update_content_changes_stored_content() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let id = store.add_episode(agent.clone(), "old content", 0.5).unwrap();
+        let updated = store.update_content(&agent, &id, "new content").unwrap();
+        assert!(updated);
+        let items = store.recall_all(&agent).unwrap();
+        assert_eq!(items[0].content, "new content");
+    }
+
+    #[test]
+    fn test_update_content_false_for_missing_id() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let fake_id = MemoryId::new("nonexistent");
+        assert!(!store.update_content(&agent, &fake_id, "x").unwrap());
+    }
+
+    #[test]
+    fn test_recall_all_returns_all_episodes() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "e1", 0.5).unwrap();
+        store.add_episode(agent.clone(), "e2", 0.3).unwrap();
+        store.add_episode(agent.clone(), "e3", 0.9).unwrap();
+        let all = store.recall_all(&agent).unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn test_top_n_returns_top_by_importance() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "low", 0.1).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        store.add_episode(agent.clone(), "mid", 0.5).unwrap();
+        let top = store.top_n(&agent, 2).unwrap();
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].content, "high");
+        assert_eq!(top[1].content, "mid");
+    }
+
+    #[test]
+    fn test_search_by_importance_range_filters_correctly() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "low", 0.1).unwrap();
+        store.add_episode(agent.clone(), "mid", 0.5).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        let results = store.search_by_importance_range(&agent, 0.4, 0.8, 0).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "mid");
     }
 }
