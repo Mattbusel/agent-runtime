@@ -3281,6 +3281,34 @@ impl GraphStore {
             .reduce(f64::max))
     }
 
+    /// Return the weight of the first edge from `from` to `to`, or `None` if
+    /// no such edge exists.
+    pub fn edge_weight_between(
+        &self,
+        from: &EntityId,
+        to: &EntityId,
+    ) -> Result<Option<f64>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::edge_weight_between");
+        let to_id = to.clone();
+        Ok(inner
+            .adjacency
+            .get(from)
+            .and_then(|rels| rels.iter().find(|r| r.to == to_id))
+            .map(|r| r.weight as f64))
+    }
+
+    /// Return the sum of all relationship weights in the graph.
+    ///
+    /// Returns `0.0` for a graph with no edges.
+    pub fn total_relationship_weight(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::total_relationship_weight");
+        Ok(inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter().map(|r| r.weight as f64))
+            .sum())
+    }
+
     /// Return all entities whose out-degree is at least `min_degree`.
     ///
     /// Entities with no outgoing edges have an out-degree of 0 and are
@@ -7456,5 +7484,45 @@ mod tests {
     fn test_entity_with_max_out_degree_none_for_empty_graph() {
         let g = GraphStore::new();
         assert!(g.entity_with_max_out_degree().unwrap().is_none());
+    }
+
+    // ── Round 56: edge_weight_between, total_relationship_weight ──────────────
+
+    #[test]
+    fn test_edge_weight_between_returns_weight_when_edge_exists() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "k", 2.5)).unwrap();
+        let a = EntityId("a".to_string());
+        let b = EntityId("b".to_string());
+        assert_eq!(g.edge_weight_between(&a, &b).unwrap(), Some(2.5));
+    }
+
+    #[test]
+    fn test_edge_weight_between_none_when_no_edge() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        let a = EntityId("a".to_string());
+        let b = EntityId("b".to_string());
+        assert_eq!(g.edge_weight_between(&a, &b).unwrap(), None);
+    }
+
+    #[test]
+    fn test_total_relationship_weight_sums_all_weights() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "k", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "k", 3.0)).unwrap();
+        assert_eq!(g.total_relationship_weight().unwrap(), 4.0);
+    }
+
+    #[test]
+    fn test_total_relationship_weight_zero_for_no_edges() {
+        let g = GraphStore::new();
+        assert_eq!(g.total_relationship_weight().unwrap(), 0.0);
     }
 }

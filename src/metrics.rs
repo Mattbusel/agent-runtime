@@ -1637,6 +1637,18 @@ impl RuntimeMetrics {
         self.failed_tool_calls() as f64 / steps as f64
     }
 
+    /// Return the fraction of total tool calls that were shed due to
+    /// backpressure.  Computed as `backpressure_shed / total_tool_calls`.
+    ///
+    /// Returns `0.0` when no tool calls have been made.
+    pub fn total_backpressure_shed_pct(&self) -> f64 {
+        let calls = self.total_tool_calls();
+        if calls == 0 {
+            return 0.0;
+        }
+        self.backpressure_shed_count() as f64 / calls as f64
+    }
+
     /// Return the top `n` tools by total call count, sorted descending.
     ///
     /// Returns fewer than `n` entries if fewer tools have been called.
@@ -4190,5 +4202,24 @@ mod tests {
     fn test_tools_above_failure_ratio_empty_when_no_calls() {
         let m = RuntimeMetrics::new();
         assert!(m.snapshot().tools_above_failure_ratio(0.1).is_empty());
+    }
+
+    // ── Round 56: total_backpressure_shed_pct ──────────────────────────────────
+
+    #[test]
+    fn test_total_backpressure_shed_pct_returns_ratio() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("a");
+        m.record_tool_call("b");
+        m.record_tool_call("c");
+        m.record_tool_call("d");
+        m.backpressure_shed_count.store(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(m.total_backpressure_shed_pct(), 0.25);
+    }
+
+    #[test]
+    fn test_total_backpressure_shed_pct_zero_when_no_calls() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.total_backpressure_shed_pct(), 0.0);
     }
 }

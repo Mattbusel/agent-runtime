@@ -4049,6 +4049,22 @@ impl WorkingMemory {
         Ok(entries)
     }
 
+    /// Return `true` if any stored value is exactly equal to `val`.
+    ///
+    /// Returns `false` for an empty store.
+    pub fn has_value_equal_to(&self, val: &str) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::has_value_equal_to");
+        Ok(inner.map.values().any(|v| v == val))
+    }
+
+    /// Return `true` if the value stored under `key` contains `substr`.
+    ///
+    /// Returns `false` when `key` is not present.
+    pub fn value_contains(&self, key: &str, substr: &str) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::value_contains");
+        Ok(inner.map.get(key).map_or(false, |v| v.contains(substr)))
+    }
+
     /// Return a histogram of value byte lengths bucketed by `bucket_size`.
     ///
     /// The returned `Vec` contains `(bucket_start, count)` pairs where
@@ -9856,5 +9872,70 @@ mod tests {
         let agent = AgentId::new("a");
         store.add_episode(agent.clone(), "e1", 0.5).unwrap();
         assert!(store.agents_with_episodes_above_count(5).unwrap().is_empty());
+    }
+
+    // ── Round 56: episodes_matching_content, top_agent_by_importance, has_value_equal_to, value_contains ──
+
+    #[test]
+    fn test_episodes_matching_content_returns_matching_episodes() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r56-emc-1");
+        store.add_episode(agent.clone(), "user asked about Rust", 0.5).unwrap();
+        store.add_episode(agent.clone(), "user asked about Python", 0.5).unwrap();
+        let matched = store.episodes_matching_content(&agent, "Rust").unwrap();
+        assert_eq!(matched.len(), 1);
+        assert!(matched[0].content.contains("Rust"));
+    }
+
+    #[test]
+    fn test_episodes_matching_content_empty_for_no_match() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r56-emc-2");
+        store.add_episode(agent.clone(), "something else", 0.5).unwrap();
+        assert!(store.episodes_matching_content(&agent, "Rust").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_top_agent_by_importance_returns_highest_total_agent() {
+        let store = EpisodicStore::new();
+        let a1 = AgentId::new("r56-tabi-low");
+        let a2 = AgentId::new("r56-tabi-high");
+        store.add_episode(a1.clone(), "ep", 0.2).unwrap();
+        store.add_episode(a2.clone(), "ep", 0.9).unwrap();
+        let top = store.top_agent_by_importance().unwrap();
+        assert_eq!(top.unwrap().as_str(), "r56-tabi-high");
+    }
+
+    #[test]
+    fn test_top_agent_by_importance_none_for_empty_store() {
+        let store = EpisodicStore::new();
+        assert!(store.top_agent_by_importance().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_has_value_equal_to_true_when_match_exists() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("key", "exact_value").unwrap();
+        assert!(wm.has_value_equal_to("exact_value").unwrap());
+    }
+
+    #[test]
+    fn test_has_value_equal_to_false_when_no_match() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("key", "other").unwrap();
+        assert!(!wm.has_value_equal_to("exact_value").unwrap());
+    }
+
+    #[test]
+    fn test_value_contains_true_when_substr_in_value() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("url", "https://example.com/path").unwrap();
+        assert!(wm.value_contains("url", "example.com").unwrap());
+    }
+
+    #[test]
+    fn test_value_contains_false_when_key_absent() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(!wm.value_contains("missing", "anything").unwrap());
     }
 }

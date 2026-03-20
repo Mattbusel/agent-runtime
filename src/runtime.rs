@@ -1580,6 +1580,50 @@ impl AgentSession {
             .collect()
     }
 
+    /// Return the number of steps where all three fields (`thought`, `action`,
+    /// and `observation`) are empty strings.
+    ///
+    /// Fully empty steps typically indicate a malformed or aborted iteration.
+    pub fn total_empty_steps(&self) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| s.thought.is_empty() && s.action.is_empty() && s.observation.is_empty())
+            .count()
+    }
+
+    /// Return the number of steps whose `action` begins with `prefix`.
+    ///
+    /// Returns `0` for an empty session or when no action matches.
+    pub fn action_starts_with_count(&self, prefix: &str) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| s.action.starts_with(prefix))
+            .count()
+    }
+
+    /// Return the longest `action` string in the session, or `None` if the
+    /// session is empty.
+    ///
+    /// When multiple steps share the maximum byte length, the first one is
+    /// returned.
+    pub fn longest_action(&self) -> Option<&str> {
+        self.steps
+            .iter()
+            .max_by_key(|s| s.action.len())
+            .map(|s| s.action.as_str())
+    }
+
+    /// Return the proportion of steps that have a non-empty thought string.
+    ///
+    /// Returns `0.0` for an empty session.
+    pub fn thought_completeness(&self) -> f64 {
+        if self.steps.is_empty() {
+            return 0.0;
+        }
+        let non_empty = self.steps.iter().filter(|s| !s.thought.is_empty()).count();
+        non_empty as f64 / self.steps.len() as f64
+    }
+
     /// Return the 0-based index of the first `FINAL_ANSWER` step, or `None` if
     /// no such step exists in the session.
     ///
@@ -6697,5 +6741,53 @@ mod tests {
     fn test_avg_thought_word_count_zero_for_empty_session() {
         let session = make_session(vec![], 0);
         assert_eq!(session.avg_thought_word_count(), 0.0);
+    }
+
+    // ── Round 56: thought_starts_with_any, action_word_count, steps_above_thought_chars ──
+
+    #[test]
+    fn test_thought_starts_with_any_true_when_prefix_matches() {
+        let steps = vec![make_step("Plan: do it", "act", "obs")];
+        let session = make_session(steps, 0);
+        assert!(session.thought_starts_with_any(&["Plan:", "Think:"]));
+    }
+
+    #[test]
+    fn test_thought_starts_with_any_false_when_no_match() {
+        let steps = vec![make_step("just thinking", "act", "obs")];
+        let session = make_session(steps, 0);
+        assert!(!session.thought_starts_with_any(&["Plan:", "Think:"]));
+    }
+
+    #[test]
+    fn test_action_word_count_sums_words_across_steps() {
+        let steps = vec![
+            make_step("t", "search for answer", "obs"),
+            make_step("t", "write result", "obs"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.action_word_count(), 5);
+    }
+
+    #[test]
+    fn test_action_word_count_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.action_word_count(), 0);
+    }
+
+    #[test]
+    fn test_steps_above_thought_chars_counts_correctly() {
+        let steps = vec![
+            make_step("short", "a", "o"),
+            make_step("a very long thought here", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_above_thought_chars(5), 1);
+    }
+
+    #[test]
+    fn test_steps_above_thought_chars_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.steps_above_thought_chars(0), 0);
     }
 }
