@@ -51,6 +51,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **`AgentConfig::validate`** (`agent.rs`) — validate configuration and return
   `Err(AgentRuntimeError::AgentLoop)` with a descriptive message; a structured
   alternative to the existing `is_valid() -> bool`.
+- **`LatencyHistogram::clear`** (`metrics.rs`) — alias for `reset()`; resets all
+  histogram counters to zero using conventional naming.
+- **`RuntimeMetrics::tool_names`** (`metrics.rs`) — return a sorted list of tool
+  names that have at least one recorded call; useful for iterating over per-tool
+  metrics without knowing registered names in advance.
+- **`ToolRegistry::is_empty`** (`agent.rs`) — `true` when no tools are registered;
+  symmetric counterpart to the existing `tool_count() == 0` check.
+- **Graph reverse adjacency index** (`graph.rs`) — `GraphInner` now maintains a
+  `reverse_adjacency: HashMap<EntityId, Vec<EntityId>>` in sync with every
+  `add_relationship`, `remove_relationship`, and `remove_entity` call; reduces
+  `in_degree` from O(|E|) to O(in-degree), `source_nodes` from O(V+E) to O(V),
+  and `isolates` from O(V+E) to O(V).
 
 ---
 

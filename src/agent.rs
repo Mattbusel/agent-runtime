@@ -532,6 +532,12 @@ impl ToolSpec {
         self
     }
 
+    /// Override the tool name after construction.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
     /// Invoke the tool with the given JSON arguments.
     pub async fn call(&self, args: Value) -> Value {
         (self.handler)(args).await
@@ -2500,5 +2506,40 @@ mod tests {
         let cfg = AgentConfig::new(5, "");
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("model"));
+    }
+
+    // ── Round 4: AgentConfig::clone_with_model / ToolSpec::with_name ─────────
+
+    #[test]
+    fn test_clone_with_model_produces_new_model_string() {
+        let cfg = AgentConfig::new(5, "gpt-4");
+        let new_cfg = cfg.clone_with_model("claude-3");
+        assert_eq!(new_cfg.model, "claude-3");
+        // Original unchanged
+        assert_eq!(cfg.model, "gpt-4");
+    }
+
+    #[test]
+    fn test_clone_with_model_preserves_other_fields() {
+        let cfg = AgentConfig::new(10, "gpt-4").with_stop_sequences(vec!["STOP".to_string()]);
+        let new_cfg = cfg.clone_with_model("o1");
+        assert_eq!(new_cfg.max_iterations, 10);
+        assert_eq!(new_cfg.stop_sequences, cfg.stop_sequences);
+    }
+
+    #[tokio::test]
+    async fn test_tool_spec_with_name_changes_name() {
+        let spec = ToolSpec::new("original", "desc", |_| serde_json::json!("ok"))
+            .with_name("renamed");
+        assert_eq!(spec.name, "renamed");
+    }
+
+    #[tokio::test]
+    async fn test_tool_spec_with_name_and_description_chainable() {
+        let spec = ToolSpec::new("old", "old desc", |_| serde_json::json!("ok"))
+            .with_name("new")
+            .with_description("new desc");
+        assert_eq!(spec.name, "new");
+        assert_eq!(spec.description, "new desc");
     }
 }
