@@ -1474,6 +1474,40 @@ impl AgentSession {
             .count()
     }
 
+    /// Return all steps that have a non-empty observation string.
+    ///
+    /// Returns an empty `Vec` for an empty session.
+    pub fn steps_with_non_empty_observation(&self) -> Vec<&ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| !s.observation.is_empty())
+            .collect()
+    }
+
+    /// Return all steps whose observation contains `substr`.
+    ///
+    /// Returns an empty `Vec` for an empty session or no matches.
+    pub fn observations_containing(&self, substr: &str) -> Vec<&ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.observation.contains(substr))
+            .collect()
+    }
+
+    /// Return the ratio of total thought characters to total observation
+    /// characters.
+    ///
+    /// Returns `0.0` when there are no observation characters to avoid
+    /// division by zero.
+    pub fn thought_observation_ratio(&self) -> f64 {
+        let obs: usize = self.steps.iter().map(|s| s.observation.chars().count()).sum();
+        if obs == 0 {
+            return 0.0;
+        }
+        let thoughts: usize = self.steps.iter().map(|s| s.thought.chars().count()).sum();
+        thoughts as f64 / obs as f64
+    }
+
     /// Return the smallest byte length of non-empty observation strings in this
     /// session.
     ///
@@ -6789,5 +6823,86 @@ mod tests {
     fn test_steps_above_thought_chars_zero_for_empty_session() {
         let session = make_session(vec![], 0);
         assert_eq!(session.steps_above_thought_chars(0), 0);
+    }
+
+    // ── Round 50 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_total_empty_steps_counts_fully_empty_steps() {
+        let steps = vec![
+            make_step("", "", ""),
+            make_step("t", "a", "o"),
+            make_step("", "", ""),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_empty_steps(), 2);
+    }
+
+    #[test]
+    fn test_total_empty_steps_zero_when_no_empty_steps() {
+        let steps = vec![make_step("t", "a", "o")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_empty_steps(), 0);
+    }
+
+    #[test]
+    fn test_action_starts_with_count_correct() {
+        let steps = vec![
+            make_step("t", "search:foo", "o"),
+            make_step("t", "search:bar", "o"),
+            make_step("t", "write:baz", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.action_starts_with_count("search"), 2);
+    }
+
+    #[test]
+    fn test_action_starts_with_count_zero_for_no_match() {
+        let steps = vec![make_step("t", "write:x", "o")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.action_starts_with_count("read"), 0);
+    }
+
+    #[test]
+    fn test_longest_action_returns_longest() {
+        let steps = vec![
+            make_step("t", "short", "o"),
+            make_step("t", "much_longer_action", "o"),
+            make_step("t", "mid", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.longest_action(), Some("much_longer_action"));
+    }
+
+    #[test]
+    fn test_longest_action_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.longest_action(), None);
+    }
+
+    #[test]
+    fn test_thought_completeness_all_non_empty() {
+        let steps = vec![
+            make_step("think", "a", "o"),
+            make_step("also thinking", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.thought_completeness() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_thought_completeness_half_empty() {
+        let steps = vec![
+            make_step("think", "a", "o"),
+            make_step("", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.thought_completeness() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_thought_completeness_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!((session.thought_completeness()).abs() < f64::EPSILON);
     }
 }

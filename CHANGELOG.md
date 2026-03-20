@@ -11,6 +11,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.69.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::total_empty_steps`** — count steps where all three fields are empty.
+- **`AgentSession::action_starts_with_count`** — count steps whose action begins with a prefix.
+- **`AgentSession::longest_action`** — the longest action string in the session.
+- **`AgentSession::thought_completeness`** — proportion of steps with a non-empty thought.
+- **`EpisodicStore::avg_episode_importance`** — mean importance score across all episodes for an agent.
+- **`EpisodicStore::episode_content_bytes_total`** — total byte count of episode content for an agent.
+- **`RuntimeMetrics::backpressure_ratio`** — ratio of backpressure-shed events to total steps.
+
+---
+
 ## [1.68.0] - 2026-03-20
 
 ### Added

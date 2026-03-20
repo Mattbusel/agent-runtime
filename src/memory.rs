@@ -885,6 +885,41 @@ impl EpisodicStore {
         Ok(items)
     }
 
+    /// Return all episodes for `agent_id` whose timestamp is strictly after
+    /// `after`.
+    ///
+    /// Returns an empty `Vec` for an unknown agent or when no episode qualifies.
+    pub fn episodes_after_timestamp(
+        &self,
+        agent_id: &AgentId,
+        after: DateTime<Utc>,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episodes_after_timestamp");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map(|v| v.iter().filter(|m| m.timestamp > after).cloned().collect())
+            .unwrap_or_default())
+    }
+
+    /// Return the agent ID with the lowest average episode importance, or
+    /// `None` for an empty store.
+    pub fn agent_with_min_importance_avg(&self) -> Result<Option<AgentId>, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "EpisodicStore::agent_with_min_importance_avg");
+        Ok(inner
+            .items
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(id, items)| {
+                let avg = items.iter().map(|m| m.importance as f64).sum::<f64>()
+                    / items.len() as f64;
+                (id.clone(), avg)
+            })
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(id, _)| id))
+    }
+
     /// Return all episodes for `agent_id` whose content contains `substr`.
     ///
     /// Returns an empty `Vec` for an unknown agent or when no episode matches.
@@ -2280,6 +2315,40 @@ impl EpisodicStore {
             .get(agent_id)
             .map_or(0, |items| items.iter().filter(|m| m.importance > threshold).count());
         Ok(count)
+    }
+
+    /// Return the mean importance score of all episodes for `agent_id`.
+    ///
+    /// Returns `0.0` for unknown agents or agents with no episodes.
+    pub fn avg_episode_importance(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::avg_episode_importance");
+        let items = match inner.items.get(agent_id) {
+            Some(items) if !items.is_empty() => items,
+            _ => return Ok(0.0),
+        };
+        let sum: f64 = items.iter().map(|m| m.importance as f64).sum();
+        Ok(sum / items.len() as f64)
+    }
+
+    /// Return the total byte count of all episode content strings for
+    /// `agent_id`.
+    ///
+    /// Returns `0` for unknown agents.
+    pub fn episode_content_bytes_total(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(
+            self.inner.lock(),
+            "EpisodicStore::episode_content_bytes_total",
+        );
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or(0, |items| items.iter().map(|m| m.content.len()).sum()))
     }
 
     /// Return all episodes for `agent_id` whose importance is strictly below
@@ -4063,6 +4132,27 @@ impl WorkingMemory {
     pub fn value_contains(&self, key: &str, substr: &str) -> Result<bool, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::value_contains");
         Ok(inner.map.get(key).map_or(false, |v| v.contains(substr)))
+    }
+
+    /// Return all keys that do NOT start with `prefix`, sorted alphabetically.
+    ///
+    /// Returns an empty `Vec` for an empty store or when all keys match.
+    pub fn keys_without_prefix(&self, prefix: &str) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::keys_without_prefix");
+        let mut keys: Vec<String> = inner
+            .map
+            .keys()
+            .filter(|k| !k.starts_with(prefix))
+            .cloned()
+            .collect();
+        keys.sort_unstable();
+        Ok(keys)
+    }
+
+    /// Return the number of stored values that are exactly equal to `val`.
+    pub fn count_values_equal_to(&self, val: &str) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::count_values_equal_to");
+        Ok(inner.map.values().filter(|v| v.as_str() == val).count())
     }
 
     /// Return a histogram of value byte lengths bucketed by `bucket_size`.
@@ -9937,5 +10027,41 @@ mod tests {
     fn test_value_contains_false_when_key_absent() {
         let wm = WorkingMemory::new(10).unwrap();
         assert!(!wm.value_contains("missing", "anything").unwrap());
+    }
+
+    // ── Round 50 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_avg_episode_importance_returns_mean() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r50-avg-1");
+        store.add_episode(agent.clone(), "e1", 0.4).unwrap();
+        store.add_episode(agent.clone(), "e2", 0.8).unwrap();
+        let avg = store.avg_episode_importance(&agent).unwrap();
+        assert!((avg - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_avg_episode_importance_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r50-avg-unknown");
+        assert_eq!(store.avg_episode_importance(&agent).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_episode_content_bytes_total_correct() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r50-bytes-1");
+        store.add_episode(agent.clone(), "hello", 0.5).unwrap();
+        store.add_episode(agent.clone(), "world!", 0.5).unwrap();
+        let total = store.episode_content_bytes_total(&agent).unwrap();
+        assert_eq!(total, 11); // "hello" (5) + "world!" (6)
+    }
+
+    #[test]
+    fn test_episode_content_bytes_total_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r50-bytes-unknown");
+        assert_eq!(store.episode_content_bytes_total(&agent).unwrap(), 0);
     }
 }

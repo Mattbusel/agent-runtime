@@ -1649,6 +1649,24 @@ impl RuntimeMetrics {
         self.backpressure_shed_count() as f64 / calls as f64
     }
 
+    /// Return the name of the tool with the highest failure rate
+    /// (`failures / calls`), or `None` when no tool has been called.
+    ///
+    /// Tools with zero calls are excluded.
+    pub fn tool_with_highest_failure_rate(&self) -> Option<String> {
+        let calls = self.per_tool_calls_snapshot();
+        let fails = self.per_tool_failures_snapshot();
+        calls
+            .iter()
+            .filter(|(_, &c)| c > 0)
+            .map(|(name, &c)| {
+                let f = fails.get(name).copied().unwrap_or(0);
+                (name.clone(), f as f64 / c as f64)
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(name, _)| name)
+    }
+
     /// Return the top `n` tools by total call count, sorted descending.
     ///
     /// Returns fewer than `n` entries if fewer tools have been called.
@@ -1701,6 +1719,18 @@ impl RuntimeMetrics {
             return 0.0;
         }
         self.memory_recall_count.load(Ordering::Relaxed) as f64 / steps as f64
+    }
+
+    /// Return the ratio of backpressure-shed events to total steps recorded.
+    ///
+    /// Higher values indicate significant load shedding. Returns `0.0` when no
+    /// steps have been recorded to avoid division by zero.
+    pub fn backpressure_ratio(&self) -> f64 {
+        let steps = self.total_steps.load(Ordering::Relaxed);
+        if steps == 0 {
+            return 0.0;
+        }
+        self.backpressure_shed_count.load(Ordering::Relaxed) as f64 / steps as f64
     }
 
     /// Return the ratio of total sessions to total steps recorded.
@@ -4221,5 +4251,22 @@ mod tests {
     fn test_total_backpressure_shed_pct_zero_when_no_calls() {
         let m = RuntimeMetrics::new();
         assert_eq!(m.total_backpressure_shed_pct(), 0.0);
+    }
+
+    // ── Round 50 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_backpressure_ratio_correct() {
+        use std::sync::atomic::Ordering;
+        let m = RuntimeMetrics::new();
+        m.total_steps.store(4, Ordering::Relaxed);
+        m.backpressure_shed_count.store(1, Ordering::Relaxed);
+        assert!((m.backpressure_ratio() - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_backpressure_ratio_zero_when_no_steps() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.backpressure_ratio(), 0.0);
     }
 }
