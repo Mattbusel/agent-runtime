@@ -1062,6 +1062,36 @@ impl AgentSession {
             .count()
     }
 
+    /// Return the number of steps that have a non-empty observation string.
+    ///
+    /// Steps where the tool produced no output (empty string) are excluded.
+    pub fn total_observation_count(&self) -> usize {
+        self.steps.iter().filter(|s| !s.observation.is_empty()).count()
+    }
+
+    /// Return references to steps whose action string contains `substring`.
+    ///
+    /// The comparison is case-sensitive.  Returns an empty slice when no step
+    /// matches or the session has no steps.
+    pub fn actions_containing<'a>(&'a self, substring: &str) -> Vec<&'a ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.action.contains(substring))
+            .collect()
+    }
+
+    /// Return the `(min, max)` step duration range in milliseconds.
+    ///
+    /// Returns `(0, 0)` for sessions with no steps.
+    pub fn step_duration_range_ms(&self) -> (u64, u64) {
+        if self.steps.is_empty() {
+            return (0, 0);
+        }
+        let min = self.steps.iter().map(|s| s.step_duration_ms).min().unwrap_or(0);
+        let max = self.steps.iter().map(|s| s.step_duration_ms).max().unwrap_or(0);
+        (min, max)
+    }
+
     /// Persist this session as a checkpoint under `"session:<session_id>"`.
     #[cfg(feature = "persistence")]
     pub async fn save_checkpoint(
@@ -4694,5 +4724,54 @@ mod tests {
     fn test_unique_observations_count_zero_for_empty_session() {
         let session = make_session(vec![], 0);
         assert_eq!(session.unique_observations_count(), 0);
+    }
+
+    // ── Round 43 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_thought_max_bytes_returns_max_thought_length() {
+        let steps = vec![
+            make_step("hi", "a", "o"),
+            make_step("hello world", "b", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.thought_max_bytes(), 11);
+    }
+
+    #[test]
+    fn test_thought_max_bytes_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.thought_max_bytes(), 0);
+    }
+
+    #[test]
+    fn test_observation_max_bytes_returns_max_observation_length() {
+        let steps = vec![
+            make_step("t", "a", "short"),
+            make_step("t", "b", "much longer observation"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.observation_max_bytes(), "much longer observation".len());
+    }
+
+    #[test]
+    fn test_step_count_below_duration_ms_counts_fast_steps() {
+        let mut steps = vec![
+            make_step("t", "a", "o"),
+            make_step("t", "b", "o"),
+            make_step("t", "c", "o"),
+        ];
+        steps[0].step_duration_ms = 5;
+        steps[1].step_duration_ms = 50;
+        steps[2].step_duration_ms = 500;
+        let session = make_session(steps, 0);
+        assert_eq!(session.step_count_below_duration_ms(100), 2);
+        assert_eq!(session.step_count_below_duration_ms(6), 1);
+    }
+
+    #[test]
+    fn test_step_count_below_duration_ms_zero_for_empty() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.step_count_below_duration_ms(100), 0);
     }
 }

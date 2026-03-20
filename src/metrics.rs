@@ -826,6 +826,18 @@ impl MetricsSnapshot {
             .min_by_key(|(_, &count)| count)
             .map(|(name, _)| name.clone())
     }
+
+    /// Return the mean number of calls per distinct tool name.
+    ///
+    /// Returns `0.0` when no tool-call data has been recorded.
+    pub fn avg_tool_calls_per_name(&self) -> f64 {
+        let n = self.per_tool_calls.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let total: u64 = self.per_tool_calls.values().sum();
+        total as f64 / n as f64
+    }
 }
 
 impl std::fmt::Display for MetricsSnapshot {
@@ -1288,6 +1300,18 @@ impl RuntimeMetrics {
             return 0.0;
         }
         self.failed_tool_calls.load(Ordering::Relaxed) as f64 / total as f64
+    }
+
+    /// Return the fraction of all sessions that are currently active.
+    ///
+    /// Computed as `active_sessions / total_sessions`.  Returns `0.0` when no
+    /// sessions have been started.
+    pub fn active_session_rate(&self) -> f64 {
+        let total = self.total_sessions.load(Ordering::Relaxed);
+        if total == 0 {
+            return 0.0;
+        }
+        self.active_sessions.load(Ordering::Relaxed) as f64 / total as f64
     }
 
     /// Return the top `n` tools by total call count, sorted descending.
@@ -3155,5 +3179,21 @@ mod tests {
         let line = snap.summary_line();
         assert!(line.contains("sessions=0"));
         assert!(line.contains("failures=0"));
+    }
+
+    // ── Round 43 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_active_session_rate_zero_when_no_sessions() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.active_session_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_active_session_rate_one_when_all_sessions_active() {
+        let m = RuntimeMetrics::new();
+        m.active_sessions.fetch_add(2, Ordering::Relaxed);
+        m.total_sessions.fetch_add(2, Ordering::Relaxed);
+        assert!((m.active_session_rate() - 1.0).abs() < 1e-9);
     }
 }

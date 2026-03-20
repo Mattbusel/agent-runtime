@@ -1460,6 +1460,46 @@ pub struct PipelineResult {
     pub stage_timings: Vec<(String, u64)>,
 }
 
+impl PipelineResult {
+    /// Return the total wall-clock time across all stages in milliseconds.
+    pub fn total_duration_ms(&self) -> u64 {
+        self.stage_timings.iter().map(|(_, ms)| ms).sum()
+    }
+
+    /// Return the number of stages that recorded a timing entry.
+    ///
+    /// Normally this equals the pipeline's stage count, but may be less if
+    /// the pipeline short-circuited after an error.
+    pub fn stage_count(&self) -> usize {
+        self.stage_timings.len()
+    }
+
+    /// Return the name and duration of the slowest stage.
+    ///
+    /// Returns `None` if no stages ran.
+    pub fn slowest_stage(&self) -> Option<(&str, u64)> {
+        self.stage_timings
+            .iter()
+            .max_by_key(|(_, ms)| ms)
+            .map(|(name, ms)| (name.as_str(), *ms))
+    }
+
+    /// Return the name and duration of the fastest stage.
+    ///
+    /// Returns `None` if no stages ran.
+    pub fn fastest_stage(&self) -> Option<(&str, u64)> {
+        self.stage_timings
+            .iter()
+            .min_by_key(|(_, ms)| ms)
+            .map(|(name, ms)| (name.as_str(), *ms))
+    }
+
+    /// Return `true` if no stage timings were recorded (pipeline ran zero stages).
+    pub fn is_empty(&self) -> bool {
+        self.stage_timings.is_empty()
+    }
+}
+
 /// A single named stage in the pipeline.
 pub struct Stage {
     /// Human-readable name used in log output and error messages.
@@ -3679,5 +3719,36 @@ mod tests {
         assert!(s.contains("Constant"));
         assert!(s.contains('5'));
         assert!(s.contains("50ms"));
+    }
+
+    // ── Round 43 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pipeline_total_stage_name_bytes_sums_correctly() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))   // 2
+            .add_stage("xyz", |s: String| Ok(s));  // 3
+        assert_eq!(p.total_stage_name_bytes(), 5);
+    }
+
+    #[test]
+    fn test_pipeline_total_stage_name_bytes_zero_for_empty() {
+        assert_eq!(Pipeline::new().total_stage_name_bytes(), 0);
+    }
+
+    #[test]
+    fn test_pipeline_stages_before_returns_preceding_names() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("b", |s: String| Ok(s))
+            .add_stage("c", |s: String| Ok(s));
+        assert_eq!(p.stages_before("c"), vec!["a", "b"]);
+        assert!(p.stages_before("a").is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_stages_before_returns_empty_for_unknown_stage() {
+        let p = Pipeline::new().add_stage("a", |s: String| Ok(s));
+        assert!(p.stages_before("missing").is_empty());
     }
 }

@@ -2801,6 +2801,40 @@ impl GraphStore {
         }
         Ok(freq)
     }
+
+    /// Return all entities sorted ascending by their label string.
+    ///
+    /// Entities with the same label are ordered by their ID for a stable, fully
+    /// deterministic output regardless of internal hash-map iteration order.
+    pub fn entities_sorted_by_label(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entities_sorted_by_label");
+        let mut entities: Vec<Entity> = inner.entities.values().cloned().collect();
+        entities.sort_unstable_by(|a, b| a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id)));
+        Ok(entities)
+    }
+
+    /// Return all entities that have the given property `key`, regardless of value.
+    ///
+    /// Returns an empty `Vec` when no entities carry the key or the graph is empty.
+    pub fn entities_with_property(&self, key: &str) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entities_with_property");
+        let entities: Vec<Entity> = inner
+            .entities
+            .values()
+            .filter(|e| e.properties.contains_key(key))
+            .cloned()
+            .collect();
+        Ok(entities)
+    }
+
+    /// Return the total number of directed edges stored in this graph.
+    ///
+    /// Each relationship contributes exactly one edge to this count, so a
+    /// bidirectional pair of relationships contributes two.
+    pub fn total_relationship_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::total_relationship_count");
+        Ok(inner.adjacency.values().map(|rels| rels.len()).sum())
+    }
 }
 
 impl Default for GraphStore {
@@ -5655,5 +5689,25 @@ mod tests {
             .with_property("a", serde_json::json!(0));
         let keys = e.property_keys();
         assert_eq!(keys, vec!["a", "b"]);
+    }
+
+    // ── Round 43 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_entities_sorted_by_label_returns_alphabetical_order() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("1", "Zebra")).unwrap();
+        g.add_entity(Entity::new("2", "Apple")).unwrap();
+        g.add_entity(Entity::new("3", "Mango")).unwrap();
+        let sorted = g.entities_sorted_by_label().unwrap();
+        assert_eq!(sorted[0].label, "Apple");
+        assert_eq!(sorted[1].label, "Mango");
+        assert_eq!(sorted[2].label, "Zebra");
+    }
+
+    #[test]
+    fn test_entities_sorted_by_label_empty_graph_returns_empty() {
+        let g = GraphStore::new();
+        assert!(g.entities_sorted_by_label().unwrap().is_empty());
     }
 }

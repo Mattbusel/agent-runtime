@@ -1786,6 +1786,20 @@ impl EpisodicStore {
             .cloned())
     }
 
+    /// Return the most recently stored episode for `agent_id` (largest timestamp), or
+    /// `None` if the agent has no stored episodes.
+    pub fn most_recent_episode(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::most_recent_episode");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|v| v.iter().max_by_key(|i| i.timestamp))
+            .cloned())
+    }
+
     /// Return the episode with the highest importance score for `agent_id`, or `None`
     /// if the agent has no stored episodes.  Ties are broken in favour of the
     /// later-inserted episode.
@@ -3519,6 +3533,27 @@ impl WorkingMemory {
     pub fn contains_value(&self, value: &str) -> Result<bool, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::contains_value");
         Ok(inner.map.values().any(|v| v == value))
+    }
+
+    /// Return the key with the fewest bytes, or `None` if the store is empty.
+    ///
+    /// When multiple keys share the minimum byte length, the one that sorts
+    /// first lexicographically is returned for deterministic output.
+    pub fn shortest_key(&self) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::shortest_key");
+        Ok(inner
+            .map
+            .keys()
+            .min_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
+            .cloned())
+    }
+
+    /// Return the number of entries whose value byte length is strictly less than `max_bytes`.
+    ///
+    /// Returns `0` for an empty store.
+    pub fn count_below_value_length(&self, max_bytes: usize) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::count_below_value_length");
+        Ok(inner.map.values().filter(|v| v.len() < max_bytes).count())
     }
 }
 
@@ -7633,5 +7668,61 @@ mod tests {
     fn test_decay_policy_display_fractional_hours() {
         let p = DecayPolicy::exponential(1.5).unwrap();
         assert_eq!(p.to_string(), "Exponential(half_life=1.5h)");
+    }
+
+    // ── Round 43 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_episodic_store_all_unique_tags_returns_sorted_deduped() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode_with_tags(
+            agent.clone(), "c1", 0.5, vec!["rust".into(), "ai".into()]
+        ).unwrap();
+        store.add_episode_with_tags(
+            agent.clone(), "c2", 0.5, vec!["ai".into(), "ml".into()]
+        ).unwrap();
+        let tags = store.all_unique_tags(&agent).unwrap();
+        assert_eq!(tags, vec!["ai", "ml", "rust"]);
+    }
+
+    #[test]
+    fn test_episodic_store_all_unique_tags_empty_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        assert!(store.all_unique_tags(&AgentId::new("unknown")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_episodic_store_episodes_with_tag_returns_matching() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode_with_tags(
+            agent.clone(), "tagged", 0.5, vec!["rust".into()]
+        ).unwrap();
+        store.add_episode(agent.clone(), "no-tag", 0.5).unwrap();
+        let result = store.episodes_with_tag(&agent, "rust").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content, "tagged");
+    }
+
+    #[test]
+    fn test_episodic_store_episodes_with_tag_empty_when_no_match() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "no-tag", 0.5).unwrap();
+        assert!(store.episodes_with_tag(&agent, "missing-tag").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_working_memory_contains_value_true_when_present() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k", "hello").unwrap();
+        assert!(wm.contains_value("hello").unwrap());
+    }
+
+    #[test]
+    fn test_working_memory_contains_value_false_when_absent() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(!wm.contains_value("anything").unwrap());
     }
 }
