@@ -891,6 +891,28 @@ impl GraphStore {
         Ok(!self.contains_cycle()?)
     }
 
+    /// Return the maximum out-degree across all entities, or `0` for empty graphs.
+    pub fn max_out_degree(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "max_out_degree");
+        Ok(inner
+            .adjacency
+            .values()
+            .map(|v| v.len())
+            .max()
+            .unwrap_or(0))
+    }
+
+    /// Return the maximum in-degree across all entities, or `0` for empty graphs.
+    pub fn max_in_degree(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "max_in_degree");
+        Ok(inner
+            .reverse_adjacency
+            .values()
+            .map(|v| v.len())
+            .max()
+            .unwrap_or(0))
+    }
+
     /// Return all entity IDs in the graph without allocating full `Entity` objects.
     ///
     /// Cheaper than [`all_entities`] when only IDs are needed.
@@ -4100,5 +4122,45 @@ mod tests {
         assert_eq!(g.count_relationships_by_kind("KNOWS").unwrap(), 2);
         assert_eq!(g.count_relationships_by_kind("PART_OF").unwrap(), 1);
         assert_eq!(g.count_relationships_by_kind("MISSING").unwrap(), 0);
+    }
+
+    // ── Round 16: max_out_degree / max_in_degree ──────────────────────────────
+
+    #[test]
+    fn test_max_out_degree_returns_highest_out_degree() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        // a → b, a → c  (out-degree 2)
+        // b → c          (out-degree 1)
+        g.add_relationship(Relationship::new("a", "b", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "e", 1.0)).unwrap();
+        assert_eq!(g.max_out_degree().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_max_out_degree_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.max_out_degree().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_max_in_degree_returns_highest_in_degree() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        // a → c, b → c  (c has in-degree 2)
+        g.add_relationship(Relationship::new("a", "c", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "e", 1.0)).unwrap();
+        assert_eq!(g.max_in_degree().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_max_in_degree_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.max_in_degree().unwrap(), 0);
     }
 }

@@ -5299,4 +5299,115 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].content, "mid");
     }
+
+    // ── Round 16: oldest_episode, remove_by_key, total_value_bytes ───────────
+
+    #[test]
+    fn test_oldest_episode_returns_none_for_new_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("fresh");
+        assert!(store.oldest_episode(&agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_oldest_episode_returns_earliest_timestamp() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "first", 0.5).unwrap();
+        store.add_episode(agent.clone(), "second", 0.7).unwrap();
+        store.add_episode(agent.clone(), "third", 0.3).unwrap();
+        let oldest = store.oldest_episode(&agent).unwrap().unwrap();
+        // Insertion order determines timestamp; "first" should be oldest
+        assert_eq!(oldest.content, "first");
+    }
+
+    #[test]
+    fn test_semantic_store_remove_by_key_removes_all_matching() {
+        let store = SemanticStore::new();
+        store.store("target", "v1", vec![]).unwrap();
+        store.store("target", "v2", vec![]).unwrap();
+        store.store("keep", "vk", vec![]).unwrap();
+        let removed = store.remove_by_key("target").unwrap();
+        assert_eq!(removed, 2);
+        assert!(!store.has_key("target").unwrap());
+        assert!(store.has_key("keep").unwrap());
+    }
+
+    #[test]
+    fn test_semantic_store_remove_by_key_zero_for_absent_key() {
+        let store = SemanticStore::new();
+        assert_eq!(store.remove_by_key("ghost").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_working_memory_total_value_bytes_sums_lengths() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("a", "hello").unwrap();    // 5 bytes
+        wm.set("b", "world!").unwrap();   // 6 bytes
+        assert_eq!(wm.total_value_bytes().unwrap(), 11);
+    }
+
+    #[test]
+    fn test_working_memory_total_value_bytes_zero_when_empty() {
+        let wm = WorkingMemory::new(5).unwrap();
+        assert_eq!(wm.total_value_bytes().unwrap(), 0);
+    }
+
+    // ── Round 19: agent_ids, clear_for, recall_since ──────────────────────────
+
+    #[test]
+    fn test_agent_ids_returns_all_tracked_agents() {
+        let store = EpisodicStore::new();
+        let a1 = AgentId::new("alice");
+        let a2 = AgentId::new("bob");
+        store.add_episode(a1.clone(), "x", 0.5).unwrap();
+        store.add_episode(a2.clone(), "y", 0.5).unwrap();
+        let mut ids = store.agent_ids().unwrap();
+        ids.sort_by_key(|id| id.as_str().to_string());
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0].as_str(), "alice");
+        assert_eq!(ids[1].as_str(), "bob");
+    }
+
+    #[test]
+    fn test_agent_ids_empty_for_new_store() {
+        let store = EpisodicStore::new();
+        assert!(store.agent_ids().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_clear_for_removes_all_episodes_for_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "e1", 0.5).unwrap();
+        store.add_episode(agent.clone(), "e2", 0.3).unwrap();
+        let removed = store.clear_for(&agent).unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(store.count_for(&agent).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_clear_for_returns_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("ghost");
+        assert_eq!(store.clear_for(&agent).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_recall_since_returns_episodes_after_cutoff() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let past = chrono::Utc::now() - chrono::Duration::hours(2);
+        let future_cutoff = chrono::Utc::now() + chrono::Duration::seconds(1);
+        // Add one in the past
+        store.add_episode_at(agent.clone(), "old", 0.5, past).unwrap();
+        // Add one now
+        store.add_episode(agent.clone(), "new", 0.5).unwrap();
+        // Recall only future episodes (should be 0)
+        let future = store.recall_since(&agent, future_cutoff, 0).unwrap();
+        assert!(future.is_empty());
+        // Recall from far past (should include both)
+        let all = store.recall_since(&agent, past - chrono::Duration::seconds(1), 0).unwrap();
+        assert_eq!(all.len(), 2);
+    }
 }

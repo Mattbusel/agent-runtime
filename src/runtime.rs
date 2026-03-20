@@ -259,6 +259,16 @@ impl AgentSession {
         self.steps.iter().map(|s| s.observation.as_str()).collect()
     }
 
+    /// Return the number of steps that have a non-empty observation string.
+    pub fn observation_count(&self) -> usize {
+        self.steps.iter().filter(|s| !s.observation.is_empty()).count()
+    }
+
+    /// Return the number of steps whose observation string is empty.
+    pub fn steps_without_observation(&self) -> usize {
+        self.steps.iter().filter(|s| s.observation.is_empty()).count()
+    }
+
     /// Return the thought string from the first step, or `None` if the session
     /// has no steps.
     pub fn first_thought(&self) -> Option<&str> {
@@ -2655,5 +2665,49 @@ mod tests {
         let steps = vec![ReActStep::new("t1", "a", "r1")];
         let session = make_session(steps, 0);
         assert!(session.last_n_steps(0).is_empty());
+    }
+
+    // ── Round 16: observation_count / steps_without_observation ──────────────
+
+    #[test]
+    fn test_observation_count_counts_non_empty() {
+        let steps = vec![
+            ReActStep::new("t", "a", "result"),
+            ReActStep::new("t", "b", ""),
+            ReActStep::new("t", "c", "data"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.observation_count(), 2);
+    }
+
+    #[test]
+    fn test_observation_count_zero_when_all_empty() {
+        let steps = vec![
+            ReActStep::new("t", "a", ""),
+            ReActStep::new("t", "b", ""),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.observation_count(), 0);
+    }
+
+    #[test]
+    fn test_steps_without_observation_counts_empty_obs() {
+        let steps = vec![
+            ReActStep::new("t", "a", ""),
+            ReActStep::new("t", "b", "data"),
+            ReActStep::new("t", "c", ""),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_without_observation(), 2);
+    }
+
+    #[test]
+    fn test_steps_without_observation_zero_when_all_filled() {
+        let steps = vec![
+            ReActStep::new("t", "a", "r1"),
+            ReActStep::new("t", "b", "r2"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_without_observation(), 0);
     }
 }

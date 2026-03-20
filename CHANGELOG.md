@@ -11,6 +11,33 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.34.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::observation_count`** (`runtime.rs`) — count of steps with a
+  non-empty observation string.
+- **`AgentSession::steps_without_observation`** (`runtime.rs`) — count of steps
+  whose observation is empty; useful for detecting silent tool failures.
+- **`ReActStep::observation_is_empty`** (`agent.rs`) — `true` if the observation
+  field is an empty string.
+- **`GraphStore::max_out_degree`** (`graph.rs`) — maximum out-degree value across
+  all entities; `0` for empty graphs.
+- **`GraphStore::max_in_degree`** (`graph.rs`) — maximum in-degree value across
+  all entities; `0` for empty graphs.
+- **`EpisodicStore::oldest_episode`** (`memory.rs`) — episode with the earliest
+  timestamp for an agent; `None` if the agent has no episodes.
+- **`SemanticStore::remove_by_key`** (`memory.rs`) — remove all entries whose
+  key matches exactly; returns the number of entries removed.
+- **`WorkingMemory::total_value_bytes`** (`memory.rs`) — total byte count of all
+  stored values; useful for memory-pressure estimation.
+- **`Deduplicator::evict_oldest`** (`orchestrator.rs`) — remove the oldest cached
+  result entry (FIFO); returns `false` if the cache was empty.
+- **`LatencyHistogram::mode_bucket_ms`** (`metrics.rs`) — upper bound of the
+  bucket with the highest sample count; `None` if no samples recorded.
+
+---
+
 ## [1.32.0] - 2026-03-20
 
 ### Added

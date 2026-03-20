@@ -195,6 +195,13 @@ impl ReActStep {
     pub fn is_empty(&self) -> bool {
         self.thought.is_empty() && self.action.is_empty() && self.observation.is_empty()
     }
+
+    /// Return `true` if the observation string is empty.
+    ///
+    /// Useful for identifying steps where the tool produced no output.
+    pub fn observation_is_empty(&self) -> bool {
+        self.observation.is_empty()
+    }
 }
 
 /// Configuration for the ReAct agent loop.
@@ -3082,5 +3089,19 @@ mod tests {
         assert_eq!(reg.tool_count(), 1);
         reg.register(ToolSpec::new("t2", "d", |_| serde_json::json!({})));
         assert_eq!(reg.tool_count(), 2);
+    }
+
+    // ── Round 16: ReActStep::observation_is_empty ─────────────────────────────
+
+    #[test]
+    fn test_observation_is_empty_true_for_empty_string() {
+        let step = ReActStep::new("think", "search", "");
+        assert!(step.observation_is_empty());
+    }
+
+    #[test]
+    fn test_observation_is_empty_false_for_non_empty() {
+        let step = ReActStep::new("think", "search", "found results");
+        assert!(!step.observation_is_empty());
     }
 }

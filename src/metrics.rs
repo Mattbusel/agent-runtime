@@ -159,6 +159,22 @@ impl LatencyHistogram {
         *Self::BOUNDS.last().unwrap_or(&u64::MAX)
     }
 
+    /// Return the upper-bound of the bucket with the highest sample count (the mode).
+    ///
+    /// Returns `None` if no samples have been recorded.  When multiple buckets
+    /// tie for the maximum, the lowest-latency bucket is returned.
+    pub fn mode_bucket_ms(&self) -> Option<u64> {
+        if self.count() == 0 {
+            return None;
+        }
+        let (idx, _) = self
+            .buckets
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, a)| a.load(Ordering::Relaxed))?;
+        Some(Self::BOUNDS[idx])
+    }
+
     /// Return bucket counts as `(upper_bound_ms, count)` pairs.
     pub fn buckets(&self) -> Vec<(u64, u64)> {
         Self::BOUNDS
@@ -1674,5 +1690,29 @@ mod tests {
         m.total_sessions.fetch_add(4, std::sync::atomic::Ordering::Relaxed);
         m.checkpoint_errors.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
         assert!((m.checkpoint_error_rate() - 0.5).abs() < 1e-9);
+    }
+
+    // ── Round 16: LatencyHistogram::mode_bucket_ms ───────────────────────────
+
+    #[test]
+    fn test_mode_bucket_ms_none_when_empty() {
+        let h = LatencyHistogram::default();
+        assert!(h.mode_bucket_ms().is_none());
+    }
+
+    #[test]
+    fn test_mode_bucket_ms_returns_bucket_with_most_samples() {
+        let h = LatencyHistogram::default();
+        // Record many samples in the ~10ms range
+        for _ in 0..10 {
+            h.record(5);
+        }
+        // Record fewer samples in the ~500ms range
+        for _ in 0..2 {
+            h.record(400);
+        }
+        let mode = h.mode_bucket_ms().unwrap();
+        // The low-latency bucket should win
+        assert!(mode <= 50, "expected low-latency bucket, got {mode}");
     }
 }

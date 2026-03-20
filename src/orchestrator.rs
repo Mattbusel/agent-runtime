@@ -1092,6 +1092,19 @@ impl Deduplicator {
         }
         Ok(removed)
     }
+
+    /// Remove the oldest cached result entry (FIFO order).
+    ///
+    /// Returns `true` if an entry was removed, `false` if the cache was empty.
+    pub fn evict_oldest(&self) -> Result<bool, AgentRuntimeError> {
+        let mut inner = timed_lock(&self.inner, "Deduplicator::evict_oldest");
+        while let Some(key) = inner.cache_order.pop_front() {
+            if inner.cache.remove(&key).is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 // ── BackpressureGuard ─────────────────────────────────────────────────────────
@@ -2720,5 +2733,28 @@ mod tests {
         assert_eq!(g.available_capacity().unwrap(), 5);
         g.try_acquire().unwrap();
         assert_eq!(g.available_capacity().unwrap(), 4);
+    }
+
+    // ── Round 16: Deduplicator::evict_oldest ─────────────────────────────────
+
+    #[test]
+    fn test_evict_oldest_removes_first_cached_entry() {
+        let d = Deduplicator::new(std::time::Duration::from_secs(60));
+        // Register and complete two entries to put them in cache
+        d.check_and_register("alpha").unwrap();
+        d.check_and_register("beta").unwrap();
+        d.complete("alpha", "result_a").unwrap();
+        d.complete("beta", "result_b").unwrap();
+        // Evict the oldest (alpha)
+        let removed = d.evict_oldest().unwrap();
+        assert!(removed);
+        assert!(d.get_result("alpha").unwrap().is_none());
+        assert!(d.get_result("beta").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_evict_oldest_returns_false_when_empty() {
+        let d = Deduplicator::new(std::time::Duration::from_secs(60));
+        assert!(!d.evict_oldest().unwrap());
     }
 }
