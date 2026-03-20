@@ -367,6 +367,16 @@ impl RetryPolicy {
     pub fn remaining_wait_budget_ms(&self, attempts_done: u32) -> u64 {
         self.max_total_delay_ms().saturating_sub(self.delay_sum_ms(attempts_done))
     }
+
+    /// Return the maximum delay a single retry attempt can incur, in
+    /// milliseconds.
+    ///
+    /// For exponential policies this is `delay_for(max_attempts)` which equals
+    /// `base * 2^(max_attempts-1)` capped at the global `MAX_RETRY_DELAY`.
+    /// For constant policies this equals the configured base delay.
+    pub fn max_single_delay_ms(&self) -> u64 {
+        self.delay_for(self.max_attempts).as_millis() as u64
+    }
 }
 
 impl std::fmt::Display for RetryPolicy {
@@ -2137,6 +2147,21 @@ impl Pipeline {
             return None;
         }
         Some(self.stages[len - 1 - n].name.as_str())
+    }
+
+    /// Return all stage names as an owned `Vec<String>`.
+    ///
+    /// Unlike [`unique_stage_names`] this preserves order and includes
+    /// duplicates.
+    ///
+    /// [`unique_stage_names`]: Pipeline::unique_stage_names
+    pub fn all_stage_names(&self) -> Vec<String> {
+        self.stages.iter().map(|s| s.name.clone()).collect()
+    }
+
+    /// Return `true` if the pipeline contains exactly `n` stages.
+    pub fn has_exactly_n_stages(&self, n: usize) -> bool {
+        self.stages.len() == n
     }
 
 }
@@ -4473,5 +4498,65 @@ mod tests {
     fn test_stage_at_index_none_for_empty_pipeline() {
         let p = Pipeline::new();
         assert!(p.stage_at_index(0).is_none());
+    }
+
+    // ── Round 53 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_max_single_delay_ms_constant_policy() {
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        assert_eq!(p.max_single_delay_ms(), 100);
+    }
+
+    #[test]
+    fn test_max_single_delay_ms_exponential_grows_with_attempts() {
+        let p = RetryPolicy::exponential(3, 50).unwrap();
+        // attempt 3: 50 * 2^(3-1) = 50 * 4 = 200
+        assert_eq!(p.max_single_delay_ms(), 200);
+    }
+
+    // ── Round 48 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_all_stage_names_returns_all_in_order() {
+        let p = Pipeline::new()
+            .add_stage("alpha", |s: String| Ok(s))
+            .add_stage("beta", |s: String| Ok(s))
+            .add_stage("gamma", |s: String| Ok(s));
+        assert_eq!(p.all_stage_names(), vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn test_all_stage_names_empty_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.all_stage_names().is_empty());
+    }
+
+    #[test]
+    fn test_all_stage_names_preserves_duplicates() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("a", |s: String| Ok(s));
+        assert_eq!(p.all_stage_names(), vec!["a", "a"]);
+    }
+
+    #[test]
+    fn test_has_exactly_n_stages_true() {
+        let p = Pipeline::new()
+            .add_stage("x", |s: String| Ok(s))
+            .add_stage("y", |s: String| Ok(s));
+        assert!(p.has_exactly_n_stages(2));
+    }
+
+    #[test]
+    fn test_has_exactly_n_stages_false_when_different() {
+        let p = Pipeline::new().add_stage("x", |s: String| Ok(s));
+        assert!(!p.has_exactly_n_stages(3));
+    }
+
+    #[test]
+    fn test_has_exactly_n_stages_true_for_empty() {
+        let p = Pipeline::new();
+        assert!(p.has_exactly_n_stages(0));
     }
 }

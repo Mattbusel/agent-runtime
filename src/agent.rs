@@ -4976,4 +4976,40 @@ mod tests {
         let cfg = AgentConfig::new(1, "m").with_system_prompt("prompt");
         assert!(!cfg.is_minimal());
     }
+
+    // ── Round 48 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_model_starts_with_true_when_prefix_matches() {
+        let cfg = AgentConfig::new(3, "claude-3-opus");
+        assert!(cfg.model_starts_with("claude"));
+    }
+
+    #[test]
+    fn test_model_starts_with_false_when_prefix_differs() {
+        let cfg = AgentConfig::new(3, "gpt-4o");
+        assert!(!cfg.model_starts_with("claude"));
+    }
+
+    #[test]
+    fn test_tools_with_required_fields_count_correct() {
+        let mut registry = ToolRegistry::new();
+        registry.register(ToolSpec::new(
+            "search",
+            "desc",
+            |_| serde_json::json!("ok"),
+        ).with_required_fields(vec!["query".to_string()]));
+        registry.register(ToolSpec::new(
+            "noop",
+            "desc",
+            |_| serde_json::json!("ok"),
+        ));
+        assert_eq!(registry.tools_with_required_fields_count(), 1);
+    }
+
+    #[test]
+    fn test_tools_with_required_fields_count_zero_for_empty_registry() {
+        let registry = ToolRegistry::new();
+        assert_eq!(registry.tools_with_required_fields_count(), 0);
+    }
 }

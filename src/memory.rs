@@ -820,6 +820,34 @@ impl EpisodicStore {
         Ok(inner.items.values().map(|v| v.len()).sum())
     }
 
+    /// Return all agent IDs that have at least one episode stored.
+    ///
+    /// The returned `Vec` is sorted for deterministic output.
+    pub fn agent_ids_with_episodes(&self) -> Result<Vec<AgentId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::agent_ids_with_episodes");
+        let mut ids: Vec<AgentId> = inner
+            .items
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, _)| k.clone())
+            .collect();
+        ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        Ok(ids)
+    }
+
+    /// Return the average importance score of all episodes for `agent_id`.
+    ///
+    /// Returns `0.0` when the agent has no episodes or is unknown.
+    pub fn episode_importance_avg(&self, agent_id: &AgentId) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episode_importance_avg");
+        let items = match inner.items.get(agent_id) {
+            Some(v) if !v.is_empty() => v,
+            _ => return Ok(0.0),
+        };
+        let sum: f64 = items.iter().map(|m| m.importance as f64).sum();
+        Ok(sum / items.len() as f64)
+    }
+
     /// Return the number of episodes stored for the given agent.
     ///
     /// Returns `0` if the agent has no recorded episodes.
@@ -3850,6 +3878,26 @@ impl WorkingMemory {
         let mut keys: Vec<String> = inner.map.keys().cloned().collect();
         keys.sort_unstable();
         Ok(keys)
+    }
+
+    /// Return the number of key-value pairs currently stored.
+    pub fn key_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::key_count");
+        Ok(inner.map.len())
+    }
+
+    /// Return the value for `key`, or `default` if the key is not present.
+    pub fn value_for_key_or_default<'a>(
+        &self,
+        key: &str,
+        default: &'a str,
+    ) -> Result<String, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::value_for_key_or_default");
+        Ok(inner
+            .map
+            .get(key)
+            .map(|v| v.clone())
+            .unwrap_or_else(|| default.to_string()))
     }
 
     /// Return a histogram of value byte lengths bucketed by `bucket_size`.
@@ -9429,5 +9477,70 @@ mod tests {
     fn test_key_count_starting_with_zero_for_empty_store() {
         let wm = WorkingMemory::new(10).unwrap();
         assert_eq!(wm.key_count_starting_with("any").unwrap(), 0);
+    }
+
+    // ── Round 54: agent_ids_with_episodes, episode_importance_avg, key_count, value_for_key_or_default ──
+
+    #[test]
+    fn test_agent_ids_with_episodes_returns_sorted_ids() {
+        let store = EpisodicStore::new();
+        let a1 = AgentId::new("r54-z-agent");
+        let a2 = AgentId::new("r54-a-agent");
+        store.add_episode(a1.clone(), "ep", 0.5).unwrap();
+        store.add_episode(a2.clone(), "ep", 0.5).unwrap();
+        let ids = store.agent_ids_with_episodes().unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0].as_str(), "r54-a-agent");
+        assert_eq!(ids[1].as_str(), "r54-z-agent");
+    }
+
+    #[test]
+    fn test_agent_ids_with_episodes_empty_for_empty_store() {
+        let store = EpisodicStore::new();
+        assert!(store.agent_ids_with_episodes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_episode_importance_avg_returns_mean() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r54-eia-1");
+        store.add_episode(agent.clone(), "ep1", 0.5).unwrap();
+        store.add_episode(agent.clone(), "ep2", 1.0).unwrap();
+        let avg = store.episode_importance_avg(&agent).unwrap();
+        assert!((avg - 0.75).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_episode_importance_avg_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r54-eia-unknown");
+        assert_eq!(store.episode_importance_avg(&agent).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_key_count_returns_number_of_entries() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("a", "1").unwrap();
+        wm.set("b", "2").unwrap();
+        assert_eq!(wm.key_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_key_count_zero_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.key_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_value_for_key_or_default_returns_value_when_present() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("host", "localhost").unwrap();
+        assert_eq!(wm.value_for_key_or_default("host", "unknown").unwrap(), "localhost");
+    }
+
+    #[test]
+    fn test_value_for_key_or_default_returns_default_when_absent() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.value_for_key_or_default("missing", "fallback").unwrap(), "fallback");
     }
 }

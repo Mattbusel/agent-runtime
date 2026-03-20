@@ -3184,6 +3184,30 @@ impl GraphStore {
         Ok(inner.entities.values().filter(|e| e.label == label).cloned().collect())
     }
 
+    /// Return all entity IDs present in the graph, sorted alphabetically.
+    ///
+    /// Returns an empty `Vec` for an empty graph.
+    pub fn entity_ids_sorted(&self) -> Result<Vec<EntityId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entity_ids_sorted");
+        let mut ids: Vec<EntityId> = inner.entities.keys().cloned().collect();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(ids)
+    }
+
+    /// Return the number of outgoing relationships from `entity_id`.
+    ///
+    /// Returns `0` for an unknown entity or one with no outgoing edges.
+    pub fn relationship_count_for(
+        &self,
+        entity_id: &EntityId,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::relationship_count_for");
+        Ok(inner
+            .adjacency
+            .get(entity_id)
+            .map_or(0, |rels| rels.len()))
+    }
+
     /// Return the average relationship weight across all edges in the graph.
     ///
     /// Returns `0.0` when the graph has no edges.
@@ -7113,5 +7137,33 @@ mod tests {
         let g = GraphStore::new();
         g.add_entity(Entity::new("a", "N")).unwrap();
         assert!(g.entities_with_incoming().unwrap().is_empty());
+    }
+
+    // ── Round 48 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_entities_with_no_relationships_returns_sink_nodes() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("src", "N")).unwrap();
+        g.add_entity(Entity::new("sink", "N")).unwrap();
+        g.add_relationship(Relationship::new("src", "sink", "E", 1.0)).unwrap();
+        let sinks = g.entities_with_no_relationships().unwrap();
+        let ids: Vec<&str> = sinks.iter().map(|e| e.id.as_str()).collect();
+        assert!(ids.contains(&"sink"));
+        assert!(!ids.contains(&"src"));
+    }
+
+    #[test]
+    fn test_entities_with_no_relationships_all_when_no_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        assert_eq!(g.entities_with_no_relationships().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_entities_with_no_relationships_empty_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(g.entities_with_no_relationships().unwrap().is_empty());
     }
 }

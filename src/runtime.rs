@@ -1375,6 +1375,34 @@ impl AgentSession {
         self.steps.iter().filter(|s| s.action.len() > min_bytes).count()
     }
 
+    /// Return all steps whose `action` field is empty.
+    ///
+    /// Returns an empty `Vec` when no steps have an empty action.
+    pub fn steps_with_empty_action(&self) -> Vec<&ReActStep> {
+        self.steps.iter().filter(|s| s.action.is_empty()).collect()
+    }
+
+    /// Return `true` if any observation starts with one of the given `prefixes`.
+    ///
+    /// Returns `false` for an empty session or when no prefix matches.
+    pub fn observation_starts_with_any(&self, prefixes: &[&str]) -> bool {
+        self.steps
+            .iter()
+            .any(|s| prefixes.iter().any(|p| s.observation.starts_with(p)))
+    }
+
+    /// Return `true` if any action string appears more than once in the session.
+    ///
+    /// Non-empty duplicate actions often signal a stuck or looping agent.
+    /// Returns `false` for a session with fewer than two steps.
+    pub fn has_repeated_actions(&self) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        self.steps
+            .iter()
+            .filter(|s| !s.action.is_empty())
+            .any(|s| !seen.insert(s.action.as_str()))
+    }
+
     /// Return the smallest byte length of non-empty observation strings in this
     /// session.
     ///
@@ -2351,6 +2379,12 @@ impl AgentRuntime {
     /// Return the model identifier configured for this runtime.
     pub fn model_name(&self) -> &str {
         &self.agent_config.model
+    }
+
+    /// Return the maximum number of ReAct iterations this runtime is configured
+    /// to allow per session.
+    pub fn session_max_iterations(&self) -> usize {
+        self.agent_config.max_iterations
     }
 
     /// Gracefully shut down the runtime.
@@ -6311,5 +6345,65 @@ mod tests {
     fn test_shortest_observation_step_none_for_empty_session() {
         let session = make_session(vec![], 0);
         assert!(session.shortest_observation_step().is_none());
+    }
+
+    // ── Round 54: steps_with_empty_action, observation_starts_with_any, has_repeated_actions, session_max_iterations ──
+
+    #[test]
+    fn test_steps_with_empty_action_returns_matching_steps() {
+        let steps = vec![
+            make_step("t", "", "obs"),
+            make_step("t", "act", "obs"),
+            make_step("t", "", "obs"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_with_empty_action().len(), 2);
+    }
+
+    #[test]
+    fn test_steps_with_empty_action_empty_when_all_have_actions() {
+        let steps = vec![make_step("t", "act", "obs")];
+        let session = make_session(steps, 0);
+        assert!(session.steps_with_empty_action().is_empty());
+    }
+
+    #[test]
+    fn test_observation_starts_with_any_true_when_prefix_matches() {
+        let steps = vec![make_step("t", "a", "ERROR: something went wrong")];
+        let session = make_session(steps, 0);
+        assert!(session.observation_starts_with_any(&["ERROR:", "WARN:"]));
+    }
+
+    #[test]
+    fn test_observation_starts_with_any_false_when_no_match() {
+        let steps = vec![make_step("t", "a", "success")];
+        let session = make_session(steps, 0);
+        assert!(!session.observation_starts_with_any(&["ERROR:", "WARN:"]));
+    }
+
+    #[test]
+    fn test_has_repeated_actions_true_when_duplicate_exists() {
+        let steps = vec![
+            make_step("t", "search", "obs"),
+            make_step("t", "search", "obs"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(session.has_repeated_actions());
+    }
+
+    #[test]
+    fn test_has_repeated_actions_false_when_all_unique() {
+        let steps = vec![
+            make_step("t", "search", "obs"),
+            make_step("t", "read", "obs"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(!session.has_repeated_actions());
+    }
+
+    #[test]
+    fn test_session_max_iterations_returns_config_value() {
+        let rt = AgentRuntime::quick(7, "model");
+        assert_eq!(rt.session_max_iterations(), 7);
     }
 }
