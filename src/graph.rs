@@ -160,6 +160,11 @@ impl Entity {
     pub fn has_property(&self, key: &str) -> bool {
         self.properties.contains_key(key)
     }
+
+    /// Return a reference to the property value for `key`, or `None` if absent.
+    pub fn property_value(&self, key: &str) -> Option<&serde_json::Value> {
+        self.properties.get(key)
+    }
 }
 
 // ── Relationship ──────────────────────────────────────────────────────────────
@@ -802,6 +807,72 @@ impl GraphStore {
     /// the entity does not exist (unknown nodes cannot have outgoing edges).
     pub fn is_sink(&self, entity_id: &EntityId) -> Result<bool, AgentRuntimeError> {
         Ok(self.out_degree_for(entity_id)? == 0)
+    }
+
+    /// Return the set of all entity IDs reachable from `start` via directed edges
+    /// (BFS traversal).  The starting node itself is **not** included.
+    ///
+    /// Returns an empty `HashSet` if `start` has no outgoing edges or does not exist.
+    pub fn reachable_from(
+        &self,
+        start: &EntityId,
+    ) -> Result<std::collections::HashSet<EntityId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "reachable_from");
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        if let Some(rels) = inner.adjacency.get(start) {
+            for r in rels {
+                if visited.insert(r.to.clone()) {
+                    queue.push_back(r.to.clone());
+                }
+            }
+        }
+        while let Some(current) = queue.pop_front() {
+            if let Some(rels) = inner.adjacency.get(&current) {
+                for r in rels {
+                    if visited.insert(r.to.clone()) {
+                        queue.push_back(r.to.clone());
+                    }
+                }
+            }
+        }
+        Ok(visited)
+    }
+
+    /// Return `true` if the directed graph contains at least one cycle.
+    ///
+    /// Uses iterative DFS with a three-colour scheme (unvisited / in-stack / done).
+    /// An empty graph is acyclic.
+    pub fn contains_cycle(&self) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "contains_cycle");
+        let mut color: HashMap<&EntityId, u8> = HashMap::new();
+
+        for start in inner.entities.keys() {
+            if color.get(start).copied().unwrap_or(0) != 0 {
+                continue;
+            }
+            let mut stack: Vec<(&EntityId, usize)> = vec![(start, 0)];
+            color.insert(start, 1);
+            while let Some((node, idx)) = stack.last_mut() {
+                let neighbors = inner.adjacency.get(node).map(|v| v.as_slice()).unwrap_or(&[]);
+                if *idx < neighbors.len() {
+                    let neighbor = &neighbors[*idx].to;
+                    *idx += 1;
+                    match color.get(neighbor).copied().unwrap_or(0) {
+                        1 => return Ok(true),
+                        0 => {
+                            color.insert(neighbor, 1);
+                            stack.push((neighbor, 0));
+                        }
+                        _ => {}
+                    }
+                } else {
+                    color.insert(*node, 2);
+                    stack.pop();
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Return the number of relationships in the graph.
@@ -1533,6 +1604,18 @@ impl GraphStore {
     pub fn all_relationships(&self) -> Result<Vec<Relationship>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "all_relationships");
         Ok(inner.relationships.clone())
+    }
+
+    /// Return all relationships whose `kind` matches `kind` (case-sensitive).
+    pub fn find_relationships_by_kind(&self, kind: &str) -> Result<Vec<Relationship>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "find_relationships_by_kind");
+        Ok(inner.relationships.iter().filter(|r| r.kind == kind).cloned().collect())
+    }
+
+    /// Return the number of relationships whose `kind` matches `kind` (case-sensitive).
+    pub fn count_relationships_by_kind(&self, kind: &str) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "count_relationships_by_kind");
+        Ok(inner.relationships.iter().filter(|r| r.kind == kind).count())
     }
 
     /// Return all entities whose `label` matches `label` (case-sensitive).
@@ -3809,5 +3892,64 @@ mod tests {
     fn test_is_sink_true_for_unknown_entity() {
         let g = GraphStore::new();
         assert!(g.is_sink(&EntityId::new("ghost")).unwrap());
+    }
+
+    // ── Round 15: count_relationships_by_kind, merge, top_nodes_by_in/out_degree ──
+
+    #[test]
+    fn test_count_relationships_by_kind_returns_correct_count() {
+        let g = make_graph();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "knows", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "knows", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "likes", 0.5)).unwrap();
+        assert_eq!(g.count_relationships_by_kind("knows").unwrap(), 2);
+        assert_eq!(g.count_relationships_by_kind("likes").unwrap(), 1);
+        assert_eq!(g.count_relationships_by_kind("absent").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_merge_imports_entities_and_relationships() {
+        let g1 = make_graph();
+        g1.add_entity(Entity::new("a", "N")).unwrap();
+        g1.add_entity(Entity::new("b", "N")).unwrap();
+        g1.add_relationship(Relationship::new("a", "b", "r", 1.0)).unwrap();
+
+        let g2 = make_graph();
+        g2.add_entity(Entity::new("c", "N")).unwrap();
+        g2.add_entity(Entity::new("a", "N")).unwrap(); // duplicate — should not double-add
+        g2.add_relationship(Relationship::new("c", "a", "s", 0.5)).unwrap();
+
+        g1.merge(&g2).unwrap();
+        assert_eq!(g1.entity_count().unwrap(), 3); // a, b, c
+        assert_eq!(g1.relationship_count().unwrap(), 2); // r + s
+    }
+
+    #[test]
+    fn test_top_nodes_by_in_degree_returns_sinks() {
+        let g = make_graph();
+        g.add_entity(Entity::new("hub", "N")).unwrap();
+        g.add_entity(Entity::new("src1", "N")).unwrap();
+        g.add_entity(Entity::new("src2", "N")).unwrap();
+        g.add_relationship(Relationship::new("src1", "hub", "r", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("src2", "hub", "r", 1.0)).unwrap();
+        let top = g.top_nodes_by_in_degree(1).unwrap();
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].id.as_str(), "hub");
+    }
+
+    #[test]
+    fn test_top_nodes_by_out_degree_returns_sources() {
+        let g = make_graph();
+        g.add_entity(Entity::new("src", "N")).unwrap();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("src", "a", "r", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("src", "b", "r", 1.0)).unwrap();
+        let top = g.top_nodes_by_out_degree(1).unwrap();
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].id.as_str(), "src");
     }
 }
