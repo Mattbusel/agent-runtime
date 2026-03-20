@@ -376,6 +376,26 @@ impl GraphStore {
         Ok(count)
     }
 
+    /// Return the count of entity pairs `(A, B)` where edges exist in both directions.
+    ///
+    /// Each bidirectional pair is counted once.
+    pub fn bidirectional_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::bidirectional_count");
+        let mut count = 0usize;
+        for (from, rels) in &inner.adjacency {
+            for rel in rels {
+                let to = &rel.to;
+                if to > from {
+                    // Only count when to > from to avoid double-counting
+                    if inner.adjacency.get(to).map_or(false, |v| v.iter().any(|r| &r.to == from)) {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        Ok(count)
+    }
+
     /// Return `true` if any relationship is a self-loop (`from == to`).
     pub fn has_self_loops(&self) -> Result<bool, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "GraphStore::has_self_loops");
@@ -4755,5 +4775,26 @@ mod tests {
         g.add_entity(Entity::new("b", "Node")).unwrap();
         g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
         assert!(!g.has_self_loops().unwrap());
+    }
+
+    #[test]
+    fn test_bidirectional_count_counts_mutual_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Node")).unwrap();
+        g.add_entity(Entity::new("b", "Node")).unwrap();
+        g.add_entity(Entity::new("c", "Node")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "a", "link", 1.0)).unwrap(); // bidirectional pair
+        g.add_relationship(Relationship::new("a", "c", "link", 1.0)).unwrap(); // one-way
+        assert_eq!(g.bidirectional_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_bidirectional_count_zero_when_no_mutual_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Node")).unwrap();
+        g.add_entity(Entity::new("b", "Node")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        assert_eq!(g.bidirectional_count().unwrap(), 0);
     }
 }

@@ -1100,6 +1100,16 @@ impl EpisodicStore {
         Ok(items)
     }
 
+    /// Return a list of content byte lengths for all episodes belonging to `agent_id`, in storage order.
+    pub fn content_lengths(&self, agent_id: &AgentId) -> Result<Vec<usize>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::content_lengths");
+        let lengths = inner
+            .items
+            .get(agent_id)
+            .map_or_else(Vec::new, |v| v.iter().map(|i| i.content.len()).collect());
+        Ok(lengths)
+    }
+
     /// Return the total byte length of all episode content strings for `agent_id`.
     ///
     /// Returns `0` if the agent has no stored episodes.
@@ -2115,6 +2125,16 @@ impl SemanticStore {
         Ok(tags.into_iter().collect())
     }
 
+    /// Remove all entries that have the given tag.
+    ///
+    /// Returns the number of entries removed.
+    pub fn remove_entries_with_tag(&self, tag: &str) -> Result<usize, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "SemanticStore::remove_entries_with_tag");
+        let before = inner.entries.len();
+        inner.entries.retain(|e| !e.tags.iter().any(|t| t == tag));
+        Ok(before - inner.entries.len())
+    }
+
     /// Return the tag that appears most often across all entries.
     ///
     /// Returns `None` if there are no tagged entries.
@@ -2990,6 +3010,18 @@ impl WorkingMemory {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         Ok(pairs)
+    }
+
+    /// Return the sum of byte lengths of all stored keys.
+    pub fn total_key_bytes(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::total_key_bytes");
+        Ok(inner.map.keys().map(|k| k.len()).sum())
+    }
+
+    /// Return the shortest key length, or `0` if the store is empty.
+    pub fn min_key_length(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::min_key_length");
+        Ok(inner.map.keys().map(|k| k.len()).min().unwrap_or(0))
     }
 
     /// Return the number of keys that start with the given prefix.
@@ -6722,5 +6754,47 @@ mod tests {
         let pairs = wm.pairs_starting_with("user:").unwrap();
         assert_eq!(pairs.len(), 2);
         assert!(pairs.iter().all(|(k, _)| k.starts_with("user:")));
+    }
+
+    #[test]
+    fn test_working_memory_total_key_bytes_sums_key_lengths() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("ab", "x").unwrap();   // 2 bytes
+        wm.set("cde", "y").unwrap();  // 3 bytes
+        assert_eq!(wm.total_key_bytes().unwrap(), 5);
+    }
+
+    #[test]
+    fn test_working_memory_min_key_length_returns_shortest() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("ab", "x").unwrap();
+        wm.set("abcd", "y").unwrap();
+        assert_eq!(wm.min_key_length().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_working_memory_min_key_length_empty_returns_zero() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.min_key_length().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_episodic_store_content_lengths_returns_lengths_in_order() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "hi", 0.5).unwrap();    // 2
+        store.add_episode(agent.clone(), "hello", 0.5).unwrap(); // 5
+        assert_eq!(store.content_lengths(&agent).unwrap(), vec![2, 5]);
+    }
+
+    #[test]
+    fn test_semantic_store_remove_entries_with_tag_removes_matching() {
+        let store = SemanticStore::new();
+        store.store("k1", "v1", vec!["old".to_string()]).unwrap();
+        store.store("k2", "v2", vec!["keep".to_string()]).unwrap();
+        store.store("k3", "v3", vec!["old".to_string(), "keep".to_string()]).unwrap();
+        let removed = store.remove_entries_with_tag("old").unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(store.len().unwrap(), 1);
     }
 }

@@ -11,6 +11,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.54.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::count_nonempty_thoughts`** — count of steps with a non-empty thought string.
+- **`AgentSession::observation_contains_count`** — count of steps whose observation contains a substring.
+- **`WorkingMemory::total_key_bytes`** — sum of byte lengths of all stored keys.
+- **`WorkingMemory::min_key_length`** — byte length of the shortest key.
+- **`EpisodicStore::content_lengths`** — list of content byte lengths for one agent's episodes.
+- **`SemanticStore::remove_entries_with_tag`** — remove all entries carrying a given tag.
+- **`MetricsSnapshot::avg_failures_per_session`** — average failed tool calls per session.
+- **`LatencyHistogram::is_skewed`** — true if p99 > 2 × p50.
+- **`GraphStore::bidirectional_count`** — count of entity pairs with edges in both directions.
+- **`ToolRegistry::names_containing`** — sorted list of tool names containing a substring.
+
+---
+
 ## [1.53.0] - 2026-03-20
 
 ### Added

@@ -1182,6 +1182,19 @@ impl ToolRegistry {
         self.tools.clear();
     }
 
+    /// Return a sorted list of tool names that contain `substring` (case-insensitive).
+    pub fn names_containing(&self, substring: &str) -> Vec<&str> {
+        let sub = substring.to_ascii_lowercase();
+        let mut names: Vec<&str> = self
+            .tools
+            .keys()
+            .filter(|name| name.to_ascii_lowercase().contains(&sub))
+            .map(|s| s.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
     /// Return the description of the tool with the longest description string.
     ///
     /// Returns `None` if the registry is empty.
@@ -3688,5 +3701,22 @@ mod tests {
     fn test_longest_description_empty_registry_returns_none() {
         let reg = ToolRegistry::new();
         assert!(reg.longest_description().is_none());
+    }
+
+    #[test]
+    fn test_names_containing_returns_sorted_matching_names() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("search-web", "search tool", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("web-fetch", "fetch tool", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("db-query", "database tool", |_| serde_json::json!({})));
+        let names = reg.names_containing("web");
+        assert_eq!(names, vec!["search-web", "web-fetch"]);
+    }
+
+    #[test]
+    fn test_names_containing_no_match_returns_empty() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t", "tool", |_| serde_json::json!({})));
+        assert!(reg.names_containing("missing").is_empty());
     }
 }

@@ -792,6 +792,16 @@ impl AgentSession {
         counts.into_iter().max_by_key(|(_, c)| *c).map(|(a, _)| a)
     }
 
+    /// Return the count of steps that have a non-empty thought string.
+    pub fn count_nonempty_thoughts(&self) -> usize {
+        self.steps.iter().filter(|s| !s.thought.is_empty()).count()
+    }
+
+    /// Return the count of steps whose observation contains `substring`.
+    pub fn observation_contains_count(&self, substring: &str) -> usize {
+        self.steps.iter().filter(|s| s.observation.contains(substring)).count()
+    }
+
     /// Return the number of steps whose action string matches `action` exactly.
     pub fn count_steps_with_action(&self, action: &str) -> usize {
         self.steps.iter().filter(|s| s.action == action).count()
@@ -3987,5 +3997,28 @@ mod tests {
         assert_eq!(session.thought_contains_count("rust"), 2);
         assert_eq!(session.thought_contains_count("python"), 1);
         assert_eq!(session.thought_contains_count("java"), 0);
+    }
+
+    #[test]
+    fn test_count_nonempty_thoughts_counts_steps_with_thoughts() {
+        let steps = vec![
+            make_step("hello", "a", "o"),
+            make_step("", "b", "o"),
+            make_step("world", "c", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.count_nonempty_thoughts(), 2);
+    }
+
+    #[test]
+    fn test_observation_contains_count_counts_matching_observations() {
+        let steps = vec![
+            make_step("t", "a", "result: success"),
+            make_step("t", "b", "result: failure"),
+            make_step("t", "c", "no match here"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.observation_contains_count("result"), 2);
+        assert_eq!(session.observation_contains_count("success"), 1);
     }
 }
