@@ -27,8 +27,8 @@ pub use crate::orchestrator::{
 };
 
 pub use crate::agent::{
-    parse_react_step, Action, ActionHook, AgentConfig, AgentError, Message, Observer, ReActLoop,
-    ReActStep, Role, ToolCache, ToolRegistry, ToolSpec, ToolValidator,
+    parse_react_step, Action, ActionHook, AgentConfig, AgentError, InMemoryToolCache, Message,
+    Observer, ReActLoop, ReActStep, Role, ToolCache, ToolRegistry, ToolSpec, ToolValidator,
 };
 
 #[cfg(feature = "memory")]
