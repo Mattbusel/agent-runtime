@@ -732,6 +732,16 @@ impl CircuitBreaker {
         self.threshold
     }
 
+    /// Return how many more failures can be recorded before the circuit opens.
+    ///
+    /// Returns `0` when the circuit is already open or at the threshold.
+    /// Useful for alerting logic that needs to know how close the system is
+    /// to being cut off.
+    pub fn failure_headroom(&self) -> u32 {
+        let failures = self.backend.get_failures(&self.service);
+        self.threshold.saturating_sub(failures)
+    }
+
     /// Return the current failure count as a ratio of the threshold.
     ///
     /// Returns a value in `[0.0, 1.0]` where `1.0` (or greater) means the
@@ -1982,6 +1992,17 @@ impl Pipeline {
         self.stages.is_empty()
     }
 
+    /// Return sorted, deduplicated stage names.
+    ///
+    /// Stage names are unique by construction, so this is equivalent to
+    /// `stage_names` sorted alphabetically.  Useful for set-membership checks
+    /// without knowing insertion order.
+    pub fn unique_stage_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.stages.iter().map(|s| s.name.as_str()).collect();
+        names.sort_unstable();
+        names
+    }
+
     /// Return all stage names whose name starts with `prefix`.
     ///
     /// Returned names preserve pipeline order.  Returns an empty `Vec` when
@@ -1990,6 +2011,21 @@ impl Pipeline {
         self.stages
             .iter()
             .filter(|s| s.name.starts_with(prefix))
+            .map(|s| s.name.as_str())
+            .collect()
+    }
+
+    /// Return the names of all stages whose name ends with `suffix`.
+    ///
+    /// Complementary to [`stage_names_with_prefix`]; useful for filtering
+    /// stages by a common naming convention (e.g. `"_validate"`).
+    /// Returns an empty `Vec` when no stage matches or the pipeline is empty.
+    ///
+    /// [`stage_names_with_prefix`]: Pipeline::stage_names_with_prefix
+    pub fn stages_with_suffix<'a>(&'a self, suffix: &str) -> Vec<&'a str> {
+        self.stages
+            .iter()
+            .filter(|s| s.name.ends_with(suffix))
             .map(|s| s.name.as_str())
             .collect()
     }
@@ -4081,6 +4117,23 @@ mod tests {
         assert!(!p.pipeline_is_empty());
     }
 
+    // ── Round 45: unique_stage_names ──────────────────────────────────────────
+
+    #[test]
+    fn test_unique_stage_names_returns_sorted_names() {
+        let p = Pipeline::new()
+            .add_stage("charlie", |s: String| Ok(s))
+            .add_stage("alpha", |s: String| Ok(s))
+            .add_stage("bravo", |s: String| Ok(s));
+        assert_eq!(p.unique_stage_names(), vec!["alpha", "bravo", "charlie"]);
+    }
+
+    #[test]
+    fn test_unique_stage_names_empty_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.unique_stage_names().is_empty());
+    }
+
     // ── Round 47: stage_names_with_prefix ─────────────────────────────────────
 
     #[test]
@@ -4097,5 +4150,48 @@ mod tests {
     fn test_stage_names_with_prefix_empty_when_no_match() {
         let p = Pipeline::new().add_stage("transform", |s: String| Ok(s));
         assert!(p.stage_names_with_prefix("validate").is_empty());
+    }
+
+    // ── Round 48: stages_with_suffix ───────────────────────────────────────────
+
+    #[test]
+    fn test_stages_with_suffix_returns_matching_stages() {
+        let p = Pipeline::new()
+            .add_stage("input_validate", |s: String| Ok(s))
+            .add_stage("transform_data", |s: String| Ok(s))
+            .add_stage("output_validate", |s: String| Ok(s));
+        let names = p.stages_with_suffix("validate");
+        assert_eq!(names, vec!["input_validate", "output_validate"]);
+    }
+
+    #[test]
+    fn test_stages_with_suffix_empty_when_no_match() {
+        let p = Pipeline::new().add_stage("transform", |s: String| Ok(s));
+        assert!(p.stages_with_suffix("validate").is_empty());
+    }
+
+    // ── Round 47: failure_headroom ────────────────────────────────────────────
+
+    #[test]
+    fn test_failure_headroom_full_when_no_failures_recorded() {
+        let cb = CircuitBreaker::new("svc-r47", 3, std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(cb.failure_headroom(), 3);
+    }
+
+    #[test]
+    fn test_failure_headroom_decreases_with_each_failure() {
+        let cb = CircuitBreaker::new("svc-r47b", 3, std::time::Duration::from_secs(10)).unwrap();
+        cb.record_failure();
+        assert_eq!(cb.failure_headroom(), 2);
+        cb.record_failure();
+        assert_eq!(cb.failure_headroom(), 1);
+    }
+
+    #[test]
+    fn test_failure_headroom_zero_when_at_or_above_threshold() {
+        let cb = CircuitBreaker::new("svc-r47c", 2, std::time::Duration::from_secs(10)).unwrap();
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.failure_headroom(), 0);
     }
 }

@@ -775,6 +775,19 @@ impl MetricsSnapshot {
         names
     }
 
+    /// Return `true` if at least one tool has a recorded failure.
+    pub fn has_any_tool_failures(&self) -> bool {
+        self.per_tool_failures.values().any(|&v| v > 0)
+    }
+
+    /// Return the sum of call counts across all tracked tools.
+    ///
+    /// This is the per-tool sum, which may differ from `total_tool_calls` if
+    /// the snapshot was produced from multiple sources.
+    pub fn total_tool_calls_count(&self) -> u64 {
+        self.per_tool_calls.values().sum()
+    }
+
     /// Return the failure rate for a specific tool (failures / calls).
     ///
     /// Returns `0.0` if the tool has no recorded calls.
@@ -901,6 +914,24 @@ impl MetricsSnapshot {
             .collect();
         pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         pairs
+    }
+
+    /// Return `true` if `name` appears in the per-tool call map (i.e., was
+    /// called at least once), `false` otherwise.
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.per_tool_calls.contains_key(name)
+    }
+
+    /// Return the fraction of total tool calls attributable to `name`.
+    ///
+    /// Returns `0.0` when `total_tool_calls` is zero or when `name` has no
+    /// recorded calls.  The result is in `[0.0, 1.0]`.
+    pub fn tool_call_share(&self, name: &str) -> f64 {
+        if self.total_tool_calls == 0 {
+            return 0.0;
+        }
+        let count = self.per_tool_calls.get(name).copied().unwrap_or(0);
+        count as f64 / self.total_tool_calls as f64
     }
 }
 
@@ -1423,6 +1454,18 @@ impl RuntimeMetrics {
             .collect();
         names.sort_unstable();
         names
+    }
+
+    /// Return the average number of memory recalls per recorded step.
+    ///
+    /// Computed as `memory_recall_count / total_steps`.  Returns `0.0`
+    /// when no steps have been recorded to avoid division by zero.
+    pub fn avg_memory_recalls_per_step(&self) -> f64 {
+        let steps = self.total_steps();
+        if steps == 0 {
+            return 0.0;
+        }
+        self.memory_recall_count() as f64 / steps as f64
     }
 
     /// Return the top `n` tools by total call count, sorted descending.
@@ -3515,6 +3558,39 @@ mod tests {
         assert_eq!(m.total_errors(), 0);
     }
 
+    // ── Round 45: has_tool, tool_call_share ────────────────────────────────────
+
+    #[test]
+    fn test_has_tool_true_for_recorded_tool() {
+        let snap = MetricsSnapshot {
+            per_tool_calls: [("my_tool".to_string(), 3)].into_iter().collect(),
+            ..Default::default()
+        };
+        assert!(snap.has_tool("my_tool"));
+    }
+
+    #[test]
+    fn test_has_tool_false_for_unrecorded_tool() {
+        let snap = MetricsSnapshot::default();
+        assert!(!snap.has_tool("anything"));
+    }
+
+    #[test]
+    fn test_tool_call_share_returns_fraction() {
+        let snap = MetricsSnapshot {
+            total_tool_calls: 10,
+            per_tool_calls: [("a".to_string(), 4)].into_iter().collect(),
+            ..Default::default()
+        };
+        assert!((snap.tool_call_share("a") - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_tool_call_share_zero_when_no_calls() {
+        let snap = MetricsSnapshot::default();
+        assert_eq!(snap.tool_call_share("any"), 0.0);
+    }
+
     // ── Round 47: tool_names_containing ───────────────────────────────────────
 
     #[test]
@@ -3533,5 +3609,59 @@ mod tests {
         let m = RuntimeMetrics::default();
         m.record_tool_call("read");
         assert!(m.tool_names_containing("write").is_empty());
+    }
+
+    // ── Round 48: avg_memory_recalls_per_step ──────────────────────────────────
+
+    #[test]
+    fn test_avg_memory_recalls_per_step_computes_ratio() {
+        use std::sync::atomic::Ordering;
+        let m = RuntimeMetrics::default();
+        m.total_steps.store(2, Ordering::Relaxed);
+        m.memory_recall_count.store(1, Ordering::Relaxed);
+        // 1 recall / 2 steps = 0.5
+        assert!((m.avg_memory_recalls_per_step() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_memory_recalls_per_step_zero_when_no_steps() {
+        let m = RuntimeMetrics::default();
+        assert_eq!(m.avg_memory_recalls_per_step(), 0.0);
+    }
+
+    // ── Round 47: has_any_tool_failures, total_tool_calls_count ───────────────
+
+    #[test]
+    fn test_has_any_tool_failures_false_when_no_failures() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        let snap = m.snapshot();
+        assert!(!snap.has_any_tool_failures());
+    }
+
+    #[test]
+    fn test_has_any_tool_failures_true_when_failure_recorded() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        m.record_tool_failure("search");
+        let snap = m.snapshot();
+        assert!(snap.has_any_tool_failures());
+    }
+
+    #[test]
+    fn test_total_tool_calls_count_sums_all_per_tool_calls() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        m.record_tool_call("search");
+        m.record_tool_call("lookup");
+        let snap = m.snapshot();
+        assert_eq!(snap.total_tool_calls_count(), 3);
+    }
+
+    #[test]
+    fn test_total_tool_calls_count_zero_for_no_calls() {
+        let m = RuntimeMetrics::new();
+        let snap = m.snapshot();
+        assert_eq!(snap.total_tool_calls_count(), 0);
     }
 }

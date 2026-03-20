@@ -3111,6 +3111,69 @@ impl GraphStore {
         }
         Ok(freq)
     }
+
+    /// Return all entities sorted ascending by their ID string.
+    ///
+    /// Provides a stable, deterministic ordering that is independent of
+    /// internal `HashMap` iteration order.  Returns an empty `Vec` for an
+    /// empty graph.
+    pub fn entities_sorted_by_id(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entities_sorted_by_id");
+        let mut entities: Vec<Entity> = inner.entities.values().cloned().collect();
+        entities.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+        Ok(entities)
+    }
+
+    /// Return all entities whose out-degree is at least `min_degree`.
+    ///
+    /// Entities with no outgoing edges have an out-degree of 0 and are
+    /// excluded unless `min_degree` is 0.  Returns an empty `Vec` for an
+    /// empty graph.
+    pub fn entities_with_min_out_degree(
+        &self,
+        min_degree: usize,
+    ) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entities_with_min_out_degree");
+        let entities: Vec<Entity> = inner
+            .entities
+            .values()
+            .filter(|e| {
+                inner
+                    .adjacency
+                    .get(&e.id)
+                    .map_or(0, |rels| rels.len())
+                    >= min_degree
+            })
+            .cloned()
+            .collect();
+        Ok(entities)
+    }
+
+    /// Return all entities whose in-degree is at least `min_degree`.
+    ///
+    /// In-degree is the number of relationships that *target* the entity.
+    /// Returns an empty `Vec` when no entity satisfies the threshold.
+    pub fn entities_with_min_in_degree(
+        &self,
+        min_degree: usize,
+    ) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entities_with_min_in_degree");
+        // Build an in-degree map.
+        let mut in_degree: std::collections::HashMap<&EntityId, usize> =
+            std::collections::HashMap::new();
+        for rels in inner.adjacency.values() {
+            for rel in rels {
+                *in_degree.entry(&rel.to).or_insert(0) += 1;
+            }
+        }
+        let entities: Vec<Entity> = inner
+            .entities
+            .values()
+            .filter(|e| in_degree.get(&e.id).copied().unwrap_or(0) >= min_degree)
+            .cloned()
+            .collect();
+        Ok(entities)
+    }
 }
 
 impl Default for GraphStore {
@@ -6292,6 +6355,33 @@ mod tests {
         assert!(g.bidirectional_pairs().unwrap().is_empty());
     }
 
+    // ── Round 45: entities_with_min_out_degree ─────────────────────────────────
+
+    #[test]
+    fn test_entities_with_min_out_degree_filters_correctly() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        g.add_relationship(Relationship::new("a", "b", "R", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "R", 1.0)).unwrap();
+        // "a" has out-degree 2, "b" and "c" have out-degree 0
+        let result = g.entities_with_min_out_degree(2).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id.as_str(), "a");
+    }
+
+    #[test]
+    fn test_entities_with_min_out_degree_zero_includes_all() {
+        let g = GraphStore::new();
+        add(&g, "x"); add(&g, "y");
+        assert_eq!(g.entities_with_min_out_degree(0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_entities_with_min_out_degree_empty_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(g.entities_with_min_out_degree(1).unwrap().is_empty());
+    }
+
     // ── Round 46: mean_in_degree, entity_count_by_label_prefix ────────────────
 
     #[test]
@@ -6356,9 +6446,61 @@ mod tests {
         assert_eq!(*freq.get("Node").unwrap(), 1);
     }
 
+    // ── Round 48: entities_sorted_by_id ────────────────────────────────────────
+
+    #[test]
+    fn test_entities_sorted_by_id_returns_alphabetical_order() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("charlie", "Node")).unwrap();
+        g.add_entity(Entity::new("alice", "Node")).unwrap();
+        g.add_entity(Entity::new("bob", "Node")).unwrap();
+        let sorted = g.entities_sorted_by_id().unwrap();
+        let ids: Vec<&str> = sorted.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["alice", "bob", "charlie"]);
+    }
+
+    #[test]
+    fn test_entities_sorted_by_id_empty_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(g.entities_sorted_by_id().unwrap().is_empty());
+    }
+
     #[test]
     fn test_label_frequency_empty_for_empty_graph() {
         let g = GraphStore::new();
         assert!(g.label_frequency().unwrap().is_empty());
+    }
+
+    // ── Round 47: entities_with_min_in_degree ─────────────────────────────────
+
+    #[test]
+    fn test_entities_with_min_in_degree_returns_correct_entities() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Node")).unwrap();
+        g.add_entity(Entity::new("b", "Node")).unwrap();
+        g.add_entity(Entity::new("c", "Node")).unwrap();
+        // Two edges target "b": a→b and c→b
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("c", "b", "link", 1.0)).unwrap();
+        // One edge targets "c": a→c
+        g.add_relationship(Relationship::new("a", "c", "link", 1.0)).unwrap();
+        // min_in_degree=2 → only "b"
+        let result = g.entities_with_min_in_degree(2).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id.as_str(), "b");
+    }
+
+    #[test]
+    fn test_entities_with_min_in_degree_zero_includes_all() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Node")).unwrap();
+        g.add_entity(Entity::new("b", "Node")).unwrap();
+        assert_eq!(g.entities_with_min_in_degree(0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_entities_with_min_in_degree_empty_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(g.entities_with_min_in_degree(1).unwrap().is_empty());
     }
 }

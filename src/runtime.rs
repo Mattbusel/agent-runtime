@@ -500,6 +500,28 @@ impl AgentSession {
         seen.into_iter().collect()
     }
 
+    /// Return `true` when at least one action string appears more than once.
+    ///
+    /// Useful for detecting repetitive or looping agent behaviour without
+    /// iterating over the full step list manually.
+    pub fn has_duplicate_actions(&self) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        self.steps.iter().any(|s| !seen.insert(s.action.as_str()))
+    }
+
+    /// Return the 0-based indices of steps whose action contains `tool_name`.
+    ///
+    /// Returns an empty `Vec` when no step matches.  Useful when you need
+    /// positions rather than step references for further slicing.
+    pub fn step_indices_with_tool(&self, tool_name: &str) -> Vec<usize> {
+        self.steps
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.is_final_answer() && s.action.contains(tool_name))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Return the action name used most often during the session.
     ///
     /// Returns `None` for sessions with no steps.  When multiple actions tie
@@ -1192,6 +1214,28 @@ impl AgentSession {
         self.steps[start..clamped_end].iter().collect()
     }
 
+    /// Return the fraction of steps that have a non-empty observation string.
+    ///
+    /// Returns `0.0` for sessions with no steps.
+    pub fn step_observation_rate(&self) -> f64 {
+        if self.steps.is_empty() {
+            return 0.0;
+        }
+        let count = self.steps.iter().filter(|s| !s.observation.is_empty()).count();
+        count as f64 / self.steps.len() as f64
+    }
+
+    /// Return references to steps whose thought byte length is strictly less
+    /// than `max_bytes`.
+    ///
+    /// Returns an empty `Vec` when no steps qualify or the session is empty.
+    pub fn steps_below_thought_bytes(&self, max_bytes: usize) -> Vec<&ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.thought.len() < max_bytes)
+            .collect()
+    }
+
     /// Return references to steps whose thought string duplicates an earlier
     /// step's thought.
     ///
@@ -1272,6 +1316,25 @@ impl AgentSession {
     /// [`steps_with_empty_thoughts`]: AgentSession::steps_with_empty_thoughts
     pub fn total_thought_count(&self) -> usize {
         self.steps.iter().filter(|s| !s.thought.is_empty()).count()
+    }
+
+    /// Return `true` if any step's `thought` field contains `substring`
+    /// (case-sensitive).
+    ///
+    /// Returns `false` for empty sessions or when no step matches.
+    pub fn has_thought_containing(&self, substring: &str) -> bool {
+        self.steps.iter().any(|s| s.thought.contains(substring))
+    }
+
+    /// Return references to steps whose `action` field is longer than
+    /// `min_bytes` bytes.
+    ///
+    /// Returns an empty `Vec` when no step qualifies.
+    pub fn steps_with_action_length_above(&self, min_bytes: usize) -> Vec<&ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.action.len() > min_bytes)
+            .collect()
     }
 
     /// Persist this session as a checkpoint under `"session:<session_id>"`.
@@ -2037,6 +2100,14 @@ impl AgentRuntime {
             .active_sessions
             .load(std::sync::atomic::Ordering::Relaxed)
             > 0
+    }
+
+    /// Return the number of tools registered in this runtime.
+    ///
+    /// Each entry in the internal `tools` list corresponds to one registered
+    /// `ToolSpec`.
+    pub fn tool_count(&self) -> usize {
+        self.tools.len()
     }
 
     /// Gracefully shut down the runtime.
@@ -5300,6 +5371,47 @@ mod tests {
         assert_eq!(session.total_thought_count(), 0);
     }
 
+    // ── Round 45: has_thought_containing, steps_with_action_length_above ────────
+
+    #[test]
+    fn test_has_thought_containing_true_when_substring_found() {
+        let steps = vec![make_step("think about this", "act", "obs")];
+        let session = make_session(steps, 0);
+        assert!(session.has_thought_containing("think"));
+    }
+
+    #[test]
+    fn test_has_thought_containing_false_when_not_found() {
+        let steps = vec![make_step("unrelated", "act", "obs")];
+        let session = make_session(steps, 0);
+        assert!(!session.has_thought_containing("xyz"));
+    }
+
+    #[test]
+    fn test_has_thought_containing_false_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(!session.has_thought_containing("any"));
+    }
+
+    #[test]
+    fn test_steps_with_action_length_above_returns_matching_steps() {
+        let steps = vec![
+            make_step("t", "hi", "o"),           // len=2
+            make_step("t", "hello world", "o"),  // len=11
+        ];
+        let session = make_session(steps, 0);
+        let result = session.steps_with_action_length_above(5);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].action, "hello world");
+    }
+
+    #[test]
+    fn test_steps_with_action_length_above_empty_when_none_qualify() {
+        let steps = vec![make_step("t", "hi", "o")];
+        let session = make_session(steps, 0);
+        assert!(session.steps_with_action_length_above(100).is_empty());
+    }
+
     // ── Round 46: avg_thought_bytes, steps_above_action_bytes ─────────────────
 
     #[test]
@@ -5380,5 +5492,128 @@ mod tests {
         ];
         let session = make_session(steps, 0);
         assert!(session.steps_with_duplicate_thoughts().is_empty());
+    }
+
+    // ── Round 48: step_observation_rate, steps_below_thought_bytes, tool_count ─
+
+    #[test]
+    fn test_step_observation_rate_returns_fraction_with_observations() {
+        let steps = vec![
+            make_step("t", "a", "obs"),
+            make_step("t", "b", ""),
+            make_step("t", "c", "obs2"),
+        ];
+        let session = make_session(steps, 0);
+        let rate = session.step_observation_rate();
+        assert!((rate - 2.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_step_observation_rate_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.step_observation_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_steps_below_thought_bytes_filters_by_threshold() {
+        let steps = vec![
+            make_step("hi", "a", "o"),
+            make_step("hello world", "b", "o"),
+        ];
+        let session = make_session(steps, 0);
+        let below = session.steps_below_thought_bytes(6);
+        assert_eq!(below.len(), 1);
+        assert_eq!(below[0].action, "a");
+    }
+
+    #[test]
+    fn test_steps_below_thought_bytes_empty_when_all_exceed() {
+        let steps = vec![make_step("long thought text", "a", "o")];
+        let session = make_session(steps, 0);
+        assert!(session.steps_below_thought_bytes(3).is_empty());
+    }
+
+    #[test]
+    fn test_agent_runtime_tool_count_reflects_registered_tools() {
+        let rt = AgentRuntime::quick(1, "model");
+        assert_eq!(rt.tool_count(), 0);
+    }
+
+    // ── Round 47: steps_between, has_duplicate_actions, step_indices_with_tool ──
+
+    #[test]
+    fn test_steps_between_returns_correct_slice() {
+        let steps = vec![
+            make_step("t0", "a0", "o0"),
+            make_step("t1", "a1", "o1"),
+            make_step("t2", "a2", "o2"),
+            make_step("t3", "a3", "o3"),
+        ];
+        let session = make_session(steps, 0);
+        let slice = session.steps_between(1, 3);
+        assert_eq!(slice.len(), 2);
+        assert_eq!(slice[0].thought, "t1");
+        assert_eq!(slice[1].thought, "t2");
+    }
+
+    #[test]
+    fn test_steps_between_returns_empty_when_start_ge_end() {
+        let steps = vec![make_step("t", "a", "o"), make_step("t2", "a2", "o2")];
+        let session = make_session(steps, 0);
+        assert!(session.steps_between(2, 1).is_empty());
+        assert!(session.steps_between(1, 1).is_empty());
+    }
+
+    #[test]
+    fn test_steps_between_clamps_to_step_count() {
+        let steps = vec![make_step("t", "a", "o")];
+        let session = make_session(steps, 0);
+        let slice = session.steps_between(0, 100);
+        assert_eq!(slice.len(), 1);
+    }
+
+    #[test]
+    fn test_has_duplicate_actions_true_when_repeated() {
+        let steps = vec![
+            make_step("t", "search[foo]", "o"),
+            make_step("t", "search[foo]", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(session.has_duplicate_actions());
+    }
+
+    #[test]
+    fn test_has_duplicate_actions_false_when_all_unique() {
+        let steps = vec![
+            make_step("t", "search[foo]", "o"),
+            make_step("t", "lookup[bar]", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(!session.has_duplicate_actions());
+    }
+
+    #[test]
+    fn test_has_duplicate_actions_false_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(!session.has_duplicate_actions());
+    }
+
+    #[test]
+    fn test_step_indices_with_tool_returns_correct_indices() {
+        let steps = vec![
+            make_step("t", "search[x]", "o"),
+            make_step("t", "lookup[y]", "o"),
+            make_step("t", "search[z]", "o"),
+        ];
+        let session = make_session(steps, 0);
+        let indices = session.step_indices_with_tool("search");
+        assert_eq!(indices, vec![0, 2]);
+    }
+
+    #[test]
+    fn test_step_indices_with_tool_empty_when_no_match() {
+        let steps = vec![make_step("t", "lookup[x]", "o")];
+        let session = make_session(steps, 0);
+        assert!(session.step_indices_with_tool("search").is_empty());
     }
 }

@@ -248,6 +248,11 @@ impl ReActStep {
         self.observation.split_whitespace().count()
     }
 
+    /// Return `true` if the thought string is empty or whitespace-only.
+    pub fn thought_is_empty(&self) -> bool {
+        self.thought.trim().is_empty()
+    }
+
     /// Return a concise single-line summary of this step.
     ///
     /// Format: `"[{kind}] thought={thought_preview} action={action_preview} obs={obs_preview}"`
@@ -606,6 +611,14 @@ impl AgentConfig {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         loop_ms.saturating_add(self.max_iterations as u64 * req_ms)
+    }
+
+    /// Return `true` if the configured model name equals `name` (case-sensitive).
+    ///
+    /// A convenience predicate for conditional logic that branches on the model
+    /// being used, e.g. choosing different prompt strategies per model family.
+    pub fn model_is(&self, name: &str) -> bool {
+        self.model == name
     }
 }
 
@@ -1456,6 +1469,17 @@ impl ToolRegistry {
         }
         let total: usize = self.tools.values().map(|s| s.required_fields.len()).sum();
         total as f64 / self.tools.len() as f64
+    }
+
+    /// Return the total word count across all tool descriptions.
+    ///
+    /// Words are split on ASCII whitespace.  Returns `0` for an empty
+    /// registry or when all descriptions are blank.
+    pub fn tool_descriptions_total_words(&self) -> usize {
+        self.tools
+            .values()
+            .map(|spec| spec.description.split_ascii_whitespace().count())
+            .sum()
     }
 
     /// Return a reference to the `ToolSpec` with the most required fields.
@@ -4433,5 +4457,81 @@ mod tests {
     fn test_avg_required_fields_count_zero_for_empty_registry() {
         let reg = ToolRegistry::new();
         assert_eq!(reg.avg_required_fields_count(), 0.0);
+    }
+
+    // ── Round 47: thought_is_empty, model_is, loop_timeout_ms, total_timeout_ms ──
+
+    #[test]
+    fn test_thought_is_empty_true_for_empty_thought() {
+        let step = ReActStep::new("", "action", "obs");
+        assert!(step.thought_is_empty());
+    }
+
+    #[test]
+    fn test_thought_is_empty_true_for_whitespace_only() {
+        let step = ReActStep::new("   ", "action", "obs");
+        assert!(step.thought_is_empty());
+    }
+
+    #[test]
+    fn test_thought_is_empty_false_for_nonempty_thought() {
+        let step = ReActStep::new("I need to search", "action", "obs");
+        assert!(!step.thought_is_empty());
+    }
+
+    #[test]
+    fn test_model_is_true_for_matching_name() {
+        let config = AgentConfig::new(10, "claude-sonnet-4-6");
+        assert!(config.model_is("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn test_model_is_false_for_different_name() {
+        let config = AgentConfig::new(10, "claude-opus-4-6");
+        assert!(!config.model_is("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn test_loop_timeout_ms_returns_zero_when_not_configured() {
+        let config = AgentConfig::new(10, "m");
+        assert_eq!(config.loop_timeout_ms(), 0);
+    }
+
+    #[test]
+    fn test_loop_timeout_ms_returns_millis_when_configured() {
+        let config = AgentConfig::new(10, "m")
+            .with_loop_timeout(std::time::Duration::from_millis(5000));
+        assert_eq!(config.loop_timeout_ms(), 5000);
+    }
+
+    #[test]
+    fn test_total_timeout_ms_zero_when_neither_configured() {
+        let config = AgentConfig::new(10, "m");
+        assert_eq!(config.total_timeout_ms(), 0);
+    }
+
+    #[test]
+    fn test_total_timeout_ms_includes_loop_and_request_budgets() {
+        let config = AgentConfig::new(4, "m")
+            .with_loop_timeout(std::time::Duration::from_millis(1000))
+            .with_request_timeout(std::time::Duration::from_millis(500));
+        // 1000 + 4 * 500 = 3000
+        assert_eq!(config.total_timeout_ms(), 3000);
+    }
+
+    // ── Round 48: tool_descriptions_total_words ────────────────────────────────
+
+    #[test]
+    fn test_tool_descriptions_total_words_sums_words() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "one two three", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("t2", "four five", |_| serde_json::json!({})));
+        assert_eq!(reg.tool_descriptions_total_words(), 5);
+    }
+
+    #[test]
+    fn test_tool_descriptions_total_words_zero_for_empty_registry() {
+        let reg = ToolRegistry::new();
+        assert_eq!(reg.tool_descriptions_total_words(), 0);
     }
 }
