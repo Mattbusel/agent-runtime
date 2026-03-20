@@ -325,6 +325,31 @@ impl ReActStep {
     pub fn observation_starts_with(&self, prefix: &str) -> bool {
         self.observation.starts_with(prefix)
     }
+
+    /// Return the number of whitespace-delimited words in the `action` field.
+    ///
+    /// Returns `0` for an empty action.
+    pub fn action_word_count(&self) -> usize {
+        self.action.split_whitespace().count()
+    }
+
+    /// Return the number of bytes in the `thought` field (UTF-8 encoded length).
+    pub fn thought_byte_len(&self) -> usize {
+        self.thought.len()
+    }
+
+    /// Return the number of bytes in the `action` field (UTF-8 encoded length).
+    pub fn action_byte_len(&self) -> usize {
+        self.action.len()
+    }
+
+    /// Return `true` if any of `thought`, `action`, or `observation` is empty.
+    ///
+    /// Useful for detecting incomplete or partially-populated steps before
+    /// processing them further.
+    pub fn has_empty_fields(&self) -> bool {
+        self.thought.is_empty() || self.action.is_empty() || self.observation.is_empty()
+    }
 }
 
 /// Configuration for the ReAct agent loop.
@@ -740,6 +765,28 @@ impl AgentConfig {
     /// value without requiring callers to unwrap an `Option<f32>`.
     pub fn effective_temperature(&self) -> f32 {
         self.temperature.unwrap_or(1.0)
+    }
+
+    /// Return `true` if the system prompt starts with the given `prefix`.
+    ///
+    /// Useful for routing or classification logic based on prompt preambles.
+    pub fn system_prompt_starts_with(&self, prefix: &str) -> bool {
+        self.system_prompt.starts_with(prefix)
+    }
+
+    /// Return `true` if `max_iterations` is strictly greater than `n`.
+    ///
+    /// Handy for guard conditions: e.g. `config.max_iterations_above(1)` checks
+    /// that multi-step reasoning is allowed.
+    pub fn max_iterations_above(&self, n: usize) -> bool {
+        self.max_iterations > n
+    }
+
+    /// Return `true` if any configured stop sequence equals `s`.
+    ///
+    /// Returns `false` when no stop sequences have been configured.
+    pub fn stop_sequences_contain(&self, s: &str) -> bool {
+        self.stop_sequences.iter().any(|seq| seq == s)
     }
 }
 
@@ -5209,5 +5256,89 @@ mod tests {
     fn test_effective_temperature_returns_default_when_unset() {
         let cfg = AgentConfig::new(3, "m");
         assert!((cfg.effective_temperature() - 1.0_f32).abs() < 1e-6);
+    }
+
+    // ── Round 62: ReActStep helpers ───────────────────────────────────────────
+
+    #[test]
+    fn test_action_word_count_returns_words_in_action() {
+        let step = ReActStep::new("think", "do this now", "ok");
+        assert_eq!(step.action_word_count(), 3);
+    }
+
+    #[test]
+    fn test_action_word_count_zero_for_empty_action() {
+        let step = ReActStep::new("think", "", "ok");
+        assert_eq!(step.action_word_count(), 0);
+    }
+
+    #[test]
+    fn test_thought_byte_len_matches_string_len() {
+        let step = ReActStep::new("hello", "act", "obs");
+        assert_eq!(step.thought_byte_len(), "hello".len());
+    }
+
+    #[test]
+    fn test_action_byte_len_matches_string_len() {
+        let step = ReActStep::new("think", "do it", "obs");
+        assert_eq!(step.action_byte_len(), "do it".len());
+    }
+
+    #[test]
+    fn test_has_empty_fields_true_when_observation_empty() {
+        let step = ReActStep::new("think", "act", "");
+        assert!(step.has_empty_fields());
+    }
+
+    #[test]
+    fn test_has_empty_fields_false_when_all_populated() {
+        let step = ReActStep::new("think", "act", "obs");
+        assert!(!step.has_empty_fields());
+    }
+
+    // ── Round 62: AgentConfig helpers ─────────────────────────────────────────
+
+    #[test]
+    fn test_system_prompt_starts_with_true_for_matching_prefix() {
+        let cfg = AgentConfig::new(3, "m").with_system_prompt("You are a helpful assistant.");
+        assert!(cfg.system_prompt_starts_with("You are"));
+    }
+
+    #[test]
+    fn test_system_prompt_starts_with_false_for_non_matching_prefix() {
+        let cfg = AgentConfig::new(3, "m").with_system_prompt("Hello world");
+        assert!(!cfg.system_prompt_starts_with("Goodbye"));
+    }
+
+    #[test]
+    fn test_max_iterations_above_true_when_greater() {
+        let cfg = AgentConfig::new(5, "m");
+        assert!(cfg.max_iterations_above(4));
+    }
+
+    #[test]
+    fn test_max_iterations_above_false_when_equal() {
+        let cfg = AgentConfig::new(5, "m");
+        assert!(!cfg.max_iterations_above(5));
+    }
+
+    #[test]
+    fn test_stop_sequences_contain_true_for_present_sequence() {
+        let cfg = AgentConfig::new(3, "m")
+            .with_stop_sequences(vec!["STOP".to_string(), "END".to_string()]);
+        assert!(cfg.stop_sequences_contain("STOP"));
+    }
+
+    #[test]
+    fn test_stop_sequences_contain_false_for_absent_sequence() {
+        let cfg = AgentConfig::new(3, "m")
+            .with_stop_sequences(vec!["STOP".to_string()]);
+        assert!(!cfg.stop_sequences_contain("END"));
+    }
+
+    #[test]
+    fn test_stop_sequences_contain_false_for_empty_config() {
+        let cfg = AgentConfig::new(3, "m");
+        assert!(!cfg.stop_sequences_contain("STOP"));
     }
 }
