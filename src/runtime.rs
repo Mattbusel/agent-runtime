@@ -703,6 +703,22 @@ impl AgentSession {
         self.steps.iter().map(|s| s.thought.len()).sum()
     }
 
+    /// Return the number of steps whose observation string is empty.
+    pub fn steps_with_empty_observations(&self) -> usize {
+        self.steps.iter().filter(|s| s.observation.is_empty()).count()
+    }
+
+    /// Return the byte length of the shortest non-empty thought, or `0` if
+    /// no non-empty thoughts exist.
+    pub fn min_thought_length(&self) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| !s.thought.is_empty())
+            .map(|s| s.thought.len())
+            .min()
+            .unwrap_or(0)
+    }
+
     /// Return the longest observation string in the session, or `None` if
     /// the session is empty.
     pub fn longest_observation(&self) -> Option<&str> {
@@ -3721,5 +3737,42 @@ mod tests {
         ];
         let session = make_session(steps, 0);
         assert_eq!(session.longest_observation(), Some("a much longer observation"));
+    }
+
+    // ── Round 29: steps_with_empty_observations / min_thought_length ──────────
+
+    #[test]
+    fn test_steps_with_empty_observations_zero_when_all_filled() {
+        let steps = vec![make_step("t", "a", "obs"), make_step("t", "b", "obs2")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_with_empty_observations(), 0);
+    }
+
+    #[test]
+    fn test_steps_with_empty_observations_counts_empty_ones() {
+        let steps = vec![
+            make_step("t", "a", ""),    // empty
+            make_step("t", "b", "ok"),
+            make_step("t", "c", ""),    // empty
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_with_empty_observations(), 2);
+    }
+
+    #[test]
+    fn test_min_thought_length_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.min_thought_length(), 0);
+    }
+
+    #[test]
+    fn test_min_thought_length_returns_shortest_non_empty() {
+        let steps = vec![
+            make_step("hi", "a", "r"),        // 2 bytes
+            make_step("hello", "b", "r"),     // 5 bytes
+            make_step("", "c", "r"),          // empty, excluded
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.min_thought_length(), 2);
     }
 }

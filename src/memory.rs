@@ -769,6 +769,17 @@ impl EpisodicStore {
         Ok(inner.items.values().map(|v| v.len()).sum())
     }
 
+    /// Return the `AgentId` of the agent with the most stored episodes, or
+    /// `None` if the store is empty.
+    pub fn agent_with_most_episodes(&self) -> Result<Option<AgentId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::agent_with_most_episodes");
+        Ok(inner
+            .items
+            .iter()
+            .max_by_key(|(_, v)| v.len())
+            .map(|(id, _)| id.clone()))
+    }
+
     /// Return all agent IDs that have at least one stored episode, sorted.
     pub fn agents(&self) -> Result<Vec<AgentId>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "EpisodicStore::agents");
@@ -2096,6 +2107,18 @@ impl SemanticStore {
     }
 
     /// Return the keys of all entries that have no tags.
+    /// Return the key of the entry with the most tags, or `None` if the store
+    /// is empty.
+    pub fn most_tagged_key(&self) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::most_tagged_key");
+        Ok(inner
+            .entries
+            .iter()
+            .max_by_key(|e| e.tags.len())
+            .map(|e| e.key.clone()))
+    }
+
+    /// Return the keys of all entries that have no tags.
     pub fn entries_with_no_tags(&self) -> Result<Vec<String>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::entries_with_no_tags");
         Ok(inner
@@ -2794,6 +2817,12 @@ impl WorkingMemory {
             .values()
             .max_by_key(|v| v.len())
             .map(|v| v.clone()))
+    }
+
+    /// Return a list of `(key, value_byte_length)` pairs for all entries.
+    pub fn value_lengths(&self) -> Result<Vec<(String, usize)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::value_lengths");
+        Ok(inner.map.iter().map(|(k, v)| (k.clone(), v.len())).collect())
     }
 
     /// Return the key whose associated value has the most bytes, or `None` if empty.
@@ -6213,5 +6242,54 @@ mod tests {
         wm.set("short_key", "hi").unwrap();
         wm.set("long_key", "a much longer value string").unwrap();
         assert_eq!(wm.longest_value_key().unwrap(), Some("long_key".to_string()));
+    }
+
+    // ── Round 29: agent_with_most_episodes / most_tagged_key / value_lengths ──
+
+    #[test]
+    fn test_agent_with_most_episodes_none_when_empty() {
+        let store = EpisodicStore::new();
+        assert!(store.agent_with_most_episodes().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_agent_with_most_episodes_returns_agent_with_most() {
+        let store = EpisodicStore::new();
+        let a1 = AgentId::new("a1");
+        let a2 = AgentId::new("a2");
+        store.add_episode(a1.clone(), "e1", 0.5).unwrap();
+        store.add_episode(a2.clone(), "e1", 0.5).unwrap();
+        store.add_episode(a2.clone(), "e2", 0.6).unwrap();
+        assert_eq!(store.agent_with_most_episodes().unwrap(), Some(a2));
+    }
+
+    #[test]
+    fn test_most_tagged_key_none_when_empty() {
+        let store = SemanticStore::new();
+        assert!(store.most_tagged_key().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_most_tagged_key_returns_key_with_most_tags() {
+        let store = SemanticStore::new();
+        store.store("k1", "v1", vec!["a".to_string()]).unwrap();
+        store.store("k2", "v2", vec!["a".to_string(), "b".to_string(), "c".to_string()]).unwrap();
+        store.store("k3", "v3", vec![]).unwrap();
+        assert_eq!(store.most_tagged_key().unwrap(), Some("k2".to_string()));
+    }
+
+    #[test]
+    fn test_value_lengths_empty_when_empty() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(wm.value_lengths().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_value_lengths_returns_all_pairs() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k", "hello").unwrap();
+        let lengths = wm.value_lengths().unwrap();
+        assert_eq!(lengths.len(), 1);
+        assert_eq!(lengths[0], ("k".to_string(), 5));
     }
 }

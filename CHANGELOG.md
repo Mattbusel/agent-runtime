@@ -11,6 +11,27 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.48.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::steps_with_empty_observations`** — count of steps with no observation.
+- **`AgentSession::min_thought_length`** — shortest non-empty thought byte length.
+- **`EpisodicStore::agent_with_most_episodes`** — agent ID with the most stored episodes.
+- **`SemanticStore::most_tagged_key`** — key with the most tags.
+- **`WorkingMemory::value_lengths`** — list of (key, byte-length) pairs.
+- **`MetricsSnapshot::memory_efficiency`** — memory recalls per step.
+- **`LatencyHistogram::is_uniform`** — `true` when all samples are in one bucket.
+- **`RetryPolicy::delay_sum_ms`** — cumulative delay for first N attempts.
+- **`GraphStore::orphan_count`** — entities with no outgoing edges.
+- **`ToolRegistry::description_for`** — description of a named tool.
+
+### Tests
+
+- Full test coverage for all ten Round 29 methods.
+
+---
+
 ## [1.47.0] - 2026-03-20
 
 ### Added

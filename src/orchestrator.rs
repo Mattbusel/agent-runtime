@@ -224,6 +224,16 @@ impl RetryPolicy {
             .sum()
     }
 
+    /// Return the sum of delays for the first `n` attempts, in milliseconds.
+    ///
+    /// If `n > max_attempts`, only `max_attempts` delays are summed.
+    pub fn delay_sum_ms(&self, n: u32) -> u64 {
+        let limit = n.min(self.max_attempts);
+        (1..=limit)
+            .map(|attempt| self.delay_for(attempt).as_millis() as u64)
+            .sum()
+    }
+
     /// Return a copy of this policy with the base delay changed to `ms` milliseconds.
     ///
     /// # Errors
@@ -3196,5 +3206,20 @@ mod tests {
     fn test_retry_policy_is_last_attempt_true_beyond_max() {
         let p = RetryPolicy::exponential(3, 100).unwrap();
         assert!(p.is_last_attempt(4));
+    }
+
+    // ── Round 29: delay_sum_ms ────────────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_delay_sum_ms_constant_two_attempts() {
+        let p = RetryPolicy::constant(5, 100).unwrap();
+        assert_eq!(p.delay_sum_ms(2), 200);
+    }
+
+    #[test]
+    fn test_retry_policy_delay_sum_ms_capped_at_max_attempts() {
+        let p = RetryPolicy::constant(2, 50).unwrap();
+        // n=10 but max_attempts=2 → only 2 delays summed = 100
+        assert_eq!(p.delay_sum_ms(10), 100);
     }
 }

@@ -323,6 +323,18 @@ impl LatencyHistogram {
         self.p99().saturating_sub(self.p50())
     }
 
+    /// Return `true` if all recorded samples fall into exactly one bucket.
+    ///
+    /// An empty histogram is considered uniform.
+    pub fn is_uniform(&self) -> bool {
+        let non_empty = self
+            .buckets
+            .iter()
+            .filter(|b| b.load(std::sync::atomic::Ordering::Relaxed) > 0)
+            .count();
+        non_empty <= 1
+    }
+
     /// Reset all histogram counters to zero.
     ///
     /// Alias for [`reset`] using more conventional naming.
@@ -582,6 +594,16 @@ impl MetricsSnapshot {
             return 0.0;
         }
         self.backpressure_shed_count as f64 / self.total_sessions as f64
+    }
+
+    /// Return the ratio of memory recalls to total steps.
+    ///
+    /// Returns `0.0` when no steps have been taken.
+    pub fn memory_efficiency(&self) -> f64 {
+        if self.total_steps == 0 {
+            return 0.0;
+        }
+        self.memory_recall_count as f64 / self.total_steps as f64
     }
 }
 
@@ -2323,5 +2345,46 @@ mod tests {
             h.record(500);
         }
         assert!(h.percentile_spread() >= 0);
+    }
+
+    // ── Round 29: memory_efficiency / is_uniform ──────────────────────────────
+
+    #[test]
+    fn test_metrics_snapshot_memory_efficiency_zero_when_no_steps() {
+        let snap = MetricsSnapshot::default();
+        assert!((snap.memory_efficiency() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_memory_efficiency_correct_ratio() {
+        let snap = MetricsSnapshot {
+            total_steps: 10,
+            memory_recall_count: 4,
+            ..Default::default()
+        };
+        assert!((snap.memory_efficiency() - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_latency_histogram_is_uniform_true_when_empty() {
+        let h = LatencyHistogram::default();
+        assert!(h.is_uniform());
+    }
+
+    #[test]
+    fn test_latency_histogram_is_uniform_true_for_single_bucket() {
+        let h = LatencyHistogram::default();
+        for _ in 0..50 {
+            h.record(50); // all in same bucket
+        }
+        assert!(h.is_uniform());
+    }
+
+    #[test]
+    fn test_latency_histogram_is_uniform_false_for_mixed_latencies() {
+        let h = LatencyHistogram::default();
+        h.record(1);
+        h.record(1000);
+        assert!(!h.is_uniform());
     }
 }

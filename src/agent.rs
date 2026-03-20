@@ -1160,6 +1160,12 @@ impl ToolRegistry {
         names.sort_unstable();
         names
     }
+
+    /// Return the description of the tool with the given `name`, or `None` if
+    /// no such tool is registered.
+    pub fn description_for(&self, name: &str) -> Option<&str> {
+        self.tools.get(name).map(|s| s.description.as_str())
+    }
 }
 
 // ── ReActLoop ─────────────────────────────────────────────────────────────────
@@ -3551,5 +3557,20 @@ mod tests {
         reg.register(ToolSpec::new("cache_get", "d", |_| serde_json::json!({})));
         let results = reg.tool_names_starting_with("db_");
         assert_eq!(results, vec!["db_read", "db_write"]);
+    }
+
+    // ── Round 29: description_for ─────────────────────────────────────────────
+
+    #[test]
+    fn test_tool_registry_description_for_none_when_missing() {
+        let reg = ToolRegistry::new();
+        assert!(reg.description_for("unknown").is_none());
+    }
+
+    #[test]
+    fn test_tool_registry_description_for_returns_description() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("search", "Find web results", |_| serde_json::json!({})));
+        assert_eq!(reg.description_for("search"), Some("Find web results"));
     }
 }

@@ -335,6 +335,17 @@ impl GraphStore {
         Ok(types.len())
     }
 
+    /// Return the number of entities that have no outgoing relationships.
+    pub fn orphan_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::orphan_count");
+        let count = inner
+            .entities
+            .keys()
+            .filter(|id| inner.adjacency.get(*id).map_or(true, |v| v.is_empty()))
+            .count();
+        Ok(count)
+    }
+
     /// Add a directed relationship between two existing entities.
     ///
     /// Both source and target entities must already exist in the graph.
@@ -4568,5 +4579,31 @@ mod tests {
         g.add_entity(Entity::new("c", "Concept")).unwrap();
         // "Person" and "Concept" → 2 distinct types
         assert_eq!(g.entity_type_count().unwrap(), 2);
+    }
+
+    // ── Round 29: orphan_count ────────────────────────────────────────────────
+
+    #[test]
+    fn test_orphan_count_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.orphan_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_orphan_count_all_orphans_with_no_relationships() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        assert_eq!(g.orphan_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_orphan_count_excludes_entities_with_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "edge", 1.0)).unwrap();
+        // "a" has out-edge → not orphan; "b" has no out-edges → orphan
+        assert_eq!(g.orphan_count().unwrap(), 1);
     }
 }
