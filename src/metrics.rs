@@ -1890,4 +1890,52 @@ mod tests {
         let snap = MetricsSnapshot { checkpoint_errors: 1, ..Default::default() };
         assert!(!snap.is_healthy());
     }
+
+    // ── Round 23: median_ms / steps_per_session / p50_latency_ms ─────────────
+
+    #[test]
+    fn test_latency_histogram_median_ms_equals_p50() {
+        let h = LatencyHistogram::default();
+        for ms in [10, 50, 100, 200, 500] {
+            h.record(ms);
+        }
+        assert_eq!(h.median_ms(), h.p50());
+    }
+
+    #[test]
+    fn test_latency_histogram_median_ms_zero_when_empty() {
+        let h = LatencyHistogram::default();
+        assert_eq!(h.median_ms(), 0);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_steps_per_session_zero_when_no_sessions() {
+        let snap = MetricsSnapshot::default();
+        assert!((snap.steps_per_session() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_steps_per_session_correct_ratio() {
+        let snap = MetricsSnapshot {
+            total_sessions: 4,
+            total_steps: 20,
+            ..Default::default()
+        };
+        assert!((snap.steps_per_session() - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_runtime_metrics_p50_latency_ms_zero_when_no_data() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.p50_latency_ms(), 0);
+    }
+
+    #[test]
+    fn test_runtime_metrics_p50_latency_ms_matches_histogram_p50() {
+        let m = RuntimeMetrics::new();
+        for ms in [10_u64, 50, 100, 200, 500] {
+            m.step_latency.record(ms);
+        }
+        assert_eq!(m.p50_latency_ms(), m.step_latency.p50());
+    }
 }

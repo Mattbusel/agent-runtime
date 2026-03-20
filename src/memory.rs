@@ -5704,4 +5704,68 @@ mod tests {
         let max = store.max_recall_count_for(&agent).unwrap().unwrap();
         assert_eq!(max, 0);
     }
+
+    // ── Round 23: latest_episode / oldest_key / key_count_matching / avg_value_length
+
+    #[test]
+    fn test_latest_episode_none_for_new_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("ghost");
+        assert!(store.latest_episode(&agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_latest_episode_returns_most_recent_by_timestamp() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let old = chrono::Utc::now() - chrono::Duration::hours(1);
+        store.add_episode_at(agent.clone(), "old ep", 0.5, old).unwrap();
+        store.add_episode(agent.clone(), "new ep", 0.8).unwrap();
+        let latest = store.latest_episode(&agent).unwrap().unwrap();
+        assert_eq!(latest.content, "new ep");
+    }
+
+    #[test]
+    fn test_semantic_oldest_key_none_when_empty() {
+        let store = SemanticStore::new();
+        assert!(store.oldest_key().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_semantic_oldest_key_returns_first_inserted() {
+        let store = SemanticStore::new();
+        store.store("first", "value1", vec![]).unwrap();
+        store.store("second", "value2", vec![]).unwrap();
+        assert_eq!(store.oldest_key().unwrap().as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn test_working_memory_key_count_matching_zero_when_empty() {
+        let mem = WorkingMemory::new(10).unwrap();
+        assert_eq!(mem.key_count_matching("foo").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_working_memory_key_count_matching_counts_correctly() {
+        let mem = WorkingMemory::new(10).unwrap();
+        mem.set("foo_bar", "v1").unwrap();
+        mem.set("foo_baz", "v2").unwrap();
+        mem.set("other", "v3").unwrap();
+        assert_eq!(mem.key_count_matching("foo").unwrap(), 2);
+    }
+
+    #[test]
+    fn test_working_memory_avg_value_length_zero_when_empty() {
+        let mem = WorkingMemory::new(10).unwrap();
+        assert!((mem.avg_value_length().unwrap() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_working_memory_avg_value_length_correct_mean() {
+        let mem = WorkingMemory::new(10).unwrap();
+        mem.set("k1", "ab").unwrap();    // 2 bytes
+        mem.set("k2", "abcd").unwrap();  // 4 bytes
+        // mean = 3.0
+        assert!((mem.avg_value_length().unwrap() - 3.0).abs() < 1e-9);
+    }
 }

@@ -933,6 +933,29 @@ impl GraphStore {
         Ok(Some((min, max, mean)))
     }
 
+    /// Return the set of entity IDs that have no inbound **and** no outbound edges.
+    ///
+    /// An isolated node is one that does not appear as a `from` or `to` endpoint
+    /// in any relationship.  Useful for detecting orphaned entities.
+    pub fn isolated_nodes(&self) -> Result<HashSet<EntityId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::isolated_nodes");
+        let mut result = HashSet::new();
+        for id in inner.entities.keys() {
+            let has_outbound = inner
+                .adjacency
+                .get(id)
+                .map_or(false, |v| !v.is_empty());
+            let has_inbound = inner
+                .reverse_adjacency
+                .get(id)
+                .map_or(false, |v| !v.is_empty());
+            if !has_outbound && !has_inbound {
+                result.insert(id.clone());
+            }
+        }
+        Ok(result)
+    }
+
     /// Return the sum of all relationship weights in the graph.
     ///
     /// Returns `0.0` for graphs with no relationships.
@@ -4237,5 +4260,35 @@ mod tests {
         assert!((min - 1.0).abs() < 1e-9);
         assert!((max - 3.0).abs() < 1e-9);
         assert!((mean - 2.0).abs() < 1e-9);
+    }
+
+    // ── Round 23: GraphStore::isolated_nodes ─────────────────────────────────
+
+    #[test]
+    fn test_isolated_nodes_empty_graph_returns_empty_set() {
+        let g = GraphStore::new();
+        assert!(g.isolated_nodes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_isolated_nodes_all_connected_returns_empty() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "e", 1.0)).unwrap();
+        // both a (out) and b (in) have an edge
+        assert!(g.isolated_nodes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_isolated_nodes_returns_orphan_entity() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("orphan", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "e", 1.0)).unwrap();
+        let iso = g.isolated_nodes().unwrap();
+        assert_eq!(iso.len(), 1);
+        assert!(iso.contains(&EntityId::new("orphan")));
     }
 }

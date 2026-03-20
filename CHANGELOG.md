@@ -11,6 +11,40 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.39.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::last_observation`** (`runtime.rs`) — the observation string
+  from the most recent step that has a non-empty observation; `None` when no
+  step has produced one.
+- **`AgentSession::thought_count`** (`runtime.rs`) — number of steps with a
+  non-empty thought string.
+- **`AgentSession::observation_rate`** (`runtime.rs`) — fraction of steps that
+  contain a non-empty observation; `0.0` for empty sessions.
+- **`LatencyHistogram::median_ms`** (`metrics.rs`) — convenience alias for
+  `p50()` that communicates intent more clearly at call sites.
+- **`MetricsSnapshot::steps_per_session`** (`metrics.rs`) — average ReAct
+  steps per session; `0.0` when no sessions have been recorded.
+- **`RuntimeMetrics::p50_latency_ms`** (`metrics.rs`) — shorthand for
+  `step_latency.p50()`; returns `0` when no latencies have been recorded.
+- **`EpisodicStore::latest_episode`** (`memory.rs`) — the most recently
+  inserted episode for an agent (by timestamp); `None` when no episodes exist.
+- **`SemanticStore::oldest_key`** (`memory.rs`) — key of the earliest inserted
+  semantic entry; `None` when the store is empty.
+- **`WorkingMemory::key_count_matching`** (`memory.rs`) — count of keys whose
+  text contains a given case-sensitive substring.
+- **`WorkingMemory::avg_value_length`** (`memory.rs`) — mean byte length of all
+  stored values; `0.0` when the store is empty.
+- **`GraphStore::isolated_nodes`** (`graph.rs`) — set of entity IDs that have
+  no inbound and no outbound edges.
+
+### Tests
+
+- 37 new unit tests covering all eleven methods listed above.
+
+---
+
 ## [1.38.0] - 2026-03-20
 
 ### Added

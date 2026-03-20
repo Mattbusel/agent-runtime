@@ -454,6 +454,39 @@ impl AgentSession {
             .map(|(name, _)| name)
     }
 
+    /// Return the observation string from the most recent step that has one.
+    ///
+    /// Steps with an empty observation are skipped.  Returns `None` when no
+    /// step has produced an observation yet.
+    pub fn last_observation(&self) -> Option<&str> {
+        self.steps
+            .iter()
+            .rev()
+            .find(|s| !s.observation.is_empty())
+            .map(|s| s.observation.as_str())
+    }
+
+    /// Return the number of steps that have a non-empty thought string.
+    pub fn thought_count(&self) -> usize {
+        self.steps.iter().filter(|s| !s.thought.is_empty()).count()
+    }
+
+    /// Return the fraction of steps that contain a non-empty observation.
+    ///
+    /// Returns `0.0` for sessions with no steps.
+    pub fn observation_rate(&self) -> f64 {
+        let n = self.steps.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let with_obs = self
+            .steps
+            .iter()
+            .filter(|s| !s.observation.is_empty())
+            .count();
+        with_obs as f64 / n as f64
+    }
+
     /// Return the rate of knowledge-graph lookups per step.
     ///
     /// Computed as `graph_lookups / step_count`.  Returns `0.0` when there
@@ -3192,5 +3225,69 @@ mod tests {
             .with_working_memory(WorkingMemory::new(10).unwrap())
             .build();
         assert!(runtime.has_working_memory());
+    }
+
+    // ── Round 23: last_observation / thought_count / observation_rate ─────────
+
+    #[test]
+    fn test_last_observation_returns_most_recent_nonempty() {
+        let steps = vec![
+            make_step("t1", "act", "first obs"),
+            make_step("t2", "act", ""),
+            make_step("t3", "act", "last obs"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.last_observation(), Some("last obs"));
+    }
+
+    #[test]
+    fn test_last_observation_skips_empty_steps() {
+        let steps = vec![
+            make_step("t1", "act", "only obs"),
+            make_step("t2", "act", ""),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.last_observation(), Some("only obs"));
+    }
+
+    #[test]
+    fn test_last_observation_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.last_observation().is_none());
+    }
+
+    #[test]
+    fn test_thought_count_counts_nonempty_thoughts() {
+        let steps = vec![
+            make_step("think", "act", "obs"),
+            make_step("", "act", "obs"),
+            make_step("think again", "act", "obs"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.thought_count(), 2);
+    }
+
+    #[test]
+    fn test_thought_count_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.thought_count(), 0);
+    }
+
+    #[test]
+    fn test_observation_rate_correct_fraction() {
+        let steps = vec![
+            make_step("t", "a", "obs"),
+            make_step("t", "a", ""),
+            make_step("t", "a", "obs"),
+            make_step("t", "a", ""),
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.observation_rate() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_observation_rate_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!((session.observation_rate() - 0.0).abs() < 1e-9);
     }
 }
