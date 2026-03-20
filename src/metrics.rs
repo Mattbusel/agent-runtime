@@ -668,6 +668,21 @@ impl MetricsSnapshot {
         self.total_sessions == 0 && self.total_tool_calls == 0 && self.total_steps == 0
     }
 
+    /// Return `true` if the tool failure rate exceeds `threshold`.
+    ///
+    /// `threshold` should be in `[0.0, 1.0]` (e.g. `0.1` for 10%).  Returns
+    /// `false` when no tool calls have been recorded (`failure_rate` is 0.0 in
+    /// that case).
+    ///
+    /// This is a softer signal than [`is_healthy`], which only checks for zero
+    /// failures.  Use `is_degraded` in alerting logic that needs a configurable
+    /// SLO threshold.
+    ///
+    /// [`is_healthy`]: MetricsSnapshot::is_healthy
+    pub fn is_degraded(&self, threshold: f64) -> bool {
+        self.failure_rate() > threshold
+    }
+
     /// Return the average number of tool calls per session.
     ///
     /// Returns `0.0` when no sessions have been recorded.
@@ -844,6 +859,21 @@ impl MetricsSnapshot {
     /// Returns `0` when no tool-call data has been recorded.
     pub fn tool_call_count_above(&self, n: u64) -> usize {
         self.per_tool_calls.values().filter(|&&count| count > n).count()
+    }
+
+    /// Return the top `n` tool names sorted by call count (descending).
+    ///
+    /// Returns fewer than `n` entries if fewer tools have been called.
+    /// Ties are broken alphabetically (ascending) for deterministic output.
+    pub fn top_n_tools_by_calls(&self, n: usize) -> Vec<(&str, u64)> {
+        let mut pairs: Vec<(&str, u64)> = self
+            .per_tool_calls
+            .iter()
+            .map(|(name, &count)| (name.as_str(), count))
+            .collect();
+        pairs.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        pairs.truncate(n);
+        pairs
     }
 
     /// Return the fraction of total tool calls accounted for by `name`.
@@ -1343,6 +1373,18 @@ impl RuntimeMetrics {
             return 0.0;
         }
         self.memory_recall_count.load(Ordering::Relaxed) as f64 / total as f64
+    }
+
+    /// Return the fraction of all ReAct steps that resulted in a tool failure.
+    ///
+    /// Computed as `failed_tool_calls / total_steps`.  Returns `0.0` when
+    /// no steps have been executed.
+    pub fn step_error_rate(&self) -> f64 {
+        let steps = self.total_steps.load(Ordering::Relaxed);
+        if steps == 0 {
+            return 0.0;
+        }
+        self.failed_tool_calls.load(Ordering::Relaxed) as f64 / steps as f64
     }
 
     /// Return the top `n` tools by total call count, sorted descending.
@@ -3326,5 +3368,60 @@ mod tests {
     fn test_tool_call_ratio_returns_zero_when_no_calls_recorded() {
         let snap = MetricsSnapshot::default();
         assert_eq!(snap.tool_call_ratio("any"), 0.0);
+    }
+
+    // ── Round 45: step_error_rate ──────────────────────────────────────────────
+
+    #[test]
+    fn test_step_error_rate_returns_ratio() {
+        use std::sync::atomic::Ordering;
+        let m = RuntimeMetrics::default();
+        m.total_steps.store(10, Ordering::Relaxed);
+        m.failed_tool_calls.store(2, Ordering::Relaxed);
+        assert!((m.step_error_rate() - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_step_error_rate_zero_when_no_steps() {
+        let m = RuntimeMetrics::default();
+        assert_eq!(m.step_error_rate(), 0.0);
+    }
+
+    // ── Round 45: is_degraded ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_degraded_true_when_failure_rate_exceeds_threshold() {
+        let snap = MetricsSnapshot {
+            total_tool_calls: 10,
+            failed_tool_calls: 3,
+            ..Default::default()
+        };
+        assert!(snap.is_degraded(0.2)); // failure_rate = 0.3 > 0.2
+    }
+
+    #[test]
+    fn test_is_degraded_false_when_failure_rate_at_or_below_threshold() {
+        let snap = MetricsSnapshot {
+            total_tool_calls: 10,
+            failed_tool_calls: 2,
+            ..Default::default()
+        };
+        assert!(!snap.is_degraded(0.2)); // failure_rate = 0.2, not strictly greater
+    }
+
+    #[test]
+    fn test_is_degraded_false_for_zero_failures() {
+        let snap = MetricsSnapshot {
+            total_tool_calls: 5,
+            failed_tool_calls: 0,
+            ..Default::default()
+        };
+        assert!(!snap.is_degraded(0.05));
+    }
+
+    #[test]
+    fn test_is_degraded_false_for_empty_snapshot() {
+        let snap = MetricsSnapshot::default();
+        assert!(!snap.is_degraded(0.1));
     }
 }

@@ -1220,6 +1220,15 @@ impl EpisodicStore {
         Ok(ids)
     }
 
+    /// Return the total number of episodes stored across **all** agents.
+    ///
+    /// Equivalent to summing `episode_count_for` over every agent, but in a
+    /// single lock acquisition.
+    pub fn episode_count_all_agents(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episode_count_all_agents");
+        Ok(inner.items.values().map(|v| v.len()).sum())
+    }
+
     /// Return the count of episodes whose importance is strictly greater than `threshold`.
     pub fn high_importance_count(
         &self,
@@ -2200,6 +2209,18 @@ impl EpisodicStore {
             .map_or(0, |items| {
                 items.iter().filter(|m| m.timestamp < before).count()
             }))
+    }
+
+    /// Return the IDs of all episodes stored for `agent_id`.
+    ///
+    /// The order of the returned IDs is unspecified.  Returns an empty `Vec`
+    /// for unknown agents.
+    pub fn episode_ids(&self, agent_id: &AgentId) -> Result<Vec<MemoryId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episode_ids");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or_else(Vec::new, |items| items.iter().map(|m| m.id.clone()).collect()))
     }
 }
 
@@ -3655,6 +3676,25 @@ impl WorkingMemory {
         Ok(best_key.and_then(|k| inner.map.get(k).cloned()))
     }
 
+    /// Return all `(key, value)` pairs whose value byte length is strictly
+    /// greater than `min_value_bytes`.
+    ///
+    /// Returns an empty `Vec` for an empty store or when no values exceed the
+    /// threshold.
+    pub fn key_value_pairs_above_length(
+        &self,
+        min_value_bytes: usize,
+    ) -> Result<Vec<(String, String)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::key_value_pairs_above_length");
+        let pairs: Vec<(String, String)> = inner
+            .map
+            .iter()
+            .filter(|(_, v)| v.len() > min_value_bytes)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        Ok(pairs)
+    }
+
     /// Return the value for `key` if it exists, otherwise insert `default` and
     /// return it.
     ///
@@ -3682,6 +3722,42 @@ impl WorkingMemory {
         inner.map.insert(key.clone(), value.clone());
         inner.order.push_back(key);
         Ok(value)
+    }
+
+    /// Parse the value for `key` as an `i64`, add `step`, and store the result.
+    ///
+    /// If `key` does not exist it is treated as `0` before adding `step`.
+    /// Returns the new value after the increment.
+    ///
+    /// # Errors
+    /// Returns `AgentRuntimeError::Memory` if the existing value cannot be
+    /// parsed as `i64`.
+    pub fn increment(&self, key: impl Into<String>, step: i64) -> Result<i64, AgentRuntimeError> {
+        let key = key.into();
+        let mut inner = recover_lock(self.inner.lock(), "WorkingMemory::increment");
+        let current: i64 = if let Some(v) = inner.map.get(&key) {
+            v.parse::<i64>().map_err(|_| {
+                AgentRuntimeError::Memory(format!(
+                    "WorkingMemory::increment: value for key '{key}' is not a valid integer"
+                ))
+            })?
+        } else {
+            0
+        };
+        let new_val = current.saturating_add(step);
+        let new_str = new_val.to_string();
+        if !inner.map.contains_key(&key) {
+            // Evict oldest if at capacity.
+            let cap = self.capacity;
+            if inner.map.len() >= cap && cap > 0 {
+                if let Some(oldest) = inner.order.pop_front() {
+                    inner.map.remove(&oldest);
+                }
+            }
+            inner.order.push_back(key.clone());
+        }
+        inner.map.insert(key, new_str);
+        Ok(new_val)
     }
 }
 
@@ -7994,5 +8070,76 @@ mod tests {
     fn test_working_memory_key_with_longest_value_returns_none_when_empty() {
         let wm = WorkingMemory::new(10).unwrap();
         assert_eq!(wm.key_with_longest_value().unwrap(), None);
+    }
+
+    // ── Round 45: episode_ids, total_key_bytes ─────────────────────────────────
+
+    #[test]
+    fn test_episodic_store_episode_ids_returns_all_ids() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let id1 = store.add_episode(agent.clone(), "first", 0.5).unwrap();
+        let id2 = store.add_episode(agent.clone(), "second", 0.5).unwrap();
+        let mut ids = store.episode_ids(&agent).unwrap();
+        ids.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+        assert!(ids.contains(&id1));
+        assert!(ids.contains(&id2));
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn test_episodic_store_episode_ids_empty_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        assert!(store.episode_ids(&AgentId::new("nobody")).unwrap().is_empty());
+    }
+
+    // ── Round 45: episode_count_all_agents, increment ─────────────────────────
+
+    #[test]
+    fn test_episode_count_all_agents_sums_across_agents() {
+        let store = EpisodicStore::new();
+        let a = AgentId::new("r45-cnt-a");
+        let b = AgentId::new("r45-cnt-b");
+        store.add_episode(a.clone(), "ep1", 0.5).unwrap();
+        store.add_episode(a.clone(), "ep2", 0.5).unwrap();
+        store.add_episode(b.clone(), "ep3", 0.5).unwrap();
+        assert_eq!(store.episode_count_all_agents().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_episode_count_all_agents_zero_for_empty_store() {
+        let store = EpisodicStore::new();
+        assert_eq!(store.episode_count_all_agents().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_working_memory_increment_inserts_zero_when_absent() {
+        let wm = WorkingMemory::new(100).unwrap();
+        let v = wm.increment("counter-r45", 5).unwrap();
+        assert_eq!(v, 5);
+        assert_eq!(wm.get("counter-r45").unwrap().unwrap(), "5");
+    }
+
+    #[test]
+    fn test_working_memory_increment_adds_to_existing_value() {
+        let wm = WorkingMemory::new(100).unwrap();
+        wm.set("n-r45", "10").unwrap();
+        let v = wm.increment("n-r45", 3).unwrap();
+        assert_eq!(v, 13);
+    }
+
+    #[test]
+    fn test_working_memory_increment_returns_error_for_non_integer_value() {
+        let wm = WorkingMemory::new(100).unwrap();
+        wm.set("bad-r45", "not_a_number").unwrap();
+        assert!(wm.increment("bad-r45", 1).is_err());
+    }
+
+    #[test]
+    fn test_working_memory_increment_negative_step() {
+        let wm = WorkingMemory::new(100).unwrap();
+        wm.set("n2-r45", "10").unwrap();
+        let v = wm.increment("n2-r45", -4).unwrap();
+        assert_eq!(v, 6);
     }
 }

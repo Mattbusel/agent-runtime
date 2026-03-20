@@ -1947,6 +1947,22 @@ impl Pipeline {
         self.stages.iter().filter(|s| s.name.len() > min_len).count()
     }
 
+    /// Return the name of the stage at position `idx`, or `None` if `idx` is
+    /// out of bounds.
+    ///
+    /// Indices are zero-based from the start of the pipeline.
+    pub fn stage_at(&self, idx: usize) -> Option<&str> {
+        self.stages.get(idx).map(|s| s.name.as_str())
+    }
+
+    /// Return stage names in reverse pipeline order.
+    ///
+    /// For a pipeline `[a, b, c]` this returns `["c", "b", "a"]`.
+    /// Returns an empty `Vec` for an empty pipeline.
+    pub fn stages_reversed(&self) -> Vec<&str> {
+        self.stages.iter().rev().map(|s| s.name.as_str()).collect()
+    }
+
     /// Return the position of the stage named `name` counted from the end of
     /// the pipeline (0 = last stage, 1 = second-to-last, …).
     ///
@@ -3984,5 +4000,39 @@ mod tests {
         let p = RetryPolicy::none();
         assert_eq!(p.attempts_budget_used(1), 1.0);
         assert_eq!(p.attempts_budget_used(0), 0.0);
+    }
+
+    // ── Round 45: stage_at, stages_reversed ───────────────────────────────────
+
+    #[test]
+    fn test_stage_at_returns_name_at_index() {
+        let p = Pipeline::new()
+            .add_stage("first", |s: String| Ok(s))
+            .add_stage("second", |s: String| Ok(s))
+            .add_stage("third", |s: String| Ok(s));
+        assert_eq!(p.stage_at(0), Some("first"));
+        assert_eq!(p.stage_at(2), Some("third"));
+        assert_eq!(p.stage_at(3), None);
+    }
+
+    #[test]
+    fn test_stage_at_returns_none_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert_eq!(p.stage_at(0), None);
+    }
+
+    #[test]
+    fn test_stages_reversed_returns_names_in_reverse_order() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("b", |s: String| Ok(s))
+            .add_stage("c", |s: String| Ok(s));
+        assert_eq!(p.stages_reversed(), vec!["c", "b", "a"]);
+    }
+
+    #[test]
+    fn test_stages_reversed_empty_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.stages_reversed().is_empty());
     }
 }

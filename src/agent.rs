@@ -233,6 +233,13 @@ impl ReActStep {
         self.thought.split_whitespace().count()
     }
 
+    /// Return the number of whitespace-delimited words in the observation string.
+    ///
+    /// Returns `0` for empty or whitespace-only observations.
+    pub fn observation_word_count(&self) -> usize {
+        self.observation.split_whitespace().count()
+    }
+
     /// Return a concise single-line summary of this step.
     ///
     /// Format: `"[{kind}] thought={thought_preview} action={action_preview} obs={obs_preview}"`
@@ -1372,6 +1379,18 @@ impl ToolRegistry {
             .unwrap_or(0)
     }
 
+    /// Return the count of tools whose description byte length is strictly
+    /// greater than `min_bytes`.
+    ///
+    /// Returns `0` for an empty registry or when no description exceeds
+    /// `min_bytes`.
+    pub fn tool_count_above_desc_bytes(&self, min_bytes: usize) -> usize {
+        self.tools
+            .values()
+            .filter(|s| s.description.len() > min_bytes)
+            .count()
+    }
+
     /// Return references to all `ToolSpec`s that list `field` in their
     /// `required_fields`.
     ///
@@ -1381,6 +1400,36 @@ impl ToolRegistry {
             .values()
             .filter(|s| s.required_fields.iter().any(|f| f == field))
             .collect()
+    }
+
+    /// Return a reference to the `ToolSpec` with the most required fields.
+    ///
+    /// When multiple tools share the maximum required-field count, the one that
+    /// sorts first alphabetically by name is returned for deterministic output.
+    /// Returns `None` for an empty registry.
+    pub fn tool_with_most_required_fields(&self) -> Option<&ToolSpec> {
+        self.tools.values().max_by(|a, b| {
+            a.required_fields
+                .len()
+                .cmp(&b.required_fields.len())
+                .then_with(|| b.name.cmp(&a.name))
+        })
+    }
+
+    /// Return the names of all tools that have at least one required field,
+    /// sorted alphabetically.
+    ///
+    /// Returns an empty `Vec` when no tools have required fields or the
+    /// registry is empty.
+    pub fn tool_names_with_required_fields(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .tools
+            .values()
+            .filter(|s| !s.required_fields.is_empty())
+            .map(|s| s.name.as_str())
+            .collect();
+        names.sort_unstable();
+        names
     }
 }
 
@@ -4189,5 +4238,73 @@ mod tests {
     fn test_tools_with_required_field_empty_registry_returns_empty() {
         let reg = ToolRegistry::new();
         assert!(reg.tools_with_required_field("any").is_empty());
+    }
+
+    // ── Round 45: observation_word_count, tool_with_most_required_fields ───────
+
+    #[test]
+    fn test_observation_word_count_counts_words() {
+        let step = ReActStep {
+            thought: "t".into(),
+            action: "a".into(),
+            observation: "hello world foo".into(),
+            step_duration_ms: 0,
+        };
+        assert_eq!(step.observation_word_count(), 3);
+    }
+
+    #[test]
+    fn test_observation_word_count_zero_for_empty() {
+        let step = ReActStep {
+            thought: "t".into(),
+            action: "a".into(),
+            observation: "".into(),
+            step_duration_ms: 0,
+        };
+        assert_eq!(step.observation_word_count(), 0);
+    }
+
+    #[test]
+    fn test_tool_with_most_required_fields_returns_correct_tool() {
+        let mut reg = ToolRegistry::new();
+        reg.register(
+            ToolSpec::new("few", "d", |_| serde_json::json!({}))
+                .with_required_fields(vec!["a".to_string()]),
+        );
+        reg.register(
+            ToolSpec::new("many", "d", |_| serde_json::json!({}))
+                .with_required_fields(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
+        );
+        let winner = reg.tool_with_most_required_fields().unwrap();
+        assert_eq!(winner.name, "many");
+    }
+
+    #[test]
+    fn test_tool_with_most_required_fields_returns_none_for_empty_registry() {
+        let reg = ToolRegistry::new();
+        assert!(reg.tool_with_most_required_fields().is_none());
+    }
+
+    // ── Round 45: tool_count_above_desc_bytes ──────────────────────────────────
+
+    #[test]
+    fn test_tool_count_above_desc_bytes_counts_tools_with_long_descriptions() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("short", "hi", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("long", "a much longer description here", |_| serde_json::json!({})));
+        assert_eq!(reg.tool_count_above_desc_bytes(2), 1);
+    }
+
+    #[test]
+    fn test_tool_count_above_desc_bytes_zero_when_none_exceed() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t", "ab", |_| serde_json::json!({})));
+        assert_eq!(reg.tool_count_above_desc_bytes(100), 0);
+    }
+
+    #[test]
+    fn test_tool_count_above_desc_bytes_zero_for_empty_registry() {
+        let reg = ToolRegistry::new();
+        assert_eq!(reg.tool_count_above_desc_bytes(0), 0);
     }
 }

@@ -2876,6 +2876,36 @@ impl GraphStore {
         Ok(parts.join(" \u{2192} "))
     }
 
+    /// Return all relationships whose `kind` equals `kind` (case-sensitive).
+    ///
+    /// Returns an empty `Vec` when no relationships of that kind exist.
+    pub fn relationships_of_kind(&self, kind: &str) -> Result<Vec<Relationship>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::relationships_of_kind");
+        let mut result = Vec::new();
+        for rels in inner.adjacency.values() {
+            for rel in rels {
+                if rel.kind == kind {
+                    result.push(rel.clone());
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Return all entities whose `label` does **not** equal `label`.
+    ///
+    /// Useful for filtering out a specific entity type without loading all
+    /// entities first.  Returns all entities for an empty graph.
+    pub fn entities_without_label(&self, label: &str) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entities_without_label");
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| e.label != label)
+            .cloned()
+            .collect())
+    }
+
     /// Return all entities that have no outgoing edges (out-degree == 0).
     ///
     /// Entities that appear only as relationship targets, or entities with no
@@ -2937,6 +2967,68 @@ impl GraphStore {
             .cloned()
             .collect();
         Ok(rels)
+    }
+
+    /// Return the number of entities whose `label` matches `label` exactly.
+    ///
+    /// Returns `0` when no entities carry that label.
+    pub fn entity_count_with_label(&self, label: &str) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entity_count_with_label");
+        Ok(inner.entities.values().filter(|e| e.label == label).count())
+    }
+
+    /// Return the count of directed edges whose weight is strictly above `threshold`.
+    ///
+    /// Unlike [`relationships_with_weight_above`] this performs a lightweight
+    /// count-only scan without cloning relationship data.
+    ///
+    /// [`relationships_with_weight_above`]: GraphStore::relationships_with_weight_above
+    pub fn edge_count_above_weight(&self, threshold: f32) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::edge_count_above_weight");
+        Ok(inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter())
+            .filter(|r| r.weight > threshold)
+            .count())
+    }
+
+    /// Return all entities whose label starts with `prefix`.
+    ///
+    /// Returns an empty `Vec` when no entities match or the graph is empty.
+    pub fn entities_with_label_prefix(&self, prefix: &str) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entities_with_label_prefix");
+        let entities: Vec<Entity> = inner
+            .entities
+            .values()
+            .filter(|e| e.label.starts_with(prefix))
+            .cloned()
+            .collect();
+        Ok(entities)
+    }
+
+    /// Return entity-ID pairs `(a, b)` where both `a → b` and `b → a` edges exist.
+    ///
+    /// Each bidirectional pair appears exactly once, ordered so that
+    /// `a < b` lexicographically.
+    pub fn bidirectional_pairs(&self) -> Result<Vec<(EntityId, EntityId)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::bidirectional_pairs");
+        let mut pairs: Vec<(EntityId, EntityId)> = Vec::new();
+        for (from, rels) in &inner.adjacency {
+            for rel in rels {
+                let to = &rel.to;
+                if from < to {
+                    if inner
+                        .adjacency
+                        .get(to)
+                        .map_or(false, |v| v.iter().any(|r| &r.to == from))
+                    {
+                        pairs.push((from.clone(), to.clone()));
+                    }
+                }
+            }
+        }
+        Ok(pairs)
     }
 }
 
@@ -5975,5 +6067,92 @@ mod tests {
         add(&g, "b");
         g.add_relationship(Relationship::new("a", "b", "EDGE", 0.3)).unwrap();
         assert!(g.relationships_with_weight_above(1.0).unwrap().is_empty());
+    }
+
+    // ── Round 45: relationships_of_kind, entities_without_label ───────────────
+
+    #[test]
+    fn test_relationships_of_kind_returns_matching_edges() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "KNOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "LIKES", 1.0)).unwrap();
+        let knows = g.relationships_of_kind("KNOWS").unwrap();
+        assert_eq!(knows.len(), 2);
+        assert!(knows.iter().all(|r| r.kind == "KNOWS"));
+    }
+
+    #[test]
+    fn test_relationships_of_kind_returns_empty_for_unknown_kind() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b");
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        assert!(g.relationships_of_kind("MISSING").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_entities_without_label_excludes_matching_entities() {
+        let g = GraphStore::new();
+        let mut e1 = Entity::new("a", "Person");
+        let mut e2 = Entity::new("b", "Company");
+        let mut e3 = Entity::new("c", "Person");
+        e1.label = "Person".into();
+        e2.label = "Company".into();
+        e3.label = "Person".into();
+        g.add_entity(e1).unwrap();
+        g.add_entity(e2).unwrap();
+        g.add_entity(e3).unwrap();
+        let non_persons = g.entities_without_label("Person").unwrap();
+        assert_eq!(non_persons.len(), 1);
+        assert_eq!(non_persons[0].id, EntityId::new("b"));
+    }
+
+    #[test]
+    fn test_entities_without_label_returns_all_when_no_match() {
+        let g = GraphStore::new();
+        add(&g, "x");
+        assert_eq!(g.entities_without_label("NonExistent").unwrap().len(), 1);
+    }
+
+    // ── Round 45: relationships_of_kind, entity_count_with_label ──────────────
+
+    #[test]
+    fn test_relationships_of_kind_returns_matching_relationships() {
+        let g = GraphStore::new();
+        add(&g, "a");
+        add(&g, "b");
+        add(&g, "c");
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "LIKES", 1.0)).unwrap();
+        let knows = g.relationships_of_kind("KNOWS").unwrap();
+        assert_eq!(knows.len(), 1);
+        assert_eq!(knows[0].to, EntityId::new("b"));
+    }
+
+    #[test]
+    fn test_relationships_of_kind_empty_when_none_match() {
+        let g = GraphStore::new();
+        add(&g, "a");
+        add(&g, "b");
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        assert!(g.relationships_of_kind("HATES").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_entity_count_with_label_counts_matching_entities() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Person")).unwrap();
+        g.add_entity(Entity::new("b", "Person")).unwrap();
+        g.add_entity(Entity::new("c", "Organization")).unwrap();
+        assert_eq!(g.entity_count_with_label("Person").unwrap(), 2);
+        assert_eq!(g.entity_count_with_label("Organization").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_entity_count_with_label_zero_for_no_match() {
+        let g = GraphStore::new();
+        add(&g, "a");
+        assert_eq!(g.entity_count_with_label("Alien").unwrap(), 0);
     }
 }

@@ -330,6 +330,37 @@ impl AgentSession {
         &self.steps[start..]
     }
 
+    /// Return a slice containing at most the first `n` steps.
+    ///
+    /// If the session has fewer than `n` steps all steps are returned.
+    /// Returns an empty slice for `n == 0` or an empty session.
+    pub fn first_n_steps(&self, n: usize) -> &[crate::agent::ReActStep] {
+        let end = n.min(self.steps.len());
+        &self.steps[..end]
+    }
+
+    /// Return references to steps whose action string contains `tool_name`.
+    ///
+    /// Useful for auditing which steps invoked a specific tool.  The comparison
+    /// is case-sensitive.
+    pub fn steps_with_tool<'a>(&'a self, tool_name: &str) -> Vec<&'a crate::agent::ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.action.contains(tool_name) && !s.is_final_answer())
+            .collect()
+    }
+
+    /// Return the total character count across all thought, action, and observation
+    /// strings in the session.
+    ///
+    /// Useful for estimating context consumption.  Returns `0` for empty sessions.
+    pub fn total_chars(&self) -> usize {
+        self.steps
+            .iter()
+            .map(|s| s.thought.len() + s.action.len() + s.observation.len())
+            .sum()
+    }
+
     /// Return all per-step durations in milliseconds, in order.
     ///
     /// Useful for computing custom percentiles or detecting slow outlier steps.
@@ -1087,6 +1118,28 @@ impl AgentSession {
         self.steps.len() as f64 / (self.duration_ms as f64 / 1000.0)
     }
 
+    /// Return the mean byte length of action strings across all steps.
+    ///
+    /// Returns `0.0` for sessions with no steps.
+    pub fn avg_action_bytes(&self) -> f64 {
+        if self.steps.is_empty() {
+            return 0.0;
+        }
+        let total: usize = self.steps.iter().map(|s| s.action.len()).sum();
+        total as f64 / self.steps.len() as f64
+    }
+
+    /// Return the mean byte length of observation strings across all steps.
+    ///
+    /// Returns `0.0` for sessions with no steps.
+    pub fn avg_observation_bytes(&self) -> f64 {
+        if self.steps.is_empty() {
+            return 0.0;
+        }
+        let total: usize = self.steps.iter().map(|s| s.observation.len()).sum();
+        total as f64 / self.steps.len() as f64
+    }
+
     /// Return the number of steps that have a non-empty observation string.
     ///
     /// Steps where the tool produced no output (empty string) are excluded.
@@ -1143,6 +1196,34 @@ impl AgentSession {
     /// Useful for detecting steps where the model skipped the reasoning phase.
     pub fn steps_with_empty_thoughts(&self) -> Vec<&ReActStep> {
         self.steps.iter().filter(|s| s.thought.is_empty()).collect()
+    }
+
+    /// Return references to steps whose thought byte length exceeds `threshold_bytes`.
+    ///
+    /// Useful for identifying steps with unusually verbose reasoning traces.
+    pub fn steps_with_long_thoughts(&self, threshold_bytes: usize) -> Vec<&ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.thought.len() > threshold_bytes)
+            .collect()
+    }
+
+    /// Return the number of steps whose action string contains `substring`.
+    ///
+    /// The comparison is case-sensitive.  Returns `0` for empty sessions or
+    /// when no step matches.
+    pub fn action_count_containing(&self, substring: &str) -> usize {
+        self.steps.iter().filter(|s| s.action.contains(substring)).count()
+    }
+
+    /// Return the number of steps that have a non-empty thought string.
+    ///
+    /// Complement of [`steps_with_empty_thoughts`].  Returns `0` for empty
+    /// sessions.
+    ///
+    /// [`steps_with_empty_thoughts`]: AgentSession::steps_with_empty_thoughts
+    pub fn total_thought_count(&self) -> usize {
+        self.steps.iter().filter(|s| !s.thought.is_empty()).count()
     }
 
     /// Persist this session as a checkpoint under `"session:<session_id>"`.
@@ -5004,5 +5085,105 @@ mod tests {
         ];
         let session = make_session(steps, 0);
         assert_eq!(session.final_answer_step_index(), Some(0));
+    }
+
+    // ── Round 45: first_n_steps, steps_with_tool, total_chars ─────────────────
+
+    #[test]
+    fn test_first_n_steps_returns_first_n() {
+        let steps = vec![
+            make_step("t1", "a1", "o1"),
+            make_step("t2", "a2", "o2"),
+            make_step("t3", "a3", "o3"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.first_n_steps(2).len(), 2);
+        assert_eq!(session.first_n_steps(2)[0].thought, "t1");
+    }
+
+    #[test]
+    fn test_first_n_steps_returns_all_when_n_exceeds_count() {
+        let steps = vec![make_step("t", "a", "o")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.first_n_steps(10).len(), 1);
+    }
+
+    #[test]
+    fn test_first_n_steps_empty_for_n_zero() {
+        let steps = vec![make_step("t", "a", "o")];
+        let session = make_session(steps, 0);
+        assert!(session.first_n_steps(0).is_empty());
+    }
+
+    #[test]
+    fn test_steps_with_tool_returns_matching_steps() {
+        let steps = vec![
+            make_step("t", "search(query)", "result"),
+            make_step("t", "write(data)", "ok"),
+            make_step("t", "search(more)", "more"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_with_tool("search").len(), 2);
+        assert_eq!(session.steps_with_tool("write").len(), 1);
+    }
+
+    #[test]
+    fn test_steps_with_tool_excludes_final_answer() {
+        let steps = vec![
+            make_step("t", "FINAL_ANSWER: search done", ""),
+        ];
+        let session = make_session(steps, 0);
+        // Final answer steps are excluded even if they contain the tool name
+        assert!(session.steps_with_tool("search").is_empty());
+    }
+
+    #[test]
+    fn test_total_chars_sums_all_strings() {
+        let steps = vec![
+            make_step("abc", "de", "f"),  // 3 + 2 + 1 = 6
+            make_step("g", "hi", "jkl"), // 1 + 2 + 3 = 6
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_chars(), 12);
+    }
+
+    #[test]
+    fn test_total_chars_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.total_chars(), 0);
+    }
+
+    // ── Round 45: avg_action_bytes, avg_observation_bytes ─────────────────────
+
+    #[test]
+    fn test_avg_action_bytes_computes_mean() {
+        let steps = vec![
+            make_step("t", "ab", "o"),   // 2
+            make_step("t", "abcd", "o"), // 4
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.avg_action_bytes() - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_action_bytes_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.avg_action_bytes(), 0.0);
+    }
+
+    #[test]
+    fn test_avg_observation_bytes_computes_mean() {
+        let steps = vec![
+            make_step("t", "a", "hi"),    // obs = 2
+            make_step("t", "b", "world"), // obs = 5
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.avg_observation_bytes() - 3.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_observation_bytes_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.avg_observation_bytes(), 0.0);
     }
 }
