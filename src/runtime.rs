@@ -1348,7 +1348,7 @@ impl AgentRuntime {
 mod tests {
     use super::*;
     use crate::graph::{Entity, GraphStore, Relationship};
-    use crate::memory::EpisodicStore;
+    use crate::memory::{EpisodicStore, WorkingMemory};
 
     fn simple_config() -> AgentConfig {
         AgentConfig::new(5, "test")
@@ -2968,5 +2968,229 @@ mod tests {
         let session = make_session(steps, 0);
         // 1 failed out of 2 → 1.0 - 0.5 = 0.5
         assert!((session.step_success_rate() - 0.5).abs() < 1e-9);
+    }
+
+    // ── Round 23: collection helpers and rate methods ─────────────────────────
+
+    #[test]
+    fn test_avg_step_duration_ms_zero_for_empty() {
+        let session = make_session(vec![], 0);
+        assert!((session.avg_step_duration_ms() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_step_duration_ms_correct_mean() {
+        let mut s1 = make_step("t", "a", "o");
+        s1.step_duration_ms = 100;
+        let mut s2 = make_step("t", "b", "o");
+        s2.step_duration_ms = 200;
+        let session = make_session(vec![s1, s2], 0);
+        assert!((session.avg_step_duration_ms() - 150.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_longest_step_none_for_empty() {
+        let session = make_session(vec![], 0);
+        assert!(session.longest_step().is_none());
+    }
+
+    #[test]
+    fn test_longest_step_middle_has_max_duration() {
+        let mut s1 = make_step("t", "a", "o");
+        s1.step_duration_ms = 10;
+        let mut s2 = make_step("t", "b", "o");
+        s2.step_duration_ms = 500;
+        let mut s3 = make_step("t", "c", "o");
+        s3.step_duration_ms = 20;
+        let session = make_session(vec![s1, s2, s3], 0);
+        assert_eq!(session.longest_step().unwrap().action, "b");
+    }
+
+    #[test]
+    fn test_unique_tools_used_deduplicates_and_sorts() {
+        let steps = vec![
+            make_step("t", "search", "o"),
+            make_step("t", "lookup", "o"),
+            make_step("t", "search", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.unique_tools_used(), vec!["lookup", "search"]);
+    }
+
+    #[test]
+    fn test_all_thoughts_collects_in_order() {
+        let steps = vec![make_step("think1", "a", "o"), make_step("think2", "b", "o")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.all_thoughts(), vec!["think1", "think2"]);
+    }
+
+    #[test]
+    fn test_all_actions_collects_in_order() {
+        let steps = vec![make_step("t", "act1", "o"), make_step("t", "act2", "o")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.all_actions(), vec!["act1", "act2"]);
+    }
+
+    #[test]
+    fn test_all_observations_collects_in_order() {
+        let steps = vec![make_step("t", "a", "obs1"), make_step("t", "b", "obs2")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.all_observations(), vec!["obs1", "obs2"]);
+    }
+
+    #[test]
+    fn test_action_counts_returns_frequency_map() {
+        let steps = vec![
+            make_step("t", "search", "o"),
+            make_step("t", "lookup", "o"),
+            make_step("t", "search", "o"),
+        ];
+        let session = make_session(steps, 0);
+        let counts = session.action_counts();
+        assert_eq!(counts["search"], 2);
+        assert_eq!(counts["lookup"], 1);
+    }
+
+    #[test]
+    fn test_unique_actions_three_with_repeat_yields_two() {
+        let steps = vec![
+            make_step("t", "beta", "o"),
+            make_step("t", "alpha", "o"),
+            make_step("t", "beta", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.unique_actions(), vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn test_action_diversity_zero_for_empty() {
+        let session = make_session(vec![], 0);
+        assert!((session.action_diversity() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_action_diversity_one_when_all_actions_unique() {
+        let steps = vec![
+            make_step("t", "a", "o"),
+            make_step("t", "b", "o"),
+            make_step("t", "c", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.action_diversity() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_action_diversity_fraction_when_repeated() {
+        let steps = vec![
+            make_step("t", "x", "o"),
+            make_step("t", "x", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.action_diversity() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_has_checkpoint_errors_false_for_new_session() {
+        let session = make_session(vec![], 0);
+        assert!(!session.has_checkpoint_errors());
+    }
+
+    #[test]
+    fn test_has_checkpoint_errors_true_when_errors_present() {
+        let mut session = make_session(vec![], 0);
+        session.checkpoint_errors.push("err1".to_string());
+        assert!(session.has_checkpoint_errors());
+    }
+
+    #[test]
+    fn test_graph_lookup_count_returns_raw_value() {
+        let mut session = make_session(vec![make_step("t", "a", "o")], 0);
+        session.graph_lookups = 7;
+        assert_eq!(session.graph_lookup_count(), 7);
+    }
+
+    #[test]
+    fn test_memory_hit_rate_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!((session.memory_hit_rate() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_memory_hit_rate_correct_ratio() {
+        let steps = vec![
+            make_step("t", "a", "o"),
+            make_step("t", "b", "o"),
+            make_step("t", "c", "o"),
+            make_step("t", "d", "o"),
+        ];
+        let mut session = make_session(steps, 0);
+        session.memory_hits = 2;
+        assert!((session.memory_hit_rate() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_total_memory_hits_returns_raw_value() {
+        let mut session = make_session(vec![], 0);
+        session.memory_hits = 13;
+        assert_eq!(session.total_memory_hits(), 13);
+    }
+
+    // ── Round 29: has_memory, has_graph, has_working_memory ──────────────────
+
+    #[cfg(feature = "memory")]
+    #[test]
+    fn test_has_memory_false_without_memory() {
+        let runtime = AgentRuntime::builder()
+            .with_agent_config(simple_config())
+            .build();
+        assert!(!runtime.has_memory());
+    }
+
+    #[cfg(feature = "memory")]
+    #[test]
+    fn test_has_memory_true_with_memory() {
+        let runtime = AgentRuntime::builder()
+            .with_agent_config(simple_config())
+            .with_memory(EpisodicStore::new())
+            .build();
+        assert!(runtime.has_memory());
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn test_has_graph_false_without_graph() {
+        let runtime = AgentRuntime::builder()
+            .with_agent_config(simple_config())
+            .build();
+        assert!(!runtime.has_graph());
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn test_has_graph_true_with_graph() {
+        let runtime = AgentRuntime::builder()
+            .with_agent_config(simple_config())
+            .with_graph(GraphStore::new())
+            .build();
+        assert!(runtime.has_graph());
+    }
+
+    #[cfg(feature = "memory")]
+    #[test]
+    fn test_has_working_memory_false_without_working_memory() {
+        let runtime = AgentRuntime::builder()
+            .with_agent_config(simple_config())
+            .build();
+        assert!(!runtime.has_working_memory());
+    }
+
+    #[cfg(feature = "memory")]
+    #[test]
+    fn test_has_working_memory_true_with_working_memory() {
+        let runtime = AgentRuntime::builder()
+            .with_agent_config(simple_config())
+            .with_working_memory(WorkingMemory::new(10).unwrap())
+            .build();
+        assert!(runtime.has_working_memory());
     }
 }

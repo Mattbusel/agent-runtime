@@ -3216,4 +3216,79 @@ mod tests {
         let cfg = AgentConfig::new(5, "claude-3");
         assert_eq!(cfg.model(), "claude-3");
     }
+
+    // ── Round 23: Message::is_system, word_count; AgentConfig flags ───────────
+
+    #[test]
+    fn test_message_is_system_true_for_system_role() {
+        let m = Message::system("context");
+        assert!(m.is_system());
+    }
+
+    #[test]
+    fn test_message_is_system_false_for_user_role() {
+        let m = Message::user("hello");
+        assert!(!m.is_system());
+    }
+
+    #[test]
+    fn test_message_word_count_counts_whitespace_words() {
+        let m = Message::user("hello world foo");
+        assert_eq!(m.word_count(), 3);
+    }
+
+    #[test]
+    fn test_message_word_count_zero_for_empty_content() {
+        let m = Message::user("");
+        assert_eq!(m.word_count(), 0);
+    }
+
+    #[test]
+    fn test_agent_config_has_loop_timeout_false_by_default() {
+        let cfg = AgentConfig::new(5, "m");
+        assert!(!cfg.has_loop_timeout());
+    }
+
+    #[test]
+    fn test_agent_config_has_loop_timeout_true_after_setting() {
+        let cfg = AgentConfig::new(5, "m")
+            .with_loop_timeout(std::time::Duration::from_secs(30));
+        assert!(cfg.has_loop_timeout());
+    }
+
+    #[test]
+    fn test_agent_config_has_stop_sequences_false_by_default() {
+        let cfg = AgentConfig::new(5, "m");
+        assert!(!cfg.has_stop_sequences());
+    }
+
+    #[test]
+    fn test_agent_config_has_stop_sequences_true_after_adding() {
+        let cfg = AgentConfig::new(5, "m").with_stop_sequences(vec!["STOP".to_string()]);
+        assert!(cfg.has_stop_sequences());
+    }
+
+    #[test]
+    fn test_agent_config_is_single_shot_true_when_max_iterations_one() {
+        let cfg = AgentConfig::new(1, "m");
+        assert!(cfg.is_single_shot());
+    }
+
+    #[test]
+    fn test_agent_config_is_single_shot_false_when_max_iterations_gt_one() {
+        let cfg = AgentConfig::new(5, "m");
+        assert!(!cfg.is_single_shot());
+    }
+
+    #[test]
+    fn test_agent_config_has_temperature_false_by_default() {
+        let cfg = AgentConfig::new(5, "m");
+        assert!(!cfg.has_temperature());
+    }
+
+    #[test]
+    fn test_agent_config_has_temperature_true_after_setting() {
+        let cfg = AgentConfig::new(5, "m").with_temperature(0.7);
+        assert!(cfg.has_temperature());
+    }
 }
