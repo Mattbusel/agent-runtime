@@ -11,6 +11,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.55.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::action_lengths`** — byte lengths of each step's action string, in order.
+- **`AgentSession::step_success_count`** — count of steps without a tool failure observation.
+- **`EpisodicStore::max_content_length`** — byte length of the longest episode content for an agent.
+- **`EpisodicStore::min_content_length`** — byte length of the shortest episode content for an agent.
+- **`SemanticStore::total_value_bytes`** — sum of byte lengths of all stored values.
+- **`MetricsSnapshot::most_called_tool`** — name of the tool with the most recorded calls.
+- **`MetricsSnapshot::tool_names_with_failures`** — sorted list of tool names with at least one failure.
+- **`GraphStore::relationship_kind_count`** — number of distinct relationship kind strings in the graph.
+- **`GraphStore::entities_with_self_loops`** — sorted list of `EntityId`s that have self-loop relationships.
+- **`ToolRegistry::avg_description_length`** — mean byte length of all registered tool descriptions.
+
+---
+
 ## [1.54.0] - 2026-03-20
 
 ### Added

@@ -1187,6 +1187,33 @@ impl GraphStore {
         Ok(kinds)
     }
 
+    /// Return the number of distinct relationship kind strings present in the graph.
+    pub fn relationship_kind_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::relationship_kind_count");
+        let count = inner
+            .relationships
+            .iter()
+            .map(|r| r.kind.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        Ok(count)
+    }
+
+    /// Return the `EntityId`s of entities that have at least one self-loop relationship.
+    ///
+    /// A self-loop is a relationship where `from == to`.
+    pub fn entities_with_self_loops(&self) -> Result<Vec<EntityId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entities_with_self_loops");
+        let mut ids: Vec<EntityId> = inner
+            .adjacency
+            .iter()
+            .filter(|(from, rels)| rels.iter().any(|r| &r.to == *from))
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
     /// Update the label of an existing entity in-place.
     ///
     /// Returns `Ok(true)` if the entity was found and updated, `Ok(false)` if not found.
@@ -4796,5 +4823,45 @@ mod tests {
         g.add_entity(Entity::new("b", "Node")).unwrap();
         g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
         assert_eq!(g.bidirectional_count().unwrap(), 0);
+    }
+
+    // ── Round 36 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_relationship_kind_count_counts_distinct_kinds() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "friend", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "friend", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "enemy", 1.0)).unwrap();
+        assert_eq!(g.relationship_kind_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_relationship_kind_count_zero_when_empty() {
+        let g = GraphStore::new();
+        assert_eq!(g.relationship_kind_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_entities_with_self_loops_returns_self_loop_ids() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "a", "self", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        let ids = g.entities_with_self_loops().unwrap();
+        assert_eq!(ids, vec![EntityId::new("a")]);
+    }
+
+    #[test]
+    fn test_entities_with_self_loops_empty_when_no_self_loops() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        assert!(g.entities_with_self_loops().unwrap().is_empty());
     }
 }

@@ -792,6 +792,16 @@ impl AgentSession {
         counts.into_iter().max_by_key(|(_, c)| *c).map(|(a, _)| a)
     }
 
+    /// Return the byte length of each step's action string, in step order.
+    pub fn action_lengths(&self) -> Vec<usize> {
+        self.steps.iter().map(|s| s.action.len()).collect()
+    }
+
+    /// Return the count of steps that did not have a tool failure.
+    pub fn step_success_count(&self) -> usize {
+        self.steps.len() - self.failed_tool_call_count()
+    }
+
     /// Return the count of steps that have a non-empty thought string.
     pub fn count_nonempty_thoughts(&self) -> usize {
         self.steps.iter().filter(|s| !s.thought.is_empty()).count()
@@ -4020,5 +4030,42 @@ mod tests {
         let session = make_session(steps, 0);
         assert_eq!(session.observation_contains_count("result"), 2);
         assert_eq!(session.observation_contains_count("success"), 1);
+    }
+
+    // ── Round 36 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_action_lengths_returns_byte_lengths_in_order() {
+        let steps = vec![
+            make_step("t", "ab", "o"),
+            make_step("t", "hello", "o"),
+            make_step("t", "", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.action_lengths(), vec![2, 5, 0]);
+    }
+
+    #[test]
+    fn test_action_lengths_empty_session_returns_empty_vec() {
+        let session = make_session(vec![], 0);
+        assert!(session.action_lengths().is_empty());
+    }
+
+    #[test]
+    fn test_step_success_count_excludes_failed_steps() {
+        let steps = vec![
+            make_step("t", "a", "ok"),
+            make_step("t", "b", "{\"error\": \"timeout\"}"),
+            make_step("t", "c", "ok"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.step_success_count(), 2);
+    }
+
+    #[test]
+    fn test_step_success_count_all_success_when_no_failures() {
+        let steps = vec![make_step("t", "a", "ok"), make_step("t", "b", "ok")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.step_success_count(), 2);
     }
 }

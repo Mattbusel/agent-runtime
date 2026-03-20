@@ -696,6 +696,28 @@ impl MetricsSnapshot {
         }
         self.failed_tool_calls as f64 / self.total_sessions as f64
     }
+
+    /// Return the name of the tool with the most recorded calls.
+    ///
+    /// Returns `None` if no tool calls have been recorded.
+    pub fn most_called_tool(&self) -> Option<String> {
+        self.per_tool_calls
+            .iter()
+            .max_by_key(|(_, &v)| v)
+            .map(|(k, _)| k.clone())
+    }
+
+    /// Return a sorted list of tool names that have at least one recorded failure.
+    pub fn tool_names_with_failures(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .per_tool_failures
+            .iter()
+            .filter(|(_, &v)| v > 0)
+            .map(|(k, _)| k.clone())
+            .collect();
+        names.sort_unstable();
+        names
+    }
 }
 
 impl std::fmt::Display for MetricsSnapshot {
@@ -2660,5 +2682,48 @@ mod tests {
     fn test_latency_histogram_is_skewed_false_when_empty() {
         let h = LatencyHistogram::default();
         assert!(!h.is_skewed());
+    }
+
+    // ── Round 36 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_most_called_tool_returns_tool_with_most_calls() {
+        let snap = MetricsSnapshot {
+            per_tool_calls: [
+                ("search".to_string(), 5u64),
+                ("write".to_string(), 2u64),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        assert_eq!(snap.most_called_tool(), Some("search".to_string()));
+    }
+
+    #[test]
+    fn test_most_called_tool_returns_none_when_empty() {
+        let snap = MetricsSnapshot::default();
+        assert!(snap.most_called_tool().is_none());
+    }
+
+    #[test]
+    fn test_tool_names_with_failures_returns_sorted_names_with_failures() {
+        let snap = MetricsSnapshot {
+            per_tool_failures: [
+                ("search".to_string(), 3u64),
+                ("write".to_string(), 0u64),
+                ("calc".to_string(), 1u64),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        assert_eq!(snap.tool_names_with_failures(), vec!["calc", "search"]);
+    }
+
+    #[test]
+    fn test_tool_names_with_failures_empty_when_no_failures() {
+        let snap = MetricsSnapshot::default();
+        assert!(snap.tool_names_with_failures().is_empty());
     }
 }

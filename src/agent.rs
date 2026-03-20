@@ -1221,6 +1221,17 @@ impl ToolRegistry {
             .map(|s| s.name.as_str())
             .collect()
     }
+
+    /// Return the mean byte length of all tool descriptions.
+    ///
+    /// Returns `0.0` if the registry is empty.
+    pub fn avg_description_length(&self) -> f64 {
+        if self.tools.is_empty() {
+            return 0.0;
+        }
+        let total: usize = self.tools.values().map(|s| s.description.len()).sum();
+        total as f64 / self.tools.len() as f64
+    }
 }
 
 // ── ReActLoop ─────────────────────────────────────────────────────────────────
@@ -3718,5 +3729,22 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.register(ToolSpec::new("t", "tool", |_| serde_json::json!({})));
         assert!(reg.names_containing("missing").is_empty());
+    }
+
+    // ── Round 36 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_avg_description_length_returns_mean_byte_length() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("a", "ab", |_| serde_json::json!({})));    // 2 bytes
+        reg.register(ToolSpec::new("b", "abcd", |_| serde_json::json!({}))); // 4 bytes
+        let avg = reg.avg_description_length();
+        assert!((avg - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_description_length_returns_zero_when_empty() {
+        let reg = ToolRegistry::new();
+        assert_eq!(reg.avg_description_length(), 0.0);
     }
 }
