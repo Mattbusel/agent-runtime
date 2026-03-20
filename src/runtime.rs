@@ -698,6 +698,25 @@ impl AgentSession {
         unique.len() as f64 / total as f64
     }
 
+    /// Return the fraction of steps that had a tool failure observation.
+    ///
+    /// Computed as `failed_tool_call_count / step_count`.  Returns `0.0` for
+    /// empty sessions.
+    pub fn failure_rate(&self) -> f64 {
+        let total = self.steps.len();
+        if total == 0 {
+            return 0.0;
+        }
+        self.failed_tool_call_count() as f64 / total as f64
+    }
+
+    /// Return the number of distinct action names used across all steps.
+    pub fn unique_action_count(&self) -> usize {
+        let unique: std::collections::HashSet<&str> =
+            self.steps.iter().map(|s| s.action.as_str()).collect();
+        unique.len()
+    }
+
     /// Persist this session as a checkpoint under `"session:<session_id>"`.
     #[cfg(feature = "persistence")]
     pub async fn save_checkpoint(
@@ -3619,5 +3638,40 @@ mod tests {
         ];
         let session = make_session(steps, 0);
         assert_eq!(session.consecutive_same_action_at_end(), 2);
+    }
+
+    // ── Round 27: failure_rate / unique_action_count ───────────────────────────
+
+    #[test]
+    fn test_failure_rate_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!((session.failure_rate() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_failure_rate_zero_when_no_failures() {
+        let steps = vec![
+            make_step("t", "lookup", "ok"),
+            make_step("t", "search", "ok"),
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.failure_rate() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_unique_action_count_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.unique_action_count(), 0);
+    }
+
+    #[test]
+    fn test_unique_action_count_counts_distinct_actions() {
+        let steps = vec![
+            make_step("t", "search", "r"),
+            make_step("t", "lookup", "r"),
+            make_step("t", "search", "r"), // duplicate
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.unique_action_count(), 2);
     }
 }

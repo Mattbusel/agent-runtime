@@ -11,6 +11,27 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.46.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::failure_rate`** — fraction of steps with tool-call failures.
+- **`AgentSession::unique_action_count`** — number of distinct action names used
+  across all steps.
+- **`EpisodicStore::total_episode_count`** — total episodes across all agents.
+- **`MetricsSnapshot::tool_call_rate`** — average tool calls per session.
+- **`LatencyHistogram::sample_count`** — total samples recorded.
+- **`RetryPolicy::max_total_delay_ms`** — sum of per-attempt delays across all
+  `max_attempts`.
+- **`GraphStore::has_any_entities`** — `true` when the graph is non-empty.
+- **`ToolRegistry::names`** — sorted list of all registered tool names.
+
+### Tests
+
+- Full test coverage for all eight Round 27 methods.
+
+---
+
 ## [1.45.0] - 2026-03-20
 
 ### Tests

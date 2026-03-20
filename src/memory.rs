@@ -750,6 +750,12 @@ impl EpisodicStore {
         Ok(inner.items.get(agent_id).map_or(false, |v| !v.is_empty()))
     }
 
+    /// Return the total number of episodes stored across all agents.
+    pub fn total_episode_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::total_episode_count");
+        Ok(inner.items.values().map(|v| v.len()).sum())
+    }
+
     /// Return all agent IDs that have at least one stored episode, sorted.
     pub fn agents(&self) -> Result<Vec<AgentId>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "EpisodicStore::agents");
@@ -6101,5 +6107,24 @@ mod tests {
         wm.set("k3", "hi").unwrap();             // 2 bytes
         // min_bytes=5: values strictly > 5 bytes: "a longer value" (13)
         assert_eq!(wm.count_above_value_length(5).unwrap(), 1);
+    }
+
+    // ── Round 27: total_episode_count ─────────────────────────────────────────
+
+    #[test]
+    fn test_total_episode_count_zero_when_empty() {
+        let store = EpisodicStore::new();
+        assert_eq!(store.total_episode_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_total_episode_count_sums_across_agents() {
+        let store = EpisodicStore::new();
+        let a1 = AgentId::new("a1");
+        let a2 = AgentId::new("a2");
+        store.add_episode(a1.clone(), "e1", 0.5).unwrap();
+        store.add_episode(a1.clone(), "e2", 0.6).unwrap();
+        store.add_episode(a2.clone(), "e3", 0.7).unwrap();
+        assert_eq!(store.total_episode_count().unwrap(), 3);
     }
 }

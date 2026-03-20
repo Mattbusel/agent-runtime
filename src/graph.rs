@@ -321,6 +321,12 @@ impl GraphStore {
         Ok(inner.entities.contains_key(id))
     }
 
+    /// Return `true` if the graph contains at least one entity.
+    pub fn has_any_entities(&self) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::has_any_entities");
+        Ok(!inner.entities.is_empty())
+    }
+
     /// Add a directed relationship between two existing entities.
     ///
     /// Both source and target entities must already exist in the graph.
@@ -4521,5 +4527,20 @@ mod tests {
             .update_entity_property(&EntityId::new("ghost"), "key", serde_json::json!(1))
             .unwrap();
         assert!(!updated);
+    }
+
+    // ── Round 27: has_any_entities ────────────────────────────────────────────
+
+    #[test]
+    fn test_graph_store_has_any_entities_false_when_empty() {
+        let g = GraphStore::new();
+        assert!(!g.has_any_entities().unwrap());
+    }
+
+    #[test]
+    fn test_graph_store_has_any_entities_true_after_add() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("x", "Node")).unwrap();
+        assert!(g.has_any_entities().unwrap());
     }
 }

@@ -206,6 +206,17 @@ impl RetryPolicy {
         self.base_delay_ms()
     }
 
+    /// Return the sum of all per-attempt delays across all attempts, in milliseconds.
+    ///
+    /// For exponential policies each attempt's delay is capped at
+    /// [`MAX_RETRY_DELAY`].  For constant policies every attempt uses
+    /// `base_delay_ms`.
+    pub fn max_total_delay_ms(&self) -> u64 {
+        (1..=self.max_attempts)
+            .map(|attempt| self.delay_for(attempt).as_millis() as u64)
+            .sum()
+    }
+
     /// Return a copy of this policy with the base delay changed to `ms` milliseconds.
     ///
     /// # Errors
@@ -3143,5 +3154,20 @@ mod tests {
         d.fail("retry-key").unwrap();
         let result = d.check_and_register("retry-key").unwrap();
         assert_eq!(result, DeduplicationResult::New);
+    }
+
+    // ── Round 27: max_total_delay_ms ──────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_max_total_delay_ms_constant_policy() {
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        // 3 attempts × 100ms each = 300ms
+        assert_eq!(p.max_total_delay_ms(), 300);
+    }
+
+    #[test]
+    fn test_retry_policy_max_total_delay_ms_single_attempt() {
+        let p = RetryPolicy::constant(1, 50).unwrap();
+        assert_eq!(p.max_total_delay_ms(), 50);
     }
 }

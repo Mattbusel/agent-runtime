@@ -1140,6 +1140,13 @@ impl ToolRegistry {
     pub fn tool_count_with_required_fields(&self) -> usize {
         self.tools.values().filter(|s| s.has_required_fields()).count()
     }
+
+    /// Return the names of all registered tools, sorted alphabetically.
+    pub fn names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.tools.keys().map(|k| k.as_str()).collect();
+        names.sort_unstable();
+        names
+    }
 }
 
 // ── ReActLoop ─────────────────────────────────────────────────────────────────
@@ -3495,5 +3502,22 @@ mod tests {
                 .with_required_fields(["url", "method"]),
         );
         assert_eq!(reg.tool_count_with_required_fields(), 2);
+    }
+
+    // ── Round 27: ToolRegistry::names ─────────────────────────────────────────
+
+    #[test]
+    fn test_tool_registry_names_empty_when_no_tools() {
+        let reg = ToolRegistry::new();
+        assert!(reg.names().is_empty());
+    }
+
+    #[test]
+    fn test_tool_registry_names_sorted_alphabetically() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("zebra", "d", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("alpha", "d", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("mango", "d", |_| serde_json::json!({})));
+        assert_eq!(reg.names(), vec!["alpha", "mango", "zebra"]);
     }
 }

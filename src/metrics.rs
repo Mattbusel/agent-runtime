@@ -309,6 +309,11 @@ impl LatencyHistogram {
         self.std_dev_ms() / mean
     }
 
+    /// Return the total number of samples recorded in this histogram.
+    pub fn sample_count(&self) -> u64 {
+        self.total_count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Reset all histogram counters to zero.
     ///
     /// Alias for [`reset`] using more conventional naming.
@@ -548,6 +553,16 @@ impl MetricsSnapshot {
         self.failed_tool_calls == 0
             && self.backpressure_shed_count == 0
             && self.checkpoint_errors == 0
+    }
+
+    /// Return the average number of tool calls per session.
+    ///
+    /// Returns `0.0` when no sessions have been recorded.
+    pub fn tool_call_rate(&self) -> f64 {
+        if self.total_sessions == 0 {
+            return 0.0;
+        }
+        self.total_tool_calls as f64 / self.total_sessions as f64
     }
 }
 
@@ -2220,5 +2235,38 @@ mod tests {
         }
         // p99 will be ~50ms; 10_000ms should be well above it
         assert!(h.is_above_p99(10_000));
+    }
+
+    // ── Round 27: sample_count / tool_call_rate ───────────────────────────────
+
+    #[test]
+    fn test_latency_histogram_sample_count_zero_when_empty() {
+        let h = LatencyHistogram::default();
+        assert_eq!(h.sample_count(), 0);
+    }
+
+    #[test]
+    fn test_latency_histogram_sample_count_matches_records() {
+        let h = LatencyHistogram::default();
+        for _ in 0..7 {
+            h.record(100);
+        }
+        assert_eq!(h.sample_count(), 7);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_tool_call_rate_zero_when_no_sessions() {
+        let snap = MetricsSnapshot::default();
+        assert!((snap.tool_call_rate() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_tool_call_rate_correct_ratio() {
+        let snap = MetricsSnapshot {
+            total_sessions: 4,
+            total_tool_calls: 20,
+            ..Default::default()
+        };
+        assert!((snap.tool_call_rate() - 5.0).abs() < 1e-9);
     }
 }
