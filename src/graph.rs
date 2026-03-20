@@ -3309,6 +3309,43 @@ impl GraphStore {
             .sum())
     }
 
+    /// Return the average weight of all edges with the given relationship `kind`.
+    ///
+    /// Returns `0.0` when no edges of that kind exist.
+    pub fn avg_weight_for_kind(&self, kind: &str) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::avg_weight_for_kind");
+        let weights: Vec<f64> = inner
+            .adjacency
+            .values()
+            .flat_map(|rels| {
+                rels.iter()
+                    .filter(|r| r.kind.as_str() == kind)
+                    .map(|r| r.weight as f64)
+            })
+            .collect();
+        if weights.is_empty() {
+            return Ok(0.0);
+        }
+        Ok(weights.iter().sum::<f64>() / weights.len() as f64)
+    }
+
+    /// Return the ratio of out-degree to total entity count for `entity_id`.
+    ///
+    /// Returns `0.0` when the graph is empty or the entity has no outgoing
+    /// edges.
+    pub fn entity_degree_ratio(&self, entity_id: &EntityId) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entity_degree_ratio");
+        let total = inner.entities.len();
+        if total == 0 {
+            return Ok(0.0);
+        }
+        let out_deg = inner
+            .adjacency
+            .get(entity_id)
+            .map_or(0, |rels| rels.len());
+        Ok(out_deg as f64 / total as f64)
+    }
+
     /// Return all entities whose out-degree is at least `min_degree`.
     ///
     /// Entities with no outgoing edges have an out-degree of 0 and are
@@ -3610,6 +3647,39 @@ impl GraphStore {
             .filter(|e| e.label == label && e.properties.contains_key(key))
             .cloned()
             .collect())
+    }
+
+    /// Return `true` if the entity identified by `id` has at least one
+    /// outgoing edge in the adjacency list.
+    ///
+    /// Returns `false` for unknown entity IDs as well as for nodes with no
+    /// outgoing relationships.
+    pub fn entity_has_outgoing_edge(
+        &self,
+        id: &EntityId,
+    ) -> Result<bool, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "GraphStore::entity_has_outgoing_edge");
+        Ok(inner
+            .adjacency
+            .get(id)
+            .map_or(false, |rels| !rels.is_empty()))
+    }
+
+    /// Return the number of distinct nodes that have at least one self-loop
+    /// (i.e. an edge from a node to itself).
+    ///
+    /// Complements [`GraphStore::self_loops`] which returns the full list of
+    /// self-loop relationships.
+    pub fn count_nodes_with_self_loop(&self) -> Result<usize, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "GraphStore::count_nodes_with_self_loop");
+        let count = inner
+            .adjacency
+            .iter()
+            .filter(|(from, rels)| rels.iter().any(|r| &r.to == *from))
+            .count();
+        Ok(count)
     }
 }
 
@@ -7524,5 +7594,48 @@ mod tests {
     fn test_total_relationship_weight_zero_for_no_edges() {
         let g = GraphStore::new();
         assert_eq!(g.total_relationship_weight().unwrap(), 0.0);
+    }
+
+    // ── Round 57: avg_weight_for_kind, entity_degree_ratio ────────────────────
+
+    #[test]
+    fn test_avg_weight_for_kind_returns_mean() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "KNOWS", 3.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "LIKES", 5.0)).unwrap();
+        assert_eq!(g.avg_weight_for_kind("KNOWS").unwrap(), 2.0);
+    }
+
+    #[test]
+    fn test_avg_weight_for_kind_zero_for_absent_kind() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        assert_eq!(g.avg_weight_for_kind("MISSING").unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_entity_degree_ratio_returns_fraction_of_total() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_entity(Entity::new("d", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "k", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "k", 1.0)).unwrap();
+        let a_id = EntityId("a".to_string());
+        assert_eq!(g.entity_degree_ratio(&a_id).unwrap(), 0.5);
+    }
+
+    #[test]
+    fn test_entity_degree_ratio_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        let id = EntityId("x".to_string());
+        assert_eq!(g.entity_degree_ratio(&id).unwrap(), 0.0);
     }
 }

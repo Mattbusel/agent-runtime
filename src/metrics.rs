@@ -4269,4 +4269,24 @@ mod tests {
         let m = RuntimeMetrics::new();
         assert_eq!(m.backpressure_ratio(), 0.0);
     }
+
+    // ── Round 57: tool_with_highest_failure_rate ───────────────────────────────
+
+    #[test]
+    fn test_tool_with_highest_failure_rate_returns_most_failing_tool() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("a");
+        m.record_tool_failure("a");
+        m.record_tool_call("b");
+        m.record_tool_call("b");
+        m.record_tool_failure("b");
+        // a: 1/1 = 1.0, b: 1/2 = 0.5 → highest is "a"
+        assert_eq!(m.tool_with_highest_failure_rate().as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn test_tool_with_highest_failure_rate_none_when_no_calls() {
+        let m = RuntimeMetrics::new();
+        assert!(m.tool_with_highest_failure_rate().is_none());
+    }
 }

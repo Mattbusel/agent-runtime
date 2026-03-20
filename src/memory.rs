@@ -2771,6 +2771,22 @@ impl EpisodicStore {
                 items.iter().filter(|m| m.importance < threshold).cloned().collect()
             }))
     }
+
+    /// Return `true` if at least one episode has been stored for `agent_id`.
+    ///
+    /// This is a cheaper alternative to calling [`EpisodicStore::recall`] and
+    /// checking whether the result is empty.
+    pub fn has_episodes_for_agent(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<bool, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "EpisodicStore::has_episodes_for_agent");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or(false, |items| !items.is_empty()))
+    }
 }
 
 impl Default for EpisodicStore {
@@ -4037,6 +4053,19 @@ impl WorkingMemory {
         Ok(inner.map.keys().filter(|k| k.starts_with(prefix)).count())
     }
 
+    /// Return the value with the greatest byte length in the store.
+    ///
+    /// Returns `None` for an empty store. When multiple values share the
+    /// maximum byte length, the lexicographically largest is returned.
+    pub fn value_with_max_bytes(&self) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::value_with_max_bytes");
+        Ok(inner
+            .map
+            .values()
+            .max_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)))
+            .cloned())
+    }
+
     /// Return the sum of byte lengths of all values currently stored.
     ///
     /// Returns `0` for an empty store.
@@ -4621,6 +4650,18 @@ impl WorkingMemory {
             .collect();
         keys.sort_unstable();
         Ok(keys)
+    }
+
+    /// Return `true` if every value currently stored in working memory is
+    /// non-empty.
+    ///
+    /// Returns `true` when the store is empty (vacuously true).  Callers that
+    /// treat empty values as invalid can use this to validate the store
+    /// contents in a single call.
+    pub fn all_values_non_empty(&self) -> Result<bool, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "WorkingMemory::all_values_non_empty");
+        Ok(inner.map.values().all(|v| !v.is_empty()))
     }
 }
 
@@ -10063,5 +10104,71 @@ mod tests {
         let store = EpisodicStore::new();
         let agent = AgentId::new("r50-bytes-unknown");
         assert_eq!(store.episode_content_bytes_total(&agent).unwrap(), 0);
+    }
+
+    // ── Round 57: episodes_after_timestamp, agent_with_min_importance_avg, keys_without_prefix, count_values_equal_to ──
+
+    #[test]
+    fn test_episodes_after_timestamp_returns_newer_episodes() {
+        use chrono::{Duration, Utc};
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r57-eat-1");
+        store.add_episode(agent.clone(), "old", 0.5).unwrap();
+        let cutoff = Utc::now();
+        store.add_episode(agent.clone(), "new", 0.7).unwrap();
+        let after = store.episodes_after_timestamp(&agent, cutoff).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].content, "new");
+        let _ = Duration::seconds(0); // suppress unused import warning
+    }
+
+    #[test]
+    fn test_agent_with_min_importance_avg_returns_lowest() {
+        let store = EpisodicStore::new();
+        let a1 = AgentId::new("r57-awmia-hi");
+        let a2 = AgentId::new("r57-awmia-lo");
+        store.add_episode(a1.clone(), "ep", 0.9).unwrap();
+        store.add_episode(a2.clone(), "ep", 0.1).unwrap();
+        let min_agent = store.agent_with_min_importance_avg().unwrap();
+        assert_eq!(min_agent.unwrap().as_str(), "r57-awmia-lo");
+    }
+
+    #[test]
+    fn test_agent_with_min_importance_avg_none_for_empty_store() {
+        let store = EpisodicStore::new();
+        assert!(store.agent_with_min_importance_avg().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_keys_without_prefix_returns_non_matching_keys() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("cfg_host", "v").unwrap();
+        wm.set("data_x", "v").unwrap();
+        wm.set("data_y", "v").unwrap();
+        let keys = wm.keys_without_prefix("cfg_").unwrap();
+        assert_eq!(keys, vec!["data_x", "data_y"]);
+    }
+
+    #[test]
+    fn test_keys_without_prefix_empty_when_all_match() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("cfg_a", "v").unwrap();
+        assert!(wm.keys_without_prefix("cfg_").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_count_values_equal_to_returns_correct_count() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "same").unwrap();
+        wm.set("k2", "same").unwrap();
+        wm.set("k3", "other").unwrap();
+        assert_eq!(wm.count_values_equal_to("same").unwrap(), 2);
+    }
+
+    #[test]
+    fn test_count_values_equal_to_zero_for_no_match() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k", "v").unwrap();
+        assert_eq!(wm.count_values_equal_to("missing").unwrap(), 0);
     }
 }

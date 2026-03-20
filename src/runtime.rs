@@ -1592,6 +1592,36 @@ impl AgentSession {
         lengths.iter().map(|&l| (l - mean).powi(2)).sum::<f64>() / lengths.len() as f64
     }
 
+    /// Return the count of steps that have a non-empty `action` string.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn non_empty_action_count(&self) -> usize {
+        self.steps.iter().filter(|s| !s.action.is_empty()).count()
+    }
+
+    /// Return the total byte count across all fields (`thought` + `action` +
+    /// `observation`) for every step in the session.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn total_step_bytes(&self) -> usize {
+        self.steps
+            .iter()
+            .map(|s| s.thought.len() + s.action.len() + s.observation.len())
+            .sum()
+    }
+
+    /// Return the byte length of the last step's `thought` field, or `0` if
+    /// the session has no steps.
+    pub fn last_thought_bytes(&self) -> usize {
+        self.steps.last().map_or(0, |s| s.thought.len())
+    }
+
+    /// Return the byte length of the first step's `observation` field, or `0`
+    /// if the session has no steps.
+    pub fn first_observation_bytes(&self) -> usize {
+        self.steps.first().map_or(0, |s| s.observation.len())
+    }
+
     /// Return the statistical variance of thought byte lengths across all steps.
     ///
     /// Returns `0.0` for a session with fewer than two steps.
@@ -6904,5 +6934,48 @@ mod tests {
     fn test_thought_completeness_zero_for_empty_session() {
         let session = make_session(vec![], 0);
         assert!((session.thought_completeness()).abs() < f64::EPSILON);
+    }
+
+    // ── Round 57: steps_with_non_empty_observation, observations_containing, thought_observation_ratio ──
+
+    #[test]
+    fn test_steps_with_non_empty_observation_returns_matching_steps() {
+        let steps = vec![
+            make_step("t", "a", "result"),
+            make_step("t", "a", ""),
+            make_step("t", "a", "more"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_with_non_empty_observation().len(), 2);
+    }
+
+    #[test]
+    fn test_steps_with_non_empty_observation_empty_for_all_empty() {
+        let steps = vec![make_step("t", "a", "")];
+        let session = make_session(steps, 0);
+        assert!(session.steps_with_non_empty_observation().is_empty());
+    }
+
+    #[test]
+    fn test_observations_containing_returns_matching_steps() {
+        let steps = vec![
+            make_step("t", "a", "found the answer"),
+            make_step("t", "a", "no match"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.observations_containing("found").len(), 1);
+    }
+
+    #[test]
+    fn test_thought_observation_ratio_returns_correct_ratio() {
+        let steps = vec![make_step("ab", "x", "abcd")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.thought_observation_ratio(), 0.5);
+    }
+
+    #[test]
+    fn test_thought_observation_ratio_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.thought_observation_ratio(), 0.0);
     }
 }
