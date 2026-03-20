@@ -1559,6 +1559,16 @@ impl EpisodicStore {
         Ok(inner.items.get(agent_id).map_or(0, |v| v.len()))
     }
 
+    /// Return the maximum single `recall_count` value across all episodes for
+    /// `agent_id`, or `None` if the agent has no stored episodes.
+    pub fn max_recall_count_for(&self, agent_id: &AgentId) -> Result<Option<u64>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::max_recall_count_for");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|v| v.iter().map(|i| i.recall_count).max()))
+    }
+
     /// Return the total `recall_count` across all episodes for `agent_id`.
     ///
     /// Returns `0` if the agent has no stored episodes.
@@ -1988,6 +1998,12 @@ impl SemanticStore {
         Ok(inner.entries.iter().any(|e| e.key == key))
     }
 
+    /// Return the key of the most recently inserted entry, or `None` if empty.
+    pub fn most_recent_key(&self) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::most_recent_key");
+        Ok(inner.entries.last().map(|e| e.key.clone()))
+    }
+
     /// Remove all entries whose key equals `key`.
     ///
     /// Returns the number of entries removed.
@@ -2242,6 +2258,29 @@ impl WorkingMemory {
 
     /// Update the value of an existing key without inserting if absent.
     ///
+    /// Insert `key → value` only if `key` is not already present.
+    ///
+    /// Returns `Ok(true)` if the entry was inserted, `Ok(false)` if the key
+    /// was already present (the existing value is left unchanged).  Capacity
+    /// limits and LRU eviction apply as with [`set`].
+    ///
+    /// [`set`]: WorkingMemory::set
+    pub fn set_if_absent(
+        &self,
+        key: impl Into<String> + std::fmt::Debug,
+        value: impl Into<String> + std::fmt::Debug,
+    ) -> Result<bool, AgentRuntimeError> {
+        let key = key.into();
+        {
+            let inner = recover_lock(self.inner.lock(), "WorkingMemory::set_if_absent");
+            if inner.map.contains_key(&key) {
+                return Ok(false);
+            }
+        }
+        self.set(key, value)?;
+        Ok(true)
+    }
+
     /// Returns `Ok(true)` if the key existed and was updated, `Ok(false)` if not present.
     pub fn update_if_exists(
         &self,
@@ -2566,6 +2605,14 @@ impl WorkingMemory {
     pub fn total_value_bytes(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::total_value_bytes");
         Ok(inner.map.values().map(|v| v.len()).sum())
+    }
+
+    /// Return the byte length of the longest key currently stored.
+    ///
+    /// Returns `0` when the memory is empty.
+    pub fn max_key_length(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::max_key_length");
+        Ok(inner.map.keys().map(|k| k.len()).max().unwrap_or(0))
     }
 
     /// Remove all entries for which `predicate(key, value)` returns `false`.
@@ -5442,5 +5489,56 @@ mod tests {
         store.recall(&agent, 2).unwrap();
         let total = store.sum_recall_counts(&agent).unwrap();
         assert!(total >= 2);
+    }
+
+    // ── Round 22: max_recall_count_for, most_recent_key, max_key_length ───────
+
+    #[test]
+    fn test_max_recall_count_for_none_for_new_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("ghost");
+        assert_eq!(store.max_recall_count_for(&agent).unwrap(), None);
+    }
+
+    #[test]
+    fn test_max_recall_count_for_returns_highest_after_recalls() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "ep1", 0.9).unwrap();
+        store.add_episode(agent.clone(), "ep2", 0.1).unwrap();
+        // Recall several times to accumulate counts
+        store.recall(&agent, 2).unwrap();
+        store.recall(&agent, 1).unwrap();
+        let max = store.max_recall_count_for(&agent).unwrap().unwrap();
+        assert!(max >= 1);
+    }
+
+    #[test]
+    fn test_semantic_most_recent_key_none_when_empty() {
+        let store = SemanticStore::new();
+        assert_eq!(store.most_recent_key().unwrap(), None);
+    }
+
+    #[test]
+    fn test_semantic_most_recent_key_returns_last_inserted() {
+        let store = SemanticStore::new();
+        store.store("first", "v1", vec![]).unwrap();
+        store.store("second", "v2", vec![]).unwrap();
+        assert_eq!(store.most_recent_key().unwrap(), Some("second".to_string()));
+    }
+
+    #[test]
+    fn test_working_memory_max_key_length_zero_when_empty() {
+        let mem = WorkingMemory::new(10).unwrap();
+        assert_eq!(mem.max_key_length().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_working_memory_max_key_length_returns_longest() {
+        let mem = WorkingMemory::new(10).unwrap();
+        mem.set("ab", "v1").unwrap();
+        mem.set("abcde", "v2").unwrap();
+        mem.set("abc", "v3").unwrap();
+        assert_eq!(mem.max_key_length().unwrap(), 5);
     }
 }

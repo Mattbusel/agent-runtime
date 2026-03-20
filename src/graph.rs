@@ -913,6 +913,26 @@ impl GraphStore {
             .unwrap_or(0))
     }
 
+    /// Return `(min_weight, max_weight, mean_weight)` across all relationships.
+    ///
+    /// Returns `None` if the graph has no relationships.
+    pub fn weight_stats(&self) -> Result<Option<(f64, f64, f64)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "weight_stats");
+        let weights: Vec<f64> = inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter())
+            .map(|r| r.weight as f64)
+            .collect();
+        if weights.is_empty() {
+            return Ok(None);
+        }
+        let min = weights.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let mean = weights.iter().sum::<f64>() / weights.len() as f64;
+        Ok(Some((min, max, mean)))
+    }
+
     /// Return the sum of all relationship weights in the graph.
     ///
     /// Returns `0.0` for graphs with no relationships.
@@ -4195,5 +4215,27 @@ mod tests {
     fn test_sum_edge_weights_zero_for_empty_graph() {
         let g = GraphStore::new();
         assert!((g.sum_edge_weights().unwrap() - 0.0).abs() < 1e-9);
+    }
+
+    // ── Round 22: weight_stats ────────────────────────────────────────────────
+
+    #[test]
+    fn test_weight_stats_none_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(g.weight_stats().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_weight_stats_returns_correct_min_max_mean() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "e", 3.0)).unwrap();
+        let (min, max, mean) = g.weight_stats().unwrap().unwrap();
+        assert!((min - 1.0).abs() < 1e-9);
+        assert!((max - 3.0).abs() < 1e-9);
+        assert!((mean - 2.0).abs() < 1e-9);
     }
 }

@@ -459,12 +459,32 @@ impl AgentConfig {
         self.request_timeout
     }
 
+    /// Return `true` if a maximum context character limit has been configured.
+    pub fn has_max_context_chars(&self) -> bool {
+        self.max_context_chars.is_some()
+    }
+
+    /// Return the configured maximum context character limit, if any.
+    pub fn max_context_chars(&self) -> Option<usize> {
+        self.max_context_chars
+    }
+
     /// Return the number of iterations still available after `n` have been completed.
     ///
     /// Uses saturating subtraction so values beyond `max_iterations` return `0`
     /// rather than wrapping.
     pub fn remaining_iterations_after(&self, n: usize) -> usize {
         self.max_iterations.saturating_sub(n)
+    }
+
+    /// Return the configured system prompt string.
+    pub fn system_prompt(&self) -> &str {
+        &self.system_prompt
+    }
+
+    /// Return the model name this config targets.
+    pub fn model(&self) -> &str {
+        &self.model
     }
 }
 
@@ -3157,5 +3177,43 @@ mod tests {
         let cfg = AgentConfig::new(5, "gpt-4")
             .with_request_timeout(std::time::Duration::from_secs(10));
         assert_eq!(cfg.request_timeout(), Some(std::time::Duration::from_secs(10)));
+    }
+
+    // ── Round 22: has_max_context_chars, max_context_chars, system_prompt, model
+
+    #[test]
+    fn test_agent_config_has_max_context_chars_false_by_default() {
+        let cfg = AgentConfig::new(5, "gpt-4");
+        assert!(!cfg.has_max_context_chars());
+    }
+
+    #[test]
+    fn test_agent_config_has_max_context_chars_true_after_setting() {
+        let cfg = AgentConfig::new(5, "gpt-4").with_max_context_chars(8192);
+        assert!(cfg.has_max_context_chars());
+    }
+
+    #[test]
+    fn test_agent_config_max_context_chars_none_by_default() {
+        let cfg = AgentConfig::new(5, "gpt-4");
+        assert_eq!(cfg.max_context_chars(), None);
+    }
+
+    #[test]
+    fn test_agent_config_max_context_chars_some_after_setting() {
+        let cfg = AgentConfig::new(5, "gpt-4").with_max_context_chars(4096);
+        assert_eq!(cfg.max_context_chars(), Some(4096));
+    }
+
+    #[test]
+    fn test_agent_config_system_prompt_returns_configured_prompt() {
+        let cfg = AgentConfig::new(5, "gpt-4").with_system_prompt("Be concise.");
+        assert_eq!(cfg.system_prompt(), "Be concise.");
+    }
+
+    #[test]
+    fn test_agent_config_model_returns_configured_model() {
+        let cfg = AgentConfig::new(5, "claude-3");
+        assert_eq!(cfg.model(), "claude-3");
     }
 }

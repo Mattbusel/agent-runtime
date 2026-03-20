@@ -265,6 +265,13 @@ impl LatencyHistogram {
         self.percentile(0.90)
     }
 
+    /// Return the 10th-percentile latency in milliseconds.
+    ///
+    /// Useful for assessing the "best case" tail of the distribution.
+    pub fn p10(&self) -> u64 {
+        self.percentile(0.10)
+    }
+
     /// Reset all histogram counters to zero.
     pub fn reset(&self) {
         self.total_count.store(0, Ordering::Relaxed);
@@ -288,6 +295,14 @@ impl LatencyHistogram {
     /// [`reset`]: LatencyHistogram::reset
     pub fn clear(&self) {
         self.reset();
+    }
+
+    /// Return `true` if the p99 latency is strictly below `threshold_ms`.
+    ///
+    /// Useful for SLO checks.  Returns `true` when no samples have been
+    /// recorded (`p99 == 0`).
+    pub fn is_below_p99(&self, threshold_ms: u64) -> bool {
+        self.p99() < threshold_ms
     }
 
 }
@@ -473,6 +488,17 @@ impl MetricsSnapshot {
             return 0.0;
         }
         self.memory_recall_count as f64 / self.total_sessions as f64
+    }
+
+    /// Return `true` if the snapshot shows no error indicators.
+    ///
+    /// A "healthy" snapshot has zero failed tool calls, zero backpressure
+    /// sheds, and zero checkpoint errors.  Useful for quick health checks
+    /// in tests and monitoring.
+    pub fn is_healthy(&self) -> bool {
+        self.failed_tool_calls == 0
+            && self.backpressure_shed_count == 0
+            && self.checkpoint_errors == 0
     }
 }
 
@@ -1768,5 +1794,23 @@ mod tests {
             ..Default::default()
         };
         assert!((snap.memory_recall_rate() - 3.0).abs() < 1e-9);
+    }
+
+    // ── Round 22: p10 ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_latency_histogram_p10_zero_when_empty() {
+        let h = LatencyHistogram::default();
+        assert_eq!(h.p10(), 0);
+    }
+
+    #[test]
+    fn test_latency_histogram_p10_lte_p50_lte_p99() {
+        let h = LatencyHistogram::default();
+        for ms in [10, 20, 50, 100, 200, 500, 1000] {
+            h.record(ms);
+        }
+        assert!(h.p10() <= h.p50());
+        assert!(h.p50() <= h.p99());
     }
 }

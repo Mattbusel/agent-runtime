@@ -442,6 +442,30 @@ impl AgentSession {
         seen.into_iter().collect()
     }
 
+    /// Return the action name used most often during the session.
+    ///
+    /// Returns `None` for sessions with no steps.  When multiple actions tie
+    /// for the maximum count, any one of them may be returned.
+    pub fn most_used_action(&self) -> Option<String> {
+        let counts = self.action_counts();
+        counts
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(name, _)| name)
+    }
+
+    /// Return the rate of knowledge-graph lookups per step.
+    ///
+    /// Computed as `graph_lookups / step_count`.  Returns `0.0` when there
+    /// are no steps, to avoid division by zero.
+    pub fn graph_lookup_rate(&self) -> f64 {
+        let steps = self.steps.len();
+        if steps == 0 {
+            return 0.0;
+        }
+        self.graph_lookups as f64 / steps as f64
+    }
+
     /// Return `true` if any checkpoint errors were recorded during the session.
     ///
     /// A non-empty `checkpoint_errors` list means some step snapshots may be
@@ -486,6 +510,35 @@ impl AgentSession {
             return 0.0;
         }
         self.steps.len() as f64 / (self.duration_ms as f64 / 1000.0)
+    }
+
+    /// Return `true` if any tool-call steps had error observations.
+    pub fn has_tool_failures(&self) -> bool {
+        self.failed_tool_call_count() > 0
+    }
+
+    /// Return the fraction of steps that were tool calls.
+    ///
+    /// Computed as `tool_calls_made / step_count`.  Returns `0.0` for empty
+    /// sessions to avoid division by zero.
+    pub fn tool_call_rate(&self) -> f64 {
+        let total = self.steps.len();
+        if total == 0 {
+            return 0.0;
+        }
+        self.tool_calls_made() as f64 / total as f64
+    }
+
+    /// Return the fraction of tool-call steps that succeeded.
+    ///
+    /// Computed as `1.0 - (failed_tool_call_count / step_count)`.  Returns
+    /// `1.0` for empty sessions (no failures possible).
+    pub fn step_success_rate(&self) -> f64 {
+        let total = self.steps.len();
+        if total == 0 {
+            return 1.0;
+        }
+        1.0 - (self.failed_tool_call_count() as f64 / total as f64)
     }
 
     /// Return the ratio of unique actions to total steps.
@@ -1208,6 +1261,24 @@ impl AgentRuntime {
     #[cfg(feature = "memory")]
     pub fn working_memory(&self) -> Option<&WorkingMemory> {
         self.working.as_ref()
+    }
+
+    /// Return `true` if episodic memory was configured for this runtime.
+    #[cfg(feature = "memory")]
+    pub fn has_memory(&self) -> bool {
+        self.memory.is_some()
+    }
+
+    /// Return `true` if a graph store was configured for this runtime.
+    #[cfg(feature = "graph")]
+    pub fn has_graph(&self) -> bool {
+        self.graph.is_some()
+    }
+
+    /// Return `true` if working memory was configured for this runtime.
+    #[cfg(feature = "memory")]
+    pub fn has_working_memory(&self) -> bool {
+        self.working.is_some()
     }
 
     /// Gracefully shut down the runtime.
@@ -2803,5 +2874,99 @@ mod tests {
     fn test_fastest_step_index_none_for_empty_session() {
         let session = make_session(vec![], 0);
         assert!(session.fastest_step_index().is_none());
+    }
+
+    // ── Round 18: most_used_action / graph_lookup_rate ────────────────────────
+
+    #[test]
+    fn test_most_used_action_returns_most_frequent() {
+        let steps = vec![
+            ReActStep::new("t", "search", "r"),
+            ReActStep::new("t", "calc", "r"),
+            ReActStep::new("t", "search", "r"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.most_used_action().as_deref(), Some("search"));
+    }
+
+    #[test]
+    fn test_most_used_action_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.most_used_action().is_none());
+    }
+
+    #[test]
+    fn test_graph_lookup_rate_correct_ratio() {
+        let steps = vec![
+            ReActStep::new("t", "a", "r"),
+            ReActStep::new("t", "b", "r"),
+            ReActStep::new("t", "c", "r"),
+            ReActStep::new("t", "d", "r"),
+        ];
+        let mut session = make_session(steps, 0);
+        session.graph_lookups = 2;
+        assert!((session.graph_lookup_rate() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_graph_lookup_rate_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!((session.graph_lookup_rate() - 0.0).abs() < 1e-9);
+    }
+
+    // ── Round 22: has_tool_failures, tool_call_rate, step_success_rate ────────
+
+    #[test]
+    fn test_has_tool_failures_false_when_no_errors() {
+        let steps = vec![
+            make_step("t", "action1", "ok"),
+            make_step("t", "action2", "done"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(!session.has_tool_failures());
+    }
+
+    #[test]
+    fn test_has_tool_failures_true_when_error_observation() {
+        let steps = vec![
+            make_step("t", "action1", "{\"error\": \"timeout\"}"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(session.has_tool_failures());
+    }
+
+    #[test]
+    fn test_tool_call_rate_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!((session.tool_call_rate() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_tool_call_rate_correct_ratio() {
+        let steps = vec![
+            make_step("t", "tool_action", "ok"),
+            make_step("t", "FINAL_ANSWER: done", ""),
+            make_step("t", "another_tool", "ok"),
+        ];
+        let session = make_session(steps, 0);
+        // 2 tool calls out of 3 steps
+        assert!((session.tool_call_rate() - 2.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_step_success_rate_one_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!((session.step_success_rate() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_step_success_rate_less_than_one_when_failures() {
+        let steps = vec![
+            make_step("t", "act", "{\"error\": \"fail\"}"),
+            make_step("t", "act", "success"),
+        ];
+        let session = make_session(steps, 0);
+        // 1 failed out of 2 → 1.0 - 0.5 = 0.5
+        assert!((session.step_success_rate() - 0.5).abs() < 1e-9);
     }
 }
