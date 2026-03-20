@@ -5887,4 +5887,73 @@ mod tests {
         let session = make_session(vec![], 0);
         assert_eq!(session.total_observation_bytes(), 0);
     }
+
+    // ── Round 50: proportion_tool_calls, thought_density ─────────────────────
+
+    #[test]
+    fn test_proportion_tool_calls_all_tool_calls() {
+        let steps = vec![
+            make_step("t", "search[x]", "o"),
+            make_step("t", "lookup[y]", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.proportion_tool_calls() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_proportion_tool_calls_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.proportion_tool_calls(), 0.0);
+    }
+
+    #[test]
+    fn test_thought_density_returns_thought_fraction_of_total_bytes() {
+        let steps = vec![make_step("ab", "cd", "ef")]; // 2+2+2=6, thought=2
+        let session = make_session(steps, 0);
+        let density = session.thought_density();
+        assert!((density - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_thought_density_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.thought_density(), 0.0);
+    }
+
+    // ── Round 51: steps_matching_observation, step_action_lengths ─────────────
+
+    #[test]
+    fn test_steps_matching_observation_returns_matching_steps() {
+        let steps = vec![
+            make_step("t", "a", "found: result"),
+            make_step("t", "b", "no match here"),
+            make_step("t", "c", "found: another"),
+        ];
+        let session = make_session(steps, 0);
+        let result = session.steps_matching_observation("found:");
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_steps_matching_observation_empty_when_no_match() {
+        let steps = vec![make_step("t", "a", "nothing")];
+        let session = make_session(steps, 0);
+        assert!(session.steps_matching_observation("found:").is_empty());
+    }
+
+    #[test]
+    fn test_step_action_lengths_returns_lengths_in_order() {
+        let steps = vec![
+            make_step("t", "ab", "o"),
+            make_step("t", "cdef", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.step_action_lengths(), vec![2, 4]);
+    }
+
+    #[test]
+    fn test_step_action_lengths_empty_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.step_action_lengths().is_empty());
+    }
 }

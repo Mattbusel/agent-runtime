@@ -9112,4 +9112,38 @@ mod tests {
         let store = EpisodicStore::new();
         assert!(store.tag_frequency(&AgentId::new("nobody-r50-tf")).unwrap().is_empty());
     }
+
+    // ── Round 51: unique_agents_count, key_value_pairs_sorted ─────────────────
+
+    #[test]
+    fn test_unique_agents_count_reflects_distinct_agents() {
+        let store = EpisodicStore::new();
+        let a1 = AgentId::new("r51-uac-1");
+        let a2 = AgentId::new("r51-uac-2");
+        store.add_episode(a1.clone(), "ep", 0.5).unwrap();
+        store.add_episode(a2.clone(), "ep", 0.5).unwrap();
+        assert_eq!(store.unique_agents_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_unique_agents_count_zero_for_empty_store() {
+        let store = EpisodicStore::new();
+        assert_eq!(store.unique_agents_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_key_value_pairs_sorted_returns_alphabetical_pairs() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("b_key", "v2").unwrap();
+        wm.set("a_key", "v1").unwrap();
+        let pairs = wm.key_value_pairs_sorted().unwrap();
+        assert_eq!(pairs[0].0, "a_key");
+        assert_eq!(pairs[1].0, "b_key");
+    }
+
+    #[test]
+    fn test_key_value_pairs_sorted_empty_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(wm.key_value_pairs_sorted().unwrap().is_empty());
+    }
 }

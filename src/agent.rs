@@ -1551,6 +1551,17 @@ impl ToolRegistry {
         self.tools.values().map(|s| s.description.len()).min().unwrap_or(0)
     }
 
+    /// Return `true` if any tool description starts with any of the given `prefixes`.
+    ///
+    /// Useful for checking whether a set of common description templates is
+    /// in use (e.g. `"Search"`, `"Write"`, `"Read"`).  Returns `false` for an
+    /// empty registry or empty `prefixes` slice.
+    pub fn description_starts_with_any(&self, prefixes: &[&str]) -> bool {
+        self.tools
+            .values()
+            .any(|s| prefixes.iter().any(|p| s.description.starts_with(p)))
+    }
+
     /// Return a reference to the `ToolSpec` with the most required fields.
     ///
     /// When multiple tools share the maximum required-field count, the one that

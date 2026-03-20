@@ -3849,4 +3849,27 @@ mod tests {
         let snap = m.snapshot();
         assert!(snap.tools_with_zero_failures().is_empty());
     }
+
+    // ── Round 51: tool_names_by_call_count ────────────────────────────────────
+
+    #[test]
+    fn test_tool_names_by_call_count_orders_highest_first() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("alpha");
+        m.record_tool_call("beta");
+        m.record_tool_call("beta");
+        m.record_tool_call("gamma");
+        m.record_tool_call("gamma");
+        m.record_tool_call("gamma");
+        let names = m.tool_names_by_call_count();
+        assert_eq!(names[0], "gamma");
+        assert_eq!(names[1], "beta");
+        assert_eq!(names[2], "alpha");
+    }
+
+    #[test]
+    fn test_tool_names_by_call_count_empty_when_no_calls() {
+        let m = RuntimeMetrics::new();
+        assert!(m.tool_names_by_call_count().is_empty());
+    }
 }

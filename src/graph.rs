@@ -6806,4 +6806,39 @@ mod tests {
         let g = GraphStore::new();
         assert!(g.entities_sorted_by_out_degree().unwrap().is_empty());
     }
+
+    // ── Round 51: entity_labels_sorted, relationship_type_count ───────────────
+
+    #[test]
+    fn test_entity_labels_sorted_returns_unique_labels_in_order() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Zebra")).unwrap();
+        g.add_entity(Entity::new("b", "Apple")).unwrap();
+        g.add_entity(Entity::new("c", "Zebra")).unwrap(); // duplicate
+        let labels = g.entity_labels_sorted().unwrap();
+        assert_eq!(labels, vec!["Apple", "Zebra"]);
+    }
+
+    #[test]
+    fn test_entity_labels_sorted_empty_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(g.entity_labels_sorted().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_relationship_type_count_counts_distinct_kinds() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "LIKES", 1.0)).unwrap();
+        assert_eq!(g.relationship_type_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_relationship_type_count_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.relationship_type_count().unwrap(), 0);
+    }
 }
