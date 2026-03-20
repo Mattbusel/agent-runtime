@@ -698,6 +698,20 @@ impl AgentSession {
         unique.len() as f64 / total as f64
     }
 
+    /// Return the total byte length of all thought strings across all steps.
+    pub fn total_thought_length(&self) -> usize {
+        self.steps.iter().map(|s| s.thought.len()).sum()
+    }
+
+    /// Return the longest observation string in the session, or `None` if
+    /// the session is empty.
+    pub fn longest_observation(&self) -> Option<&str> {
+        self.steps
+            .iter()
+            .max_by_key(|s| s.observation.len())
+            .map(|s| s.observation.as_str())
+    }
+
     /// Return the fraction of steps that had a tool failure observation.
     ///
     /// Computed as `failed_tool_call_count / step_count`.  Returns `0.0` for
@@ -3673,5 +3687,39 @@ mod tests {
         ];
         let session = make_session(steps, 0);
         assert_eq!(session.unique_action_count(), 2);
+    }
+
+    // ── Round 28: total_thought_length / longest_observation ──────────────────
+
+    #[test]
+    fn test_total_thought_length_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.total_thought_length(), 0);
+    }
+
+    #[test]
+    fn test_total_thought_length_sums_all_thoughts() {
+        let steps = vec![
+            make_step("hi", "a", "r"),   // 2 bytes
+            make_step("hello", "b", "r"), // 5 bytes
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_thought_length(), 7);
+    }
+
+    #[test]
+    fn test_longest_observation_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.longest_observation().is_none());
+    }
+
+    #[test]
+    fn test_longest_observation_returns_longest() {
+        let steps = vec![
+            make_step("t", "a", "short"),
+            make_step("t", "b", "a much longer observation"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.longest_observation(), Some("a much longer observation"));
     }
 }

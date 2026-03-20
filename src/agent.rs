@@ -1147,6 +1147,19 @@ impl ToolRegistry {
         names.sort_unstable();
         names
     }
+
+    /// Return the names of all registered tools whose name starts with `prefix`,
+    /// sorted alphabetically.
+    pub fn tool_names_starting_with(&self, prefix: &str) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .tools
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .map(|k| k.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
 }
 
 // ── ReActLoop ─────────────────────────────────────────────────────────────────
@@ -3519,5 +3532,24 @@ mod tests {
         reg.register(ToolSpec::new("alpha", "d", |_| serde_json::json!({})));
         reg.register(ToolSpec::new("mango", "d", |_| serde_json::json!({})));
         assert_eq!(reg.names(), vec!["alpha", "mango", "zebra"]);
+    }
+
+    // ── Round 28: tool_names_starting_with ────────────────────────────────────
+
+    #[test]
+    fn test_tool_names_starting_with_empty_when_no_match() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("search", "d", |_| serde_json::json!({})));
+        assert!(reg.tool_names_starting_with("calc").is_empty());
+    }
+
+    #[test]
+    fn test_tool_names_starting_with_returns_sorted_matches() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("db_write", "d", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("db_read", "d", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("cache_get", "d", |_| serde_json::json!({})));
+        let results = reg.tool_names_starting_with("db_");
+        assert_eq!(results, vec!["db_read", "db_write"]);
     }
 }

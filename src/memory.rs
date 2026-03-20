@@ -750,6 +750,19 @@ impl EpisodicStore {
         Ok(inner.items.get(agent_id).map_or(false, |v| !v.is_empty()))
     }
 
+    /// Return the IDs of agents that have at least `min` episodes.
+    pub fn agents_with_min_episodes(&self, min: usize) -> Result<Vec<AgentId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::agents_with_min_episodes");
+        let mut ids: Vec<AgentId> = inner
+            .items
+            .iter()
+            .filter(|(_, v)| v.len() >= min)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(ids)
+    }
+
     /// Return the total number of episodes stored across all agents.
     pub fn total_episode_count(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "EpisodicStore::total_episode_count");
@@ -2082,6 +2095,17 @@ impl SemanticStore {
         Ok(inner.entries.iter().filter(|e| e.tags.is_empty()).count())
     }
 
+    /// Return the keys of all entries that have no tags.
+    pub fn entries_with_no_tags(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::entries_with_no_tags");
+        Ok(inner
+            .entries
+            .iter()
+            .filter(|e| e.tags.is_empty())
+            .map(|e| e.key.clone())
+            .collect())
+    }
+
     /// Return the mean number of tags per entry.
     ///
     /// Returns `0.0` when the store is empty.
@@ -2770,6 +2794,16 @@ impl WorkingMemory {
             .values()
             .max_by_key(|v| v.len())
             .map(|v| v.clone()))
+    }
+
+    /// Return the key whose associated value has the most bytes, or `None` if empty.
+    pub fn longest_value_key(&self) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::longest_value_key");
+        Ok(inner
+            .map
+            .iter()
+            .max_by_key(|(_, v)| v.len())
+            .map(|(k, _)| k.clone()))
     }
 
     /// Remove all entries for which `predicate(key, value)` returns `false`.
@@ -6126,5 +6160,58 @@ mod tests {
         store.add_episode(a1.clone(), "e2", 0.6).unwrap();
         store.add_episode(a2.clone(), "e3", 0.7).unwrap();
         assert_eq!(store.total_episode_count().unwrap(), 3);
+    }
+
+    // ── Round 28: agents_with_min_episodes / entries_with_no_tags / longest_value_key
+
+    #[test]
+    fn test_agents_with_min_episodes_empty_when_below_min() {
+        let store = EpisodicStore::new();
+        let a = AgentId::new("a1");
+        store.add_episode(a.clone(), "e1", 0.5).unwrap();
+        // min=2 → no agents qualify
+        assert!(store.agents_with_min_episodes(2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_agents_with_min_episodes_includes_qualifying_agents() {
+        let store = EpisodicStore::new();
+        let a1 = AgentId::new("a1");
+        let a2 = AgentId::new("a2");
+        store.add_episode(a1.clone(), "e1", 0.5).unwrap();
+        store.add_episode(a1.clone(), "e2", 0.6).unwrap();
+        store.add_episode(a2.clone(), "only-one", 0.7).unwrap();
+        let result = store.agents_with_min_episodes(2).unwrap();
+        assert_eq!(result, vec![a1]);
+    }
+
+    #[test]
+    fn test_entries_with_no_tags_returns_empty_list_when_all_have_tags() {
+        let store = SemanticStore::new();
+        store.store("k1", "v1", vec!["tag".to_string()]).unwrap();
+        assert!(store.entries_with_no_tags().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_entries_with_no_tags_returns_untagged_keys() {
+        let store = SemanticStore::new();
+        store.store("k1", "v1", vec![]).unwrap();
+        store.store("k2", "v2", vec!["tag".to_string()]).unwrap();
+        let result = store.entries_with_no_tags().unwrap();
+        assert_eq!(result, vec!["k1".to_string()]);
+    }
+
+    #[test]
+    fn test_working_memory_longest_value_key_none_when_empty() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(wm.longest_value_key().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_working_memory_longest_value_key_returns_key_with_longest_value() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("short_key", "hi").unwrap();
+        wm.set("long_key", "a much longer value string").unwrap();
+        assert_eq!(wm.longest_value_key().unwrap(), Some("long_key".to_string()));
     }
 }

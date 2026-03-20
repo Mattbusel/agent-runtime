@@ -327,6 +327,14 @@ impl GraphStore {
         Ok(!inner.entities.is_empty())
     }
 
+    /// Return the number of distinct entity label strings present in the graph.
+    pub fn entity_type_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entity_type_count");
+        let types: std::collections::HashSet<&str> =
+            inner.entities.values().map(|e| e.label.as_str()).collect();
+        Ok(types.len())
+    }
+
     /// Add a directed relationship between two existing entities.
     ///
     /// Both source and target entities must already exist in the graph.
@@ -4542,5 +4550,23 @@ mod tests {
         let g = GraphStore::new();
         g.add_entity(Entity::new("x", "Node")).unwrap();
         assert!(g.has_any_entities().unwrap());
+    }
+
+    // ── Round 28: entity_type_count ───────────────────────────────────────────
+
+    #[test]
+    fn test_entity_type_count_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.entity_type_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_entity_type_count_counts_distinct_labels() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Person")).unwrap();
+        g.add_entity(Entity::new("b", "Person")).unwrap();
+        g.add_entity(Entity::new("c", "Concept")).unwrap();
+        // "Person" and "Concept" → 2 distinct types
+        assert_eq!(g.entity_type_count().unwrap(), 2);
     }
 }

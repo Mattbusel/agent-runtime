@@ -314,6 +314,15 @@ impl LatencyHistogram {
         self.total_count.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Return the difference between the p99 and p50 latency buckets in
+    /// milliseconds.
+    ///
+    /// A larger spread indicates a long-tail latency distribution.
+    /// Returns `0` when no samples have been recorded.
+    pub fn percentile_spread(&self) -> u64 {
+        self.p99().saturating_sub(self.p50())
+    }
+
     /// Reset all histogram counters to zero.
     ///
     /// Alias for [`reset`] using more conventional naming.
@@ -563,6 +572,16 @@ impl MetricsSnapshot {
             return 0.0;
         }
         self.total_tool_calls as f64 / self.total_sessions as f64
+    }
+
+    /// Return the average number of backpressure shed events per session.
+    ///
+    /// Returns `0.0` when no sessions have been recorded.
+    pub fn backpressure_rate(&self) -> f64 {
+        if self.total_sessions == 0 {
+            return 0.0;
+        }
+        self.backpressure_shed_count as f64 / self.total_sessions as f64
     }
 }
 
@@ -2268,5 +2287,41 @@ mod tests {
             ..Default::default()
         };
         assert!((snap.tool_call_rate() - 5.0).abs() < 1e-9);
+    }
+
+    // ── Round 28: backpressure_rate / percentile_spread ───────────────────────
+
+    #[test]
+    fn test_metrics_snapshot_backpressure_rate_zero_when_no_sessions() {
+        let snap = MetricsSnapshot::default();
+        assert!((snap.backpressure_rate() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_backpressure_rate_correct_ratio() {
+        let snap = MetricsSnapshot {
+            total_sessions: 2,
+            backpressure_shed_count: 4,
+            ..Default::default()
+        };
+        assert!((snap.backpressure_rate() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_latency_histogram_percentile_spread_zero_when_empty() {
+        let h = LatencyHistogram::default();
+        assert_eq!(h.percentile_spread(), 0);
+    }
+
+    #[test]
+    fn test_latency_histogram_percentile_spread_nonnegative() {
+        let h = LatencyHistogram::default();
+        for _ in 0..100 {
+            h.record(50);
+        }
+        for _ in 0..5 {
+            h.record(500);
+        }
+        assert!(h.percentile_spread() >= 0);
     }
 }

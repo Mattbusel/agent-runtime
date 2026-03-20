@@ -206,6 +206,13 @@ impl RetryPolicy {
         self.base_delay_ms()
     }
 
+    /// Return `true` if `attempt` is the last allowed attempt for this policy.
+    ///
+    /// `attempt` is 1-indexed: `attempt == max_attempts` means no more retries.
+    pub fn is_last_attempt(&self, attempt: u32) -> bool {
+        attempt >= self.max_attempts
+    }
+
     /// Return the sum of all per-attempt delays across all attempts, in milliseconds.
     ///
     /// For exponential policies each attempt's delay is capped at
@@ -3169,5 +3176,25 @@ mod tests {
     fn test_retry_policy_max_total_delay_ms_single_attempt() {
         let p = RetryPolicy::constant(1, 50).unwrap();
         assert_eq!(p.max_total_delay_ms(), 50);
+    }
+
+    // ── Round 28: is_last_attempt ─────────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_is_last_attempt_true_at_max() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(p.is_last_attempt(3));
+    }
+
+    #[test]
+    fn test_retry_policy_is_last_attempt_false_before_max() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(!p.is_last_attempt(2));
+    }
+
+    #[test]
+    fn test_retry_policy_is_last_attempt_true_beyond_max() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(p.is_last_attempt(4));
     }
 }

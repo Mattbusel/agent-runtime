@@ -11,6 +11,27 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.47.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::total_thought_length`** — total bytes across all thought strings.
+- **`AgentSession::longest_observation`** — reference to the longest observation string.
+- **`EpisodicStore::agents_with_min_episodes`** — agents with at least N episodes.
+- **`SemanticStore::entries_with_no_tags`** — keys of untagged entries.
+- **`WorkingMemory::longest_value_key`** — key whose value has the most bytes.
+- **`MetricsSnapshot::backpressure_rate`** — average backpressure shed events per session.
+- **`LatencyHistogram::percentile_spread`** — difference between p99 and p50.
+- **`RetryPolicy::is_last_attempt`** — `true` when attempt number >= max_attempts.
+- **`GraphStore::entity_type_count`** — number of distinct entity labels.
+- **`ToolRegistry::tool_names_starting_with`** — sorted tool names matching a prefix.
+
+### Tests
+
+- Full test coverage for all ten Round 28 methods.
+
+---
+
 ## [1.46.0] - 2026-03-20
 
 ### Added
