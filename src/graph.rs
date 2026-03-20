@@ -1274,6 +1274,18 @@ impl GraphStore {
         }
     }
 
+    /// Return the hop-count of the shortest path from `from` to `to`.
+    ///
+    /// Returns `Some(hops)` if a path exists, `None` if the nodes are
+    /// disconnected.  Both node IDs must exist or returns `Err`.
+    pub fn shortest_path_length(
+        &self,
+        from: &EntityId,
+        to: &EntityId,
+    ) -> Result<Option<usize>, AgentRuntimeError> {
+        Ok(self.shortest_path(from, to)?.map(|path| path.len().saturating_sub(1)))
+    }
+
     /// BFS limited by maximum depth and maximum node count.
     ///
     /// Returns the subset of nodes visited within those limits (including start).
@@ -1797,6 +1809,40 @@ impl GraphStore {
         }
         inner.cycle_cache = None;
         Ok(())
+    }
+
+    /// Return all entities whose out-degree is at or above `threshold`.
+    ///
+    /// Useful for finding hub or gateway nodes in a knowledge graph.
+    pub fn hub_nodes(&self, threshold: usize) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "hub_nodes");
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| {
+                inner
+                    .adjacency
+                    .get(&e.id)
+                    .map_or(0, |rels| rels.len())
+                    >= threshold
+            })
+            .cloned()
+            .collect())
+    }
+
+    /// Return all relationships incident to `entity_id`
+    /// (where the entity is either the source or the target).
+    pub fn incident_relationships(
+        &self,
+        entity_id: &EntityId,
+    ) -> Result<Vec<Relationship>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "incident_relationships");
+        Ok(inner
+            .relationships
+            .iter()
+            .filter(|r| &r.from == entity_id || &r.to == entity_id)
+            .cloned()
+            .collect())
     }
 
     /// Return the entity with the highest out-degree (most outgoing edges),
@@ -3199,5 +3245,87 @@ mod tests {
         let g = make_graph();
         let result = g.remove_entity_and_edges(&EntityId::new("ghost"));
         assert!(result.is_err());
+    }
+
+    // ── Round 20: relationship_kinds / graph_density / EntityId::try_new ──────
+
+    #[test]
+    fn test_relationship_kinds_returns_sorted_distinct_kinds() {
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "LIKES", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "KNOWS", 1.0)).unwrap();
+        let kinds = g.relationship_kinds().unwrap();
+        assert_eq!(kinds, vec!["KNOWS", "LIKES"]);
+    }
+
+    #[test]
+    fn test_relationship_kinds_empty_graph_returns_empty() {
+        let g = make_graph();
+        assert!(g.relationship_kinds().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_graph_density_zero_for_empty() {
+        let g = make_graph();
+        assert_eq!(g.graph_density().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_graph_density_correct_for_partial_graph() {
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        // 1 edge out of max 6 directed edges (3*2)
+        link(&g, "a", "b");
+        let d = g.graph_density().unwrap();
+        assert!((d - 1.0 / 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_entity_id_try_new_rejects_empty() {
+        let result = EntityId::try_new("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_entity_id_try_new_accepts_nonempty() {
+        let id = EntityId::try_new("valid").unwrap();
+        assert_eq!(id.as_str(), "valid");
+    }
+
+    // ── Round 8: hub_nodes / incident_relationships ───────────────────────────
+
+    #[test]
+    fn test_hub_nodes_returns_nodes_meeting_threshold() {
+        let g = make_graph();
+        add(&g, "hub"); add(&g, "mid"); add(&g, "leaf");
+        link(&g, "hub", "mid"); link(&g, "hub", "leaf"); link(&g, "mid", "leaf");
+        let hubs = g.hub_nodes(2).unwrap();
+        assert_eq!(hubs.len(), 1);
+        assert_eq!(hubs[0].id, EntityId::new("hub"));
+    }
+
+    #[test]
+    fn test_hub_nodes_threshold_zero_returns_all() {
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b");
+        assert_eq!(g.hub_nodes(0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_incident_relationships_includes_outgoing_and_incoming() {
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        link(&g, "a", "b"); link(&g, "c", "b");
+        let rels = g.incident_relationships(&EntityId::new("b")).unwrap();
+        assert_eq!(rels.len(), 2);
+    }
+
+    #[test]
+    fn test_incident_relationships_empty_for_isolated_node() {
+        let g = make_graph();
+        add(&g, "iso");
+        assert!(g.incident_relationships(&EntityId::new("iso")).unwrap().is_empty());
     }
 }

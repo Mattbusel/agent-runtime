@@ -11,6 +11,31 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.18.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::total_latency_ms`** (`runtime.rs`) — sum of all step
+  durations in milliseconds; cheaper than allocating a Vec via `step_durations_ms`.
+- **`AgentSession::action_sequence`** (`runtime.rs`) — ordered list of action
+  names as owned `String`s; unlike `all_actions()` the result outlives the borrow.
+- **`EpisodicStore::importance_avg`** (`memory.rs`) — arithmetic mean importance
+  for an agent; returns `0.0` for empty agents.
+- **`EpisodicStore::deduplicate_content`** (`memory.rs`) — remove exact-content
+  duplicates for an agent, keeping the episode with the highest importance.
+- **`WorkingMemory::iter_sorted`** (`memory.rs`) — all entries as `(key, value)`
+  pairs sorted alphabetically by key; deterministic alternative to `iter()`.
+- **`SemanticStore::get_value`** (`memory.rs`) — return just the stored value
+  for a key; simpler than `retrieve_by_key` when tags are not needed.
+- **`GraphStore::hub_nodes`** (`graph.rs`) — return all entities with
+  out-degree ≥ threshold; useful for identifying gateway nodes.
+- **`GraphStore::incident_relationships`** (`graph.rs`) — return all
+  relationships where an entity is the source or target.
+- **`ToolRegistry::rename_tool`** (`agent.rs`) — rename a registered tool,
+  updating both the registry key and the `ToolSpec::name` field.
+
+---
+
 ## [1.17.0] - 2026-03-20
 
 ### Added

@@ -228,6 +228,47 @@ impl AgentSession {
         self.steps.iter().map(|s| s.step_duration_ms).collect()
     }
 
+    /// Return the sum of all step durations in milliseconds.
+    ///
+    /// Equivalent to `step_durations_ms().iter().sum()` but avoids allocating
+    /// a temporary Vec.
+    pub fn total_latency_ms(&self) -> u64 {
+        self.steps.iter().map(|s| s.step_duration_ms).sum()
+    }
+
+    /// Return the sequence of action names taken, in step order.
+    ///
+    /// Unlike `all_actions()` this returns owned `String`s so the result can
+    /// outlive the session borrow.
+    pub fn action_sequence(&self) -> Vec<String> {
+        self.steps.iter().map(|s| s.action.clone()).collect()
+    }
+
+    /// Return the sorted, deduplicated set of tool names invoked during the session.
+    ///
+    /// Tool-call steps are identified by the same heuristic as `tool_calls_made`:
+    /// a non-empty action that does not start with `FINAL_ANSWER`.
+    pub fn unique_tools_used(&self) -> Vec<String> {
+        let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for step in &self.steps {
+            let action = step.action.trim();
+            if action.is_empty() || action.to_ascii_uppercase().starts_with("FINAL_ANSWER") {
+                continue;
+            }
+            // Tool name is the JSON "tool" field, or the whole action string if not JSON.
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(action) {
+                if let Some(name) = v.get("tool").and_then(|n| n.as_str()) {
+                    names.insert(name.to_owned());
+                    continue;
+                }
+            }
+            names.insert(action.to_owned());
+        }
+        let mut sorted: Vec<String> = names.into_iter().collect();
+        sorted.sort_unstable();
+        sorted
+    }
+
     /// Collect all thought strings from every step, in order.
     pub fn all_thoughts(&self) -> Vec<&str> {
         self.steps.iter().map(|s| s.thought.as_str()).collect()
@@ -2075,5 +2116,37 @@ mod tests {
     fn test_unique_actions_empty_when_no_steps() {
         let session = make_session(vec![], 0);
         assert!(session.unique_actions().is_empty());
+    }
+
+    // ── Round 8: total_latency_ms / action_sequence ───────────────────────────
+
+    #[test]
+    fn test_total_latency_ms_sums_step_durations() {
+        let mut steps = vec![
+            ReActStep::new("t1", "a1", "o1"),
+            ReActStep::new("t2", "a2", "o2"),
+        ];
+        steps[0].step_duration_ms = 100;
+        steps[1].step_duration_ms = 250;
+        let session = make_session(steps, 350);
+        assert_eq!(session.total_latency_ms(), 350);
+    }
+
+    #[test]
+    fn test_total_latency_ms_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.total_latency_ms(), 0);
+    }
+
+    #[test]
+    fn test_action_sequence_returns_actions_in_order() {
+        let session = make_session(
+            vec![
+                ReActStep::new("t", "search", "r"),
+                ReActStep::new("t", "FINAL_ANSWER", "done"),
+            ],
+            0,
+        );
+        assert_eq!(session.action_sequence(), vec!["search", "FINAL_ANSWER"]);
     }
 }

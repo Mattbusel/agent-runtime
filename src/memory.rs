@@ -732,6 +732,57 @@ impl EpisodicStore {
         Ok(inner.items.get(agent_id).map_or(0, |v| v.len()))
     }
 
+    /// Return the arithmetic mean importance for `agent_id`, or `0.0` if the
+    /// agent has no stored episodes.
+    pub fn importance_avg(&self, agent_id: &AgentId) -> Result<f32, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::importance_avg");
+        match inner.items.get(agent_id) {
+            None => Ok(0.0),
+            Some(items) if items.is_empty() => Ok(0.0),
+            Some(items) => {
+                let sum: f32 = items.iter().map(|i| i.importance).sum();
+                Ok(sum / items.len() as f32)
+            }
+        }
+    }
+
+    /// Remove duplicate episodes (same `content`) for `agent_id`, keeping only
+    /// the episode with the highest importance for each distinct content string.
+    ///
+    /// Returns the number of episodes removed.
+    pub fn deduplicate_content(&self, agent_id: &AgentId) -> Result<usize, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::deduplicate_content");
+        let Some(items) = inner.items.get_mut(agent_id) else {
+            return Ok(0);
+        };
+        let before = items.len();
+        // For each unique content keep the item with the highest importance.
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut keepers: Vec<usize> = Vec::new();
+        for (idx, item) in items.iter().enumerate() {
+            match seen.get(&item.content) {
+                None => {
+                    seen.insert(item.content.clone(), keepers.len());
+                    keepers.push(idx);
+                }
+                Some(&pos) => {
+                    let kept_idx = keepers[pos];
+                    if item.importance > items[kept_idx].importance {
+                        keepers[pos] = idx;
+                    }
+                }
+            }
+        }
+        let kept: std::collections::HashSet<usize> = keepers.into_iter().collect();
+        let mut i = 0;
+        items.retain(|_| {
+            let keep = kept.contains(&i);
+            i += 1;
+            keep
+        });
+        Ok(before - items.len())
+    }
+
     /// Return all `AgentId`s that have at least one stored episode.
     pub fn agent_ids(&self) -> Result<Vec<AgentId>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "EpisodicStore::agent_ids");
@@ -1674,6 +1725,22 @@ impl SemanticStore {
         Ok(distinct.len())
     }
 
+    /// Return the stored value for the first entry whose key matches `key`,
+    /// or `None` if no such entry exists.
+    ///
+    /// Simpler alternative to [`retrieve_by_key`] when only the value is needed
+    /// and tags are not required.
+    ///
+    /// [`retrieve_by_key`]: SemanticStore::retrieve_by_key
+    pub fn get_value(&self, key: &str) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::get_value");
+        Ok(inner
+            .entries
+            .iter()
+            .find(|e| e.key == key)
+            .map(|e| e.value.clone()))
+    }
+
     /// Return all entry keys that contain `tag` (case-sensitive).
     pub fn keys_with_tag(&self, tag: &str) -> Result<Vec<String>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::keys_with_tag");
@@ -2002,6 +2069,24 @@ impl WorkingMemory {
 
     /// Remove all entries and return them as a `Vec<(key, value)>` in insertion order.
     ///
+    /// Return all entries as `(key, value)` pairs sorted alphabetically by key.
+    ///
+    /// Unlike [`iter`]/[`entries`] which return entries in insertion order,
+    /// this always returns a deterministically ordered snapshot.
+    ///
+    /// [`iter`]: WorkingMemory::iter
+    /// [`entries`]: WorkingMemory::entries
+    pub fn iter_sorted(&self) -> Result<Vec<(String, String)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::iter_sorted");
+        let mut pairs: Vec<(String, String)> = inner
+            .map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        Ok(pairs)
+    }
+
     /// After this call the memory is empty. Useful for atomically moving the
     /// contents to another data structure.
     pub fn drain(&self) -> Result<Vec<(String, String)>, AgentRuntimeError> {
@@ -4006,5 +4091,143 @@ mod tests {
         store.add_episode(agent.clone(), "hello", 0.5).unwrap();
         let results = store.find_by_content(&agent, "xyz").unwrap();
         assert!(results.is_empty());
+    }
+
+    // ── Round 20: add_episode_at / add_episodes_batch / SemanticStore::keys_matching ──
+
+    #[test]
+    fn test_add_episode_at_stores_with_given_timestamp() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("agent-ts");
+        let ts = chrono::Utc::now() - chrono::Duration::hours(2);
+        let id = store.add_episode_at(agent.clone(), "past event", 0.7, ts).unwrap();
+        let items = store.recall_all(&agent).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, id);
+        assert_eq!(items[0].content, "past event");
+        assert!((items[0].timestamp - ts).num_seconds().abs() < 1);
+    }
+
+    #[test]
+    fn test_add_episodes_batch_returns_all_ids() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("batch-agent");
+        let episodes = vec![
+            ("first", 0.5f32),
+            ("second", 0.8f32),
+            ("third", 0.3f32),
+        ];
+        let ids = store.add_episodes_batch(agent.clone(), episodes).unwrap();
+        assert_eq!(ids.len(), 3);
+        let all = store.recall_all(&agent).unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn test_add_episodes_batch_empty_iter_returns_empty_ids() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("empty-batch");
+        let ids = store
+            .add_episodes_batch(agent.clone(), Vec::<(String, f32)>::new())
+            .unwrap();
+        assert!(ids.is_empty());
+        assert_eq!(store.count_for(&agent).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_semantic_keys_matching_returns_substring_matches() {
+        let store = SemanticStore::new();
+        store.store("rust_intro", "value1", vec![]).unwrap();
+        store.store("rust_advanced", "value2", vec![]).unwrap();
+        store.store("python_basics", "value3", vec![]).unwrap();
+        let matches = store.keys_matching("rust").unwrap();
+        assert_eq!(matches.len(), 2);
+        assert!(matches.contains(&"rust_intro".to_string()));
+        assert!(matches.contains(&"rust_advanced".to_string()));
+    }
+
+    #[test]
+    fn test_semantic_keys_matching_is_case_insensitive() {
+        let store = SemanticStore::new();
+        store.store("UPPER_KEY", "v", vec![]).unwrap();
+        let matches = store.keys_matching("upper").unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_semantic_keys_matching_empty_when_no_match() {
+        let store = SemanticStore::new();
+        store.store("abc", "val", vec![]).unwrap();
+        let matches = store.keys_matching("xyz").unwrap();
+        assert!(matches.is_empty());
+    }
+
+    // ── Round 8: EpisodicStore::importance_avg / deduplicate_content ─────────
+
+    #[test]
+    fn test_importance_avg_correct() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "e1", 0.2).unwrap();
+        store.add_episode(agent.clone(), "e2", 0.8).unwrap();
+        let avg = store.importance_avg(&agent).unwrap();
+        assert!((avg - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_importance_avg_zero_for_empty() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("empty");
+        assert_eq!(store.importance_avg(&agent).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_deduplicate_content_removes_lower_importance_duplicate() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "same", 0.3).unwrap();
+        store.add_episode(agent.clone(), "same", 0.9).unwrap();
+        store.add_episode(agent.clone(), "different", 0.5).unwrap();
+        let removed = store.deduplicate_content(&agent).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(store.count_for(&agent).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_deduplicate_content_keeps_highest_importance() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "dup", 0.1).unwrap();
+        store.add_episode(agent.clone(), "dup", 0.7).unwrap();
+        store.deduplicate_content(&agent).unwrap();
+        let items = store.recall(&agent, 10).unwrap();
+        assert_eq!(items.len(), 1);
+        assert!((items[0].importance - 0.7).abs() < 1e-5);
+    }
+
+    // ── Round 8: WorkingMemory::iter_sorted / SemanticStore::get_value ───────
+
+    #[test]
+    fn test_working_memory_iter_sorted_alphabetical_order() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("c", "3").unwrap();
+        wm.set("a", "1").unwrap();
+        wm.set("b", "2").unwrap();
+        let sorted = wm.iter_sorted().unwrap();
+        let keys: Vec<&str> = sorted.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_semantic_get_value_returns_value_for_existing_key() {
+        let store = SemanticStore::new();
+        store.store("mykey", "myvalue", vec![]).unwrap();
+        assert_eq!(store.get_value("mykey").unwrap(), Some("myvalue".to_string()));
+    }
+
+    #[test]
+    fn test_semantic_get_value_returns_none_for_missing_key() {
+        let store = SemanticStore::new();
+        assert!(store.get_value("ghost").unwrap().is_none());
     }
 }

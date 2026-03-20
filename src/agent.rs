@@ -913,6 +913,22 @@ impl ToolRegistry {
         self.tools.values().collect()
     }
 
+    /// Rename a registered tool from `old_name` to `new_name`.
+    ///
+    /// The tool's `name` field and its registry key are both updated.
+    /// Returns `true` if the tool was found and renamed, `false` if `old_name`
+    /// is not registered.  If `new_name` is already registered, it is
+    /// overwritten.
+    pub fn rename_tool(&mut self, old_name: &str, new_name: impl Into<String>) -> bool {
+        let Some(mut spec) = self.tools.remove(old_name) else {
+            return false;
+        };
+        let new_name = new_name.into();
+        spec.name = new_name.clone();
+        self.tools.insert(new_name, spec);
+        true
+    }
+
     /// Return the number of registered tools.
     pub fn tool_count(&self) -> usize {
         self.tools.len()
@@ -2732,5 +2748,24 @@ mod tests {
     fn test_tool_registry_tool_specs_empty_when_no_tools() {
         let reg = ToolRegistry::new();
         assert!(reg.tool_specs().is_empty());
+    }
+
+    // ── Round 8: ToolRegistry::rename_tool ───────────────────────────────────
+
+    #[test]
+    fn test_rename_tool_updates_name_and_key() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("old", "desc", |_| serde_json::json!("ok")));
+        assert!(reg.rename_tool("old", "new"));
+        assert!(reg.has_tool("new"));
+        assert!(!reg.has_tool("old"));
+        let spec = reg.get("new").unwrap();
+        assert_eq!(spec.name, "new");
+    }
+
+    #[test]
+    fn test_rename_tool_returns_false_for_unknown_name() {
+        let mut reg = ToolRegistry::new();
+        assert!(!reg.rename_tool("ghost", "other"));
     }
 }
