@@ -152,6 +152,16 @@ impl RetryPolicy {
         Ok(self)
     }
 
+    /// Return the total maximum delay in milliseconds across all retry attempts.
+    ///
+    /// Sums `delay_for(attempt)` for every attempt from 1 to `max_attempts`.
+    /// Useful for estimating worst-case latency budgets.
+    pub fn total_max_delay_ms(&self) -> u64 {
+        (1..=self.max_attempts)
+            .map(|a| self.delay_for(a).as_millis() as u64)
+            .sum()
+    }
+
     /// Compute the delay before the given attempt number (1-based).
     ///
     /// - [`RetryKind::Exponential`]: `base_delay * 2^(attempt-1)`, capped at `MAX_RETRY_DELAY`.
@@ -490,6 +500,21 @@ impl CircuitBreaker {
     /// Return the service name this circuit breaker is protecting.
     pub fn service_name(&self) -> &str {
         &self.service
+    }
+
+    /// Return `true` if the circuit is currently `Closed` (healthy).
+    pub fn is_closed(&self) -> bool {
+        matches!(self.state(), Ok(CircuitState::Closed))
+    }
+
+    /// Return `true` if the circuit is currently `Open` (fast-failing).
+    pub fn is_open(&self) -> bool {
+        matches!(self.state(), Ok(CircuitState::Open { .. }))
+    }
+
+    /// Return `true` if the circuit is currently `HalfOpen` (probing).
+    pub fn is_half_open(&self) -> bool {
+        matches!(self.state(), Ok(CircuitState::HalfOpen))
     }
 
     /// Force the circuit back to `Closed` state, resetting all failure counters.

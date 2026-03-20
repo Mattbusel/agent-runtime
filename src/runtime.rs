@@ -18,8 +18,11 @@
 
 use crate::agent::{AgentConfig, ReActLoop, ReActStep, ToolSpec};
 use crate::error::AgentRuntimeError;
-use crate::memory::{AgentId, EpisodicStore, WorkingMemory};
 use crate::metrics::RuntimeMetrics;
+use crate::types::AgentId;
+
+#[cfg(feature = "memory")]
+use crate::memory::{EpisodicStore, WorkingMemory};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as FmtWrite;
 use std::marker::PhantomData;
@@ -162,9 +165,34 @@ impl AgentSession {
         self.steps.iter().map(|s| s.thought.as_str()).collect()
     }
 
+    /// Collect all action strings from every step, in order.
+    pub fn all_actions(&self) -> Vec<&str> {
+        self.steps.iter().map(|s| s.action.as_str()).collect()
+    }
+
     /// Collect all observation strings from every step, in order.
     pub fn all_observations(&self) -> Vec<&str> {
         self.steps.iter().map(|s| s.observation.as_str()).collect()
+    }
+
+    /// Return `true` if any checkpoint errors were recorded during the session.
+    ///
+    /// A non-empty `checkpoint_errors` list means some step snapshots may be
+    /// missing from storage, but the session itself completed successfully.
+    pub fn has_checkpoint_errors(&self) -> bool {
+        !self.checkpoint_errors.is_empty()
+    }
+
+    /// Return the episodic memory hit rate for this session.
+    ///
+    /// Computed as `memory_hits / step_count`. Returns `0.0` when there are
+    /// no steps, to avoid division by zero.
+    pub fn memory_hit_rate(&self) -> f64 {
+        let steps = self.steps.len();
+        if steps == 0 {
+            return 0.0;
+        }
+        self.memory_hits as f64 / steps as f64
     }
 
     /// Persist this session as a checkpoint under `"session:<session_id>"`.
@@ -253,7 +281,9 @@ impl AgentSession {
 /// ```
 /// Builder for [`AgentRuntime`].
 pub struct AgentRuntimeBuilder<S = NeedsConfig> {
+    #[cfg(feature = "memory")]
     memory: Option<EpisodicStore>,
+    #[cfg(feature = "memory")]
     working: Option<WorkingMemory>,
     #[cfg(feature = "graph")]
     graph: Option<GraphStore>,
@@ -292,8 +322,11 @@ impl DebugBuilderState for HasConfig {
 impl<S: DebugBuilderState> std::fmt::Debug for AgentRuntimeBuilder<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct(S::NAME);
-        s.field("memory", &self.memory.is_some())
-            .field("working", &self.working.is_some());
+        #[cfg(feature = "memory")]
+        {
+            s.field("memory", &self.memory.is_some())
+                .field("working", &self.working.is_some());
+        }
         #[cfg(feature = "graph")]
         s.field("graph", &self.graph.is_some());
         #[cfg(feature = "orchestrator")]
@@ -308,7 +341,9 @@ impl<S: DebugBuilderState> std::fmt::Debug for AgentRuntimeBuilder<S> {
 impl Default for AgentRuntimeBuilder<NeedsConfig> {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "memory")]
             memory: None,
+            #[cfg(feature = "memory")]
             working: None,
             #[cfg(feature = "graph")]
             graph: None,
@@ -328,12 +363,14 @@ impl Default for AgentRuntimeBuilder<NeedsConfig> {
 // Methods available on ALL builder states.
 impl<S> AgentRuntimeBuilder<S> {
     /// Attach an episodic memory store.
+    #[cfg(feature = "memory")]
     pub fn with_memory(mut self, store: EpisodicStore) -> Self {
         self.memory = Some(store);
         self
     }
 
     /// Attach a working memory store.
+    #[cfg(feature = "memory")]
     pub fn with_working_memory(mut self, wm: WorkingMemory) -> Self {
         self.working = Some(wm);
         self
@@ -440,7 +477,9 @@ impl AgentRuntimeBuilder<HasConfig> {
         let agent_config = self.agent_config.unwrap();
 
         AgentRuntime {
+            #[cfg(feature = "memory")]
             memory: self.memory,
+            #[cfg(feature = "memory")]
             working: self.working,
             #[cfg(feature = "graph")]
             graph: self.graph,
@@ -492,7 +531,9 @@ impl TokenEstimator for CharDivTokenEstimator {
 
 /// Unified runtime that coordinates memory, graph, orchestration, and agent loop.
 pub struct AgentRuntime {
+    #[cfg(feature = "memory")]
     memory: Option<EpisodicStore>,
+    #[cfg(feature = "memory")]
     working: Option<WorkingMemory>,
     #[cfg(feature = "graph")]
     graph: Option<GraphStore>,
@@ -641,6 +682,7 @@ impl AgentRuntime {
         let mut graph_lookups = 0usize;
 
         // Build enriched prompt from episodic memory.
+        #[cfg(feature = "memory")]
         let enriched_prompt = if let Some(ref store) = self.memory {
             let memories = store.recall(&agent_id, self.agent_config.max_memory_recalls)?;
 
@@ -694,8 +736,11 @@ impl AgentRuntime {
         } else {
             prompt.to_owned()
         };
+        #[cfg(not(feature = "memory"))]
+        let enriched_prompt = prompt.to_owned();
 
         // Inject working memory into prompt.
+        #[cfg(feature = "memory")]
         let enriched_prompt = if let Some(ref wm) = self.working {
             let entries = wm.entries()?;
             if entries.is_empty() {
@@ -841,6 +886,7 @@ impl AgentRuntime {
     }
 
     /// Return a reference to the episodic memory store, if configured.
+    #[cfg(feature = "memory")]
     pub fn memory(&self) -> Option<&EpisodicStore> {
         self.memory.as_ref()
     }
@@ -852,6 +898,7 @@ impl AgentRuntime {
     }
 
     /// Return a reference to the working memory, if configured.
+    #[cfg(feature = "memory")]
     pub fn working_memory(&self) -> Option<&WorkingMemory> {
         self.working.as_ref()
     }
@@ -1528,5 +1575,83 @@ mod tests {
             checkpoint_errors: vec![],
         };
         assert_eq!(empty_session.final_answer(), None);
+    }
+
+    #[test]
+    fn test_all_actions_returns_actions_in_order() {
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![
+                ReActStep::new("think1", "search {}", "result"),
+                ReActStep::new("think2", "FINAL_ANSWER done", ""),
+            ],
+            memory_hits: 0,
+            graph_lookups: 0,
+            duration_ms: 10,
+            checkpoint_errors: vec![],
+        };
+        assert_eq!(session.all_actions(), vec!["search {}", "FINAL_ANSWER done"]);
+    }
+
+    #[test]
+    fn test_has_checkpoint_errors_false_when_empty() {
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![],
+            memory_hits: 0,
+            graph_lookups: 0,
+            duration_ms: 0,
+            checkpoint_errors: vec![],
+        };
+        assert!(!session.has_checkpoint_errors());
+    }
+
+    #[test]
+    fn test_has_checkpoint_errors_true_when_non_empty() {
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![],
+            memory_hits: 0,
+            graph_lookups: 0,
+            duration_ms: 0,
+            checkpoint_errors: vec!["err".into()],
+        };
+        assert!(session.has_checkpoint_errors());
+    }
+
+    #[test]
+    fn test_memory_hit_rate_zero_with_no_steps() {
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![],
+            memory_hits: 5,
+            graph_lookups: 0,
+            duration_ms: 0,
+            checkpoint_errors: vec![],
+        };
+        assert_eq!(session.memory_hit_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_memory_hit_rate_correct_proportion() {
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![
+                ReActStep::new("t", "a", "o"),
+                ReActStep::new("t", "a", "o"),
+                ReActStep::new("t", "a", "o"),
+                ReActStep::new("t", "a", "o"),
+            ],
+            memory_hits: 2,
+            graph_lookups: 0,
+            duration_ms: 0,
+            checkpoint_errors: vec![],
+        };
+        assert!((session.memory_hit_rate() - 0.5).abs() < 1e-9);
     }
 }

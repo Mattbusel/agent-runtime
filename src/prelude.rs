@@ -6,15 +6,16 @@
 
 pub use crate::error::AgentRuntimeError;
 
-#[cfg(feature = "memory")]
 pub use crate::runtime::{
     AgentRuntime, AgentRuntimeBuilder, AgentSession, CharDivTokenEstimator, TokenEstimator,
 };
 
+pub use crate::types::{AgentId, MemoryId};
+
 #[cfg(feature = "memory")]
 pub use crate::memory::{
-    AgentId, DecayPolicy, EpisodicStore, EpisodicStoreBuilder, EvictionPolicy, MemoryId,
-    MemoryItem, SemanticStore, WorkingMemory,
+    DecayPolicy, EpisodicStore, EpisodicStoreBuilder, EvictionPolicy, MemoryItem, SemanticStore,
+    WorkingMemory,
 };
 
 #[cfg(feature = "graph")]

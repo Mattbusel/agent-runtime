@@ -651,10 +651,28 @@ impl GraphStore {
         Ok(inner.entities.len())
     }
 
+    /// Return the number of entities in the graph.
+    ///
+    /// Alias for [`entity_count`] using graph-theory terminology.
+    ///
+    /// [`entity_count`]: GraphStore::entity_count
+    pub fn node_count(&self) -> Result<usize, AgentRuntimeError> {
+        self.entity_count()
+    }
+
     /// Return the number of relationships in the graph.
     pub fn relationship_count(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "relationship_count");
         Ok(inner.relationships.len())
+    }
+
+    /// Return the number of relationships in the graph.
+    ///
+    /// Alias for [`relationship_count`] using graph-theory terminology.
+    ///
+    /// [`relationship_count`]: GraphStore::relationship_count
+    pub fn edge_count(&self) -> Result<usize, AgentRuntimeError> {
+        self.relationship_count()
     }
 
     /// Count entities whose label equals `label` (case-sensitive).
@@ -2346,5 +2364,24 @@ mod tests {
         let g = GraphStore::new();
         let id = EntityId::new("ghost");
         assert_eq!(g.out_degree(&id).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_node_count_is_alias_for_entity_count() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        assert_eq!(g.node_count().unwrap(), g.entity_count().unwrap());
+        assert_eq!(g.node_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_edge_count_is_alias_for_relationship_count() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        assert_eq!(g.edge_count().unwrap(), g.relationship_count().unwrap());
+        assert_eq!(g.edge_count().unwrap(), 1);
     }
 }

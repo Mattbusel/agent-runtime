@@ -276,3 +276,35 @@ async fn error_circuit_open_fast_fails_tool() {
         "expected circuit-open error observation, got: {obs}"
     );
 }
+
+// ── Loop timeout ──────────────────────────────────────────────────────────────
+
+/// Verify that `with_loop_timeout_ms` causes the ReAct loop to return an error
+/// when iterations collectively exceed the configured wall-clock deadline.
+///
+/// The deadline is checked at the top of each iteration. Each inference call
+/// sleeps 15 ms without returning `FINAL_ANSWER`, so after two iterations the
+/// cumulative time exceeds the 20 ms deadline.
+#[tokio::test]
+async fn error_loop_timeout_fires_when_inference_is_slow() {
+    use llm_agent_runtime::agent::{AgentConfig, ReActLoop};
+
+    let config = AgentConfig::new(100, "timeout-model").with_loop_timeout_ms(20);
+    let loop_ = ReActLoop::new(config);
+
+    let result = loop_
+        .run("hello", |_ctx| async {
+            // Sleep per iteration so cumulative time exceeds the deadline.
+            tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
+            // Keep the loop going (not FINAL_ANSWER); unknown tool produces an error observation.
+            "Thought: still working\nAction: unknown_tool {}".to_string()
+        })
+        .await;
+
+    assert!(result.is_err(), "expected timeout error, got Ok");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.to_lowercase().contains("timeout"),
+        "error message should mention timeout; was: {msg}"
+    );
+}

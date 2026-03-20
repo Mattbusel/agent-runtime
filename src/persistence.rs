@@ -102,6 +102,11 @@ impl FilePersistenceBackend {
         }
     }
 
+    /// Return the base directory that this backend stores files in.
+    pub fn base_dir(&self) -> &std::path::Path {
+        self.base_dir.as_ref()
+    }
+
     /// Compute the file path for a given key.
     ///
     /// Uses a `<readable_prefix>-<djb2_hash>.bin` scheme to guarantee uniqueness
@@ -208,6 +213,14 @@ impl FilePersistenceBackend {
             }
         }
         Ok(keys)
+    }
+
+    /// Check whether a key exists in the backend without loading its value.
+    ///
+    /// Returns `Ok(true)` if the file for `key` is present in the store.
+    pub async fn exists(&self, key: &str) -> Result<bool, AgentRuntimeError> {
+        let path = self.path_for(key);
+        Ok(tokio::fs::metadata(&path).await.is_ok())
     }
 }
 

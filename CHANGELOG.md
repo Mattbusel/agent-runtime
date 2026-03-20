@@ -11,6 +11,63 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.10.0] - 2026-03-20
+
+### Added
+
+- **`src/types.rs`** — new unconditional module housing `AgentId` and `MemoryId`.
+  Both types are now available without enabling the `memory` feature; `memory.rs`
+  re-exports them for backward compatibility.
+- **`AgentRuntime` / `AgentRuntimeBuilder` no longer require the `memory` feature**
+  (`runtime.rs`) — memory-specific fields (`EpisodicStore`, `WorkingMemory`) and
+  their accessor/builder methods are now individually gated with per-field
+  `#[cfg(feature = "memory")]`, so the runtime compiles and operates without the
+  `memory` feature enabled.
+- **`AgentRuntime::run_agent_with_provider`** (`runtime.rs`, `providers` feature) —
+  convenience method that wires an `Arc<dyn LlmProvider>` into `run_agent` directly,
+  removing the need to write a manual closure when using a built-in provider.
+- **`FilePersistenceBackend::exists`** (`persistence.rs`) — async probe that returns
+  `Ok(true)` when a checkpoint key already exists on disk; useful for conditional
+  save/load patterns without a full load round-trip.
+- **`WorkingMemory::clear`** (`memory.rs`) — remove all entries from a working
+  memory instance without recreating it; completes the CRUD surface alongside the
+  existing `remove` and `keys` methods.
+
+### Changed
+
+- **`SemanticStore::store_with_embedding`** (`memory.rs`) — embeddings are now
+  L2-normalised to unit vectors at insert time.  `retrieve_similar` normalises the
+  query vector at query time and computes a dot product instead of full cosine
+  similarity, reducing per-query work from two norm computations + dot product to
+  one norm computation + dot product.  The removed `cosine_similarity` helper was
+  unused after this change and has been deleted.
+- **`EpisodicStore::recall` / `recall_recent` / `recall_all` / `recall_tagged` /
+  `SemanticStore::retrieve_similar` / `WorkingMemory` sort paths** (`memory.rs`) —
+  all `sort_by` calls replaced with `sort_unstable_by`.  For `f32` importance scores
+  the ordering among equal elements is irrelevant, making the unstable variant
+  strictly faster with no observable behavioural difference.
+- **`Deduplicator::check_and_register` / `check`** (`orchestrator.rs`) — full-scan
+  TTL expiry (`retain` over the entire cache and in-flight maps) now runs only every
+  64 calls instead of on every invocation.  Correctness is maintained by an inline
+  per-key expiry check that treats a found-but-expired entry as a cache miss.  The
+  new `call_count: u64` field on `DeduplicatorInner` wraps silently on overflow
+  (all `u64::MAX` traffic is handled correctly).
+
+### Tests
+
+- **`test_react_iteration_span_is_emitted`** / **`test_tool_dispatch_span_is_emitted`**
+  (`tests/test_tracing_logging.rs`) — new integration tests using a custom
+  `tracing_subscriber::Layer` (`SpanCollector`) to assert that the
+  `"react_iteration"` and `"tool_dispatch"` span names are emitted during a
+  real `ReActLoop` run.
+- **`error_loop_timeout_fires_when_inference_is_slow`**
+  (`tests/test_error_paths.rs`) — verifies that `AgentConfig::with_loop_timeout_ms`
+  actually terminates the loop when the cumulative iteration time exceeds the
+  deadline, using a 20 ms timeout and a 15 ms-per-iteration sleep to reliably
+  trigger it.
+
+---
+
 ## [1.9.0] - 2026-03-20
 
 ### Added

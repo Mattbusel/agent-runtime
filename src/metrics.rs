@@ -259,6 +259,18 @@ impl MetricsSnapshot {
             "per_tool_failures": self.per_tool_failures,
         })
     }
+
+    /// Return `true` if all counters are zero (no activity has been recorded).
+    pub fn is_zero(&self) -> bool {
+        self.active_sessions == 0
+            && self.total_sessions == 0
+            && self.total_steps == 0
+            && self.total_tool_calls == 0
+            && self.failed_tool_calls == 0
+            && self.backpressure_shed_count == 0
+            && self.memory_recall_count == 0
+            && self.checkpoint_errors == 0
+    }
 }
 
 impl std::fmt::Display for MetricsSnapshot {

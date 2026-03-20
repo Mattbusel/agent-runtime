@@ -40,7 +40,9 @@ compile-time typestate builder that prevents misconfiguration at zero runtime co
 - **Persistence** — async `PersistenceBackend` trait and `FilePersistenceBackend` for
   session and per-step checkpointing.
 - **Metrics** — atomic counters for active/total sessions, steps, tool calls, backpressure
-  sheds, and memory recalls.
+  sheds, memory recalls, and checkpoint errors.
+- **`types` module** — `AgentId` and `MemoryId` are always available without enabling the
+  `memory` feature, allowing the runtime to compile in minimal configurations.
 
 ---
 
@@ -230,6 +232,34 @@ async fn main() {
 }
 ```
 
+### 5. Wiring a provider into the runtime
+
+`run_agent_with_provider` removes the boilerplate closure when using a built-in
+provider:
+
+```rust,no_run
+use agent_runtime::prelude::*;
+use agent_runtime::providers::AnthropicProvider;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), AgentRuntimeError> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY not set");
+    let provider = Arc::new(AnthropicProvider::new(api_key));
+
+    let runtime = AgentRuntime::builder()
+        .with_agent_config(AgentConfig::new(10, "claude-sonnet-4-6"))
+        .build();
+
+    let session = runtime
+        .run_agent_with_provider(AgentId::new("agent-1"), "What is 6 * 7?", provider)
+        .await?;
+
+    println!("Answer: {}", session.final_answer().unwrap_or("no answer"));
+    Ok(())
+}
+```
+
 ---
 
 ## Feature Flags
@@ -286,6 +316,8 @@ let runtime = AgentRuntime::builder()       // AgentRuntimeBuilder<NeedsConfig>
 | `.with_system_prompt(s)` | `String` | `"You are a helpful AI agent."` | Injected at the head of every context string |
 | `.with_max_memory_recalls(n)` | `usize` | `3` | Maximum episodic items injected per run |
 | `.with_max_memory_tokens(n)` | `usize` | `None` | Approximate token budget (~4 chars/token) |
+| `.with_stop_sequences(v)` | `Vec<String>` | `[]` | Stop sequences forwarded to the provider on every call |
+| `.with_loop_timeout_ms(n)` | `u64` | `None` | Wall-clock deadline for the entire ReAct loop in milliseconds |
 
 ### `EpisodicStore` constructors
 
@@ -329,6 +361,24 @@ let spec = ToolSpec::new("search", "Searches the web", |args| {
 })
 .with_required_fields(vec!["q".to_string()])
 .with_circuit_breaker(cb_arc);
+```
+
+### `ToolRegistry`
+
+```rust
+// Check and remove tools at runtime
+if registry.contains("old-tool") {
+    let removed: Option<ToolSpec> = registry.remove("old-tool");
+}
+```
+
+### `FilePersistenceBackend`
+
+```rust
+// Conditional save — only checkpoint if one doesn't exist yet
+if !backend.exists("agent-1-session").await? {
+    backend.save("agent-1-session", &data).await?;
+}
 ```
 
 ---

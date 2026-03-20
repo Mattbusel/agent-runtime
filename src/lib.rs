@@ -68,6 +68,7 @@ pub mod util;
 
 pub mod error;
 pub mod prelude;
+pub mod types;
 
 #[cfg(feature = "memory")]
 pub mod memory;
@@ -80,8 +81,6 @@ pub mod orchestrator;
 
 pub mod agent;
 pub mod metrics;
-
-#[cfg(feature = "memory")]
 pub mod runtime;
 
 #[cfg(feature = "persistence")]
@@ -94,14 +93,14 @@ pub mod providers;
 
 pub use error::AgentRuntimeError;
 
-#[cfg(feature = "memory")]
 pub use runtime::{AgentRuntime, AgentRuntimeBuilder, AgentSession};
 
-// Re-export the most fundamental types unconditionally so users don't need
-// to enable specific features just to use `AgentRuntime::builder()`.
+// Core identifier types — always available.
+pub use types::{AgentId, MemoryId};
 
+// Memory-specific re-exports.
 #[cfg(feature = "memory")]
-pub use memory::{AgentId, MemoryId, MemoryItem};
+pub use memory::MemoryItem;
 
 #[cfg(feature = "graph")]
 pub use graph::{Entity, EntityId, GraphStore, Relationship};

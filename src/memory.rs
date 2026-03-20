@@ -983,6 +983,15 @@ impl EpisodicStore {
         Ok(())
     }
 
+    /// Remove **all** episodes for **all** agents.
+    ///
+    /// After this call `len()` returns `0` and `list_agents()` returns an empty slice.
+    pub fn clear_all(&self) -> Result<(), AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::clear_all");
+        inner.items.clear();
+        Ok(())
+    }
+
     /// Export all memories for the given agent as a serializable Vec.
     ///
     /// Useful for migrating agent state across runtime instances.
@@ -1299,6 +1308,19 @@ impl SemanticStore {
         Ok(tags.into_iter().collect())
     }
 
+    /// Return the number of distinct tags across all stored entries.
+    ///
+    /// Equivalent to `list_tags()?.len()` but avoids allocating the full tag list.
+    pub fn tag_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::tag_count");
+        let distinct: std::collections::HashSet<&str> = inner
+            .entries
+            .iter()
+            .flat_map(|e| e.tags.iter().map(|t| t.as_str()))
+            .collect();
+        Ok(distinct.len())
+    }
+
     /// Return the total number of stored entries.
     pub fn len(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::len");
@@ -1502,6 +1524,22 @@ impl WorkingMemory {
         inner.map.clear();
         inner.order.clear();
         Ok(())
+    }
+
+    /// Remove all entries and return them as a `Vec<(key, value)>` in insertion order.
+    ///
+    /// After this call the memory is empty. Useful for atomically moving the
+    /// contents to another data structure.
+    pub fn drain(&self) -> Result<Vec<(String, String)>, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "WorkingMemory::drain");
+        let pairs: Vec<(String, String)> = inner
+            .order
+            .iter()
+            .filter_map(|k| inner.map.get(k).map(|v| (k.clone(), v.clone())))
+            .collect();
+        inner.map.clear();
+        inner.order.clear();
+        Ok(pairs)
     }
 
     /// Return the current number of entries.

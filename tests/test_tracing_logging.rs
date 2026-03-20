@@ -235,3 +235,92 @@ async fn test_tracing_env_filter_level_respected() {
 
     assert!(result.is_ok());
 }
+
+// ── Span name capture ─────────────────────────────────────────────────────────
+
+use std::sync::{Arc, Mutex};
+use tracing_subscriber::{layer::SubscriberExt, Registry};
+
+/// A minimal tracing `Layer` that records the name of every new span created
+/// while it is active.  Used to assert that specific instrumentation spans
+/// (`react_iteration`, `tool_dispatch`) are emitted by the agent loop.
+struct SpanCollector {
+    names: Arc<Mutex<Vec<String>>>,
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanCollector {
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        _id: &tracing::span::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let name = attrs.metadata().name().to_owned();
+        if let Ok(mut names) = self.names.lock() {
+            names.push(name);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_react_iteration_span_is_emitted() {
+    let names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+    let collector = SpanCollector {
+        names: names.clone(),
+    };
+    let subscriber = Registry::default().with(collector);
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let config = AgentConfig::new(5, "span-test-model");
+    let loop_ = ReActLoop::new(config);
+    let _ = loop_
+        .run("hello", |_ctx| async {
+            "Thought: ok\nAction: FINAL_ANSWER done".to_string()
+        })
+        .await;
+
+    let collected = names.lock().unwrap();
+    assert!(
+        collected.iter().any(|s| s == "react_iteration"),
+        "expected 'react_iteration' span; got: {collected:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_tool_dispatch_span_is_emitted() {
+    let names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+    let collector = SpanCollector {
+        names: names.clone(),
+    };
+    let subscriber = Registry::default().with(collector);
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let config = AgentConfig::new(5, "span-test-model");
+    let mut loop_ = ReActLoop::new(config);
+    loop_.register_tool(ToolSpec::new(
+        "ping",
+        "Ping tool",
+        |_| serde_json::json!({"ok": true}),
+    ));
+
+    let mut call_count = 0u32;
+    let _ = loop_
+        .run("test", |_ctx| {
+            call_count += 1;
+            let count = call_count;
+            async move {
+                if count == 1 {
+                    "Thought: ping\nAction: ping {}".to_string()
+                } else {
+                    "Thought: done\nAction: FINAL_ANSWER ok".to_string()
+                }
+            }
+        })
+        .await;
+
+    let collected = names.lock().unwrap();
+    assert!(
+        collected.iter().any(|s| s == "tool_dispatch"),
+        "expected 'tool_dispatch' span; got: {collected:?}"
+    );
+}

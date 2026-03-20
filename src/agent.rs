@@ -145,6 +145,23 @@ pub struct ReActStep {
 }
 
 impl ReActStep {
+    /// Construct a step with zero `step_duration_ms`.
+    ///
+    /// Primarily useful in tests that need to build [`AgentSession`] values
+    /// without running the full ReAct loop.
+    pub fn new(
+        thought: impl Into<String>,
+        action: impl Into<String>,
+        observation: impl Into<String>,
+    ) -> Self {
+        Self {
+            thought: thought.into(),
+            action: action.into(),
+            observation: observation.into(),
+            step_duration_ms: 0,
+        }
+    }
+
     /// Returns `true` if this step's action is a `FINAL_ANSWER`.
     pub fn is_final_answer(&self) -> bool {
         self.action.trim().to_ascii_uppercase().starts_with("FINAL_ANSWER")
@@ -315,6 +332,14 @@ impl AgentConfig {
     pub fn with_stop_sequences(mut self, sequences: Vec<String>) -> Self {
         self.stop_sequences = sequences;
         self
+    }
+
+    /// Return `true` if this configuration is logically valid.
+    ///
+    /// Specifically, `max_iterations` must be at least 1 and `model` must be
+    /// a non-empty string.
+    pub fn is_valid(&self) -> bool {
+        self.max_iterations >= 1 && !self.model.is_empty()
     }
 }
 
@@ -2344,5 +2369,48 @@ mod tests {
         }).await.unwrap();
 
         assert!(steps[0].observation.contains("blocked"), "expected blocked observation, got: {}", steps[0].observation);
+    }
+
+    #[test]
+    fn test_react_step_new_constructor() {
+        let s = ReActStep::new("think", "act", "obs");
+        assert_eq!(s.thought, "think");
+        assert_eq!(s.action, "act");
+        assert_eq!(s.observation, "obs");
+        assert_eq!(s.step_duration_ms, 0);
+    }
+
+    #[test]
+    fn test_react_step_new_is_tool_call() {
+        let s = ReActStep::new("think", "search {}", "result");
+        assert!(s.is_tool_call());
+        assert!(!s.is_final_answer());
+    }
+
+    #[test]
+    fn test_react_step_new_is_final_answer() {
+        let s = ReActStep::new("done", "FINAL_ANSWER 42", "");
+        assert!(s.is_final_answer());
+        assert!(!s.is_tool_call());
+    }
+
+    #[test]
+    fn test_agent_config_is_valid_with_valid_config() {
+        let cfg = AgentConfig::new(5, "my-model");
+        assert!(cfg.is_valid());
+    }
+
+    #[test]
+    fn test_agent_config_is_valid_with_zero_iterations() {
+        let mut cfg = AgentConfig::new(1, "my-model");
+        cfg.max_iterations = 0;
+        assert!(!cfg.is_valid());
+    }
+
+    #[test]
+    fn test_agent_config_is_valid_with_empty_model() {
+        let mut cfg = AgentConfig::new(5, "my-model");
+        cfg.model = String::new();
+        assert!(!cfg.is_valid());
     }
 }
