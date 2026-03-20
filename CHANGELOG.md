@@ -11,6 +11,28 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.67.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::min_observation_bytes`** — smallest non-empty observation byte length in a session.
+- **`AgentSession::min_thought_bytes`** — smallest non-empty thought byte length in a session.
+- **`AgentSession::proportion_empty_thoughts`** — fraction of steps with an empty thought field.
+- **`AgentSession::has_failed_steps`** — `true` if any step observation starts with `[error]`.
+- **`AgentSession::has_thought_starting_with`** — predicate: any thought starts with a given prefix.
+- **`AgentSession::step_count_above_action_bytes`** — count steps whose action exceeds a byte threshold.
+- **`AgentRuntime::config`** — accessor for the runtime's `AgentConfig`.
+- **`AgentConfig::model_starts_with`** — check if the model name starts with a given prefix.
+- **`ToolRegistry::tools_with_required_fields_count`** — count tools that have required fields.
+- **`RuntimeMetrics::memory_pressure_ratio`** — ratio of memory recalls to total steps.
+- **`RuntimeMetrics::sessions_per_step`** — ratio of total sessions to total steps.
+- **`WorkingMemory::key_count_starting_with`** — count keys that begin with a prefix.
+- **`Pipeline::all_stage_names`** — all stage names in insertion order as owned strings.
+- **`Pipeline::has_exactly_n_stages`** — predicate: pipeline has exactly n stages.
+- **`GraphStore::entities_with_no_relationships`** — sink nodes with no outgoing edges.
+
+---
+
 ## [1.66.0] - 2026-03-20
 
 ### Added
