@@ -2003,4 +2003,136 @@ mod tests {
         let visited = g.dfs_bounded("a", 100, 2).unwrap();
         assert_eq!(visited.len(), 2, "should stop at 2 nodes");
     }
+
+    // ── New API tests (Rounds 4-8) ────────────────────────────────────────────
+
+    #[test]
+    fn test_entity_exists_and_relationship_exists() {
+        let g = GraphStore::new();
+        let a = EntityId::new("a");
+        let b = EntityId::new("b");
+        assert!(!g.entity_exists(&a).unwrap());
+        g.add_entity(Entity::new("a", "Node")).unwrap();
+        assert!(g.entity_exists(&a).unwrap());
+        assert!(!g.relationship_exists(&a, &b, "knows").unwrap());
+        g.add_entity(Entity::new("b", "Node")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "knows", 1.0)).unwrap();
+        assert!(g.relationship_exists(&a, &b, "knows").unwrap());
+        assert!(!g.relationship_exists(&a, &b, "likes").unwrap());
+    }
+
+    #[test]
+    fn test_get_relationships_for_returns_outgoing() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        let a = EntityId::new("a");
+        g.add_relationship(Relationship::new("a", "b", "r", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "r", 1.0)).unwrap();
+        let rels = g.get_relationships_for(&a).unwrap();
+        assert_eq!(rels.len(), 2);
+    }
+
+    #[test]
+    fn test_relationships_between_finds_both_directions() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("x", "N")).unwrap();
+        g.add_entity(Entity::new("y", "N")).unwrap();
+        let x = EntityId::new("x");
+        let y = EntityId::new("y");
+        g.add_relationship(Relationship::new("x", "y", "follows", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("y", "x", "blocks", 1.0)).unwrap();
+        let rels = g.relationships_between(&x, &y).unwrap();
+        assert_eq!(rels.len(), 2);
+    }
+
+    #[test]
+    fn test_find_entities_by_property() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Person").with_property("age", serde_json::json!(30))).unwrap();
+        g.add_entity(Entity::new("b", "Person").with_property("age", serde_json::json!(25))).unwrap();
+        g.add_entity(Entity::new("c", "Person").with_property("age", serde_json::json!(30))).unwrap();
+        let found = g.find_entities_by_property("age", &serde_json::json!(30)).unwrap();
+        assert_eq!(found.len(), 2);
+        let ids: Vec<_> = found.iter().map(|e| e.id.as_str()).collect();
+        assert!(ids.contains(&"a") && ids.contains(&"c"));
+    }
+
+    #[test]
+    fn test_neighbor_entities_returns_entity_objects() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("root", "R")).unwrap();
+        g.add_entity(Entity::new("child1", "C")).unwrap();
+        g.add_entity(Entity::new("child2", "C")).unwrap();
+        let root = EntityId::new("root");
+        g.add_relationship(Relationship::new("root", "child1", "has", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("root", "child2", "has", 1.0)).unwrap();
+        let neighbors = g.neighbor_entities(&root).unwrap();
+        assert_eq!(neighbors.len(), 2);
+        let labels: Vec<_> = neighbors.iter().map(|e| e.label.as_str()).collect();
+        assert!(labels.iter().all(|l| *l == "C"));
+    }
+
+    #[test]
+    fn test_remove_all_relationships_for() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        let a = EntityId::new("a");
+        g.add_relationship(Relationship::new("a", "b", "r1", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "r2", 1.0)).unwrap();
+        let removed = g.remove_all_relationships_for(&a).unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(g.relationship_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_topological_sort_returns_valid_order() {
+        let g = GraphStore::new();
+        for id in &["a", "b", "c", "d"] {
+            g.add_entity(Entity::new(*id, "N")).unwrap();
+        }
+        g.add_relationship(Relationship::new("a", "b", "r", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "r", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("c", "d", "r", 1.0)).unwrap();
+        let order = g.topological_sort().unwrap();
+        assert_eq!(order.len(), 4);
+        let pos: std::collections::HashMap<_, _> = order.iter().enumerate().map(|(i, id)| (id.as_str().to_owned(), i)).collect();
+        assert!(pos["a"] < pos["b"]);
+        assert!(pos["b"] < pos["c"]);
+        assert!(pos["c"] < pos["d"]);
+    }
+
+    #[test]
+    fn test_topological_sort_rejects_cycle() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("x", "N")).unwrap();
+        g.add_entity(Entity::new("y", "N")).unwrap();
+        g.add_relationship(Relationship::new("x", "y", "r", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("y", "x", "r", 1.0)).unwrap();
+        assert!(g.topological_sort().is_err());
+    }
+
+    #[test]
+    fn test_entity_count_by_label() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Person")).unwrap();
+        g.add_entity(Entity::new("b", "Person")).unwrap();
+        g.add_entity(Entity::new("c", "Organization")).unwrap();
+        assert_eq!(g.entity_count_by_label("Person").unwrap(), 2);
+        assert_eq!(g.entity_count_by_label("Organization").unwrap(), 1);
+        assert_eq!(g.entity_count_by_label("Unknown").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_update_entity_label_and_property() {
+        let g = GraphStore::new();
+        let id = EntityId::new("e1");
+        g.add_entity(Entity::new("e1", "Old")).unwrap();
+        assert!(g.update_entity_label(&id, "New").unwrap());
+        assert_eq!(g.get_entity(&id).unwrap().label, "New");
+        assert!(g.update_entity_property(&id, "key", serde_json::json!("val")).unwrap());
+        assert_eq!(g.get_entity(&id).unwrap().properties["key"], serde_json::json!("val"));
+    }
 }

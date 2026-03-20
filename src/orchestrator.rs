@@ -1572,4 +1572,83 @@ mod tests {
         // All 10 threads acquired a slot; depth must be exactly 10
         assert_eq!(g.depth().unwrap(), 10);
     }
+
+    // ── New API tests (Rounds 4-8) ────────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_constant_has_fixed_delay() {
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        assert_eq!(p.delay_for(1), Duration::from_millis(100));
+        assert_eq!(p.delay_for(2), Duration::from_millis(100));
+        assert_eq!(p.delay_for(10), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_retry_policy_exponential_doubles() {
+        let p = RetryPolicy::exponential(5, 10).unwrap();
+        assert_eq!(p.delay_for(1), Duration::from_millis(10));
+        assert_eq!(p.delay_for(2), Duration::from_millis(20));
+        assert_eq!(p.delay_for(3), Duration::from_millis(40));
+    }
+
+    #[test]
+    fn test_retry_policy_with_max_attempts() {
+        let p = RetryPolicy::constant(3, 50).unwrap();
+        let p2 = p.with_max_attempts(7).unwrap();
+        assert_eq!(p2.max_attempts, 7);
+        assert!(RetryPolicy::constant(1, 50).unwrap().with_max_attempts(0).is_err());
+    }
+
+    #[test]
+    fn test_circuit_breaker_reset_returns_to_closed() {
+        let cb = CircuitBreaker::new("svc", 2, Duration::from_secs(60)).unwrap();
+        cb.record_failure();
+        cb.record_failure(); // should open
+        assert_ne!(cb.state().unwrap(), CircuitState::Closed);
+        cb.reset();
+        assert_eq!(cb.state().unwrap(), CircuitState::Closed);
+        assert_eq!(cb.failure_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_deduplicator_clear_resets_all_state() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("k1").unwrap();
+        d.check_and_register("k2").unwrap();
+        d.complete("k1", "r1").unwrap();
+        assert_eq!(d.in_flight_count().unwrap(), 1);
+        assert_eq!(d.cached_count().unwrap(), 1);
+        d.clear().unwrap();
+        assert_eq!(d.in_flight_count().unwrap(), 0);
+        assert_eq!(d.cached_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_deduplicator_purge_expired_removes_stale() {
+        let d = Deduplicator::new(Duration::from_millis(1));
+        d.check_and_register("x").unwrap();
+        d.complete("x", "result").unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        let removed = d.purge_expired().unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(d.cached_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_backpressure_utilization_ratio() {
+        let g = BackpressureGuard::new(4).unwrap();
+        g.try_acquire().unwrap();
+        g.try_acquire().unwrap();
+        let ratio = g.utilization_ratio().unwrap();
+        assert!((ratio - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_pipeline_stage_count_and_names() {
+        let p = Pipeline::new()
+            .add_stage("first", |s| Ok(s + "1"))
+            .add_stage("second", |s| Ok(s + "2"));
+        assert_eq!(p.stage_count(), 2);
+        assert_eq!(p.stage_names(), vec!["first", "second"]);
+    }
 }

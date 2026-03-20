@@ -296,6 +296,8 @@ pub struct MetricsSnapshot {
     pub backpressure_shed_count: u64,
     /// Total number of memory recall operations.
     pub memory_recall_count: u64,
+    /// Total number of checkpoint failures encountered during `run_agent`.
+    pub checkpoint_errors: u64,
     /// Per-tool call counts: `tool_name → total_calls`.
     pub per_tool_calls: HashMap<String, u64>,
     /// Per-tool failure counts: `tool_name → failed_calls`.
@@ -344,6 +346,8 @@ pub struct RuntimeMetrics {
     pub backpressure_shed_count: AtomicU64,
     /// Total number of memory recall operations.
     pub memory_recall_count: AtomicU64,
+    /// Total number of checkpoint failures encountered during `run_agent`.
+    pub checkpoint_errors: AtomicU64,
     /// All four per-tool / per-agent maps under a single lock.
     per_tool: Mutex<PerToolMaps>,
     /// Per-step latency histogram.
@@ -360,6 +364,7 @@ impl Default for RuntimeMetrics {
             failed_tool_calls: AtomicU64::new(0),
             backpressure_shed_count: AtomicU64::new(0),
             memory_recall_count: AtomicU64::new(0),
+            checkpoint_errors: AtomicU64::new(0),
             per_tool: Mutex::new(PerToolMaps::default()),
             step_latency: LatencyHistogram::default(),
         }
@@ -854,5 +859,56 @@ mod tests {
         m.reset();
         assert!(m.per_agent_tool_calls_snapshot().is_empty());
         assert!(m.per_agent_tool_failures_snapshot().is_empty());
+    }
+
+    // ── New API tests (Rounds 4-8) ────────────────────────────────────────────
+
+    #[test]
+    fn test_latency_histogram_min_max_ms() {
+        let h = LatencyHistogram::default();
+        assert!(h.min_ms().is_none());
+        assert!(h.max_ms().is_none());
+
+        h.record(3);  // bucket 1 (≤5ms)
+        h.record(200); // bucket 5 (≤500ms)
+        assert!(h.min_ms().is_some());
+        assert!(h.max_ms().is_some());
+        assert!(h.min_ms().unwrap() <= h.max_ms().unwrap());
+    }
+
+    #[test]
+    fn test_latency_histogram_p50_p95_p99() {
+        let h = LatencyHistogram::default();
+        for _ in 0..100 {
+            h.record(5); // all in ≤5ms bucket
+        }
+        // p50, p95, p99 should all resolve to the same bucket bound
+        let p50 = h.p50();
+        let p95 = h.p95();
+        let p99 = h.p99();
+        assert_eq!(p50, p95);
+        assert_eq!(p95, p99);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_delta_reflects_increments() {
+        let m = RuntimeMetrics::new();
+        let before = m.snapshot();
+        m.total_steps.fetch_add(5, std::sync::atomic::Ordering::Relaxed);
+        m.total_tool_calls.fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+        let after = m.snapshot();
+        let delta = MetricsSnapshot::delta(&after, &before);
+        assert_eq!(delta.total_steps, 5);
+        assert_eq!(delta.total_tool_calls, 3);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_display_contains_key_fields() {
+        let m = RuntimeMetrics::new();
+        let snap = m.snapshot();
+        let s = snap.to_string();
+        assert!(s.contains("sessions"));
+        assert!(s.contains("steps"));
+        assert!(s.contains("latency_mean"));
     }
 }

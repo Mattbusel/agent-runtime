@@ -847,9 +847,9 @@ impl EpisodicStore {
                 };
                 if limit > 0 && limit < indices.len() {
                     indices.select_nth_unstable_by(limit - 1, cmp);
-                    indices[..limit].sort_by(cmp);
+                    indices[..limit].sort_unstable_by(cmp);
                 } else {
-                    indices.sort_by(cmp);
+                    indices.sort_unstable_by(cmp);
                 }
             }
             RecallPolicy::Hybrid {
@@ -884,9 +884,9 @@ impl EpisodicStore {
                 };
                 if limit > 0 && limit < indices.len() {
                     indices.select_nth_unstable_by(limit - 1, cmp);
-                    indices[..limit].sort_by(cmp);
+                    indices[..limit].sort_unstable_by(cmp);
                 } else {
-                    indices.sort_by(cmp);
+                    indices.sort_unstable_by(cmp);
                 }
             }
         }
@@ -927,7 +927,7 @@ impl EpisodicStore {
                     .all(|t| item.tags.iter().any(|it| it.as_str() == *t))
             })
             .collect();
-        matched.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
+        matched.sort_unstable_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
         if limit > 0 {
             matched.truncate(limit);
         }
@@ -1127,7 +1127,7 @@ impl EpisodicStore {
             .into_iter()
             .filter(|item| item.content.contains(query))
             .collect();
-        matched.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
+        matched.sort_unstable_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
         if limit > 0 {
             matched.truncate(limit);
         }
@@ -2388,5 +2388,198 @@ mod tests {
         assert_eq!(items.len(), 2);
         let contents: Vec<&str> = items.iter().map(|i| i.content.as_str()).collect();
         assert!(!contents.contains(&"oldest"), "oldest item should have been evicted; got: {contents:?}");
+    }
+
+    // ── New API tests (Rounds 4-8) ────────────────────────────────────────────
+
+    #[test]
+    fn test_search_by_content_finds_matching_episodes() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "the quick brown fox", 0.9).unwrap();
+        store.add_episode(agent.clone(), "jumps over the lazy dog", 0.5).unwrap();
+        store.add_episode(agent.clone(), "hello world", 0.7).unwrap();
+
+        let results = store.search_by_content(&agent, "the", 10).unwrap();
+        assert_eq!(results.len(), 2);
+        // results are sorted by importance descending
+        assert_eq!(results[0].content, "the quick brown fox");
+    }
+
+    #[test]
+    fn test_search_by_content_returns_empty_on_no_match() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "hello", 0.5).unwrap();
+        let results = store.search_by_content(&agent, "xyz", 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_recall_tagged_filters_by_all_tags() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let mut inner = store.inner.lock().unwrap();
+        let item1 = MemoryItem { id: MemoryId::random(), agent_id: agent.clone(), content: "rust".into(), importance: 0.8, timestamp: Utc::now(), tags: vec!["lang".into(), "sys".into()], recall_count: 0 };
+        let item2 = MemoryItem { id: MemoryId::random(), agent_id: agent.clone(), content: "python".into(), importance: 0.6, timestamp: Utc::now(), tags: vec!["lang".into()], recall_count: 0 };
+        inner.items.entry(agent.clone()).or_default().push(item1);
+        inner.items.entry(agent.clone()).or_default().push(item2);
+        drop(inner);
+
+        let results = store.recall_tagged(&agent, &["lang", "sys"], 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "rust");
+
+        let all = store.recall_tagged(&agent, &["lang"], 10).unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn test_recall_recent_returns_newest_first() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "first", 0.3).unwrap();
+        store.add_episode(agent.clone(), "second", 0.5).unwrap();
+        store.add_episode(agent.clone(), "third", 0.9).unwrap();
+
+        let recent = store.recall_recent(&agent, 2).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].content, "third");
+        assert_eq!(recent[1].content, "second");
+    }
+
+    #[test]
+    fn test_recall_by_id_finds_specific_episode() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let id = store.add_episode(agent.clone(), "specific", 0.7).unwrap();
+        store.add_episode(agent.clone(), "other", 0.5).unwrap();
+
+        let found = store.recall_by_id(&agent, &id).unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().content, "specific");
+    }
+
+    #[test]
+    fn test_recall_by_id_returns_none_for_unknown_id() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let result = store.recall_by_id(&agent, &MemoryId::random()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_update_importance_changes_score() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let id = store.add_episode(agent.clone(), "item", 0.5).unwrap();
+        let updated = store.update_importance(&agent, &id, 0.9).unwrap();
+        assert!(updated);
+        let item = store.recall_by_id(&agent, &id).unwrap().unwrap();
+        assert!((item.importance - 0.9).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_merge_from_imports_episodes() {
+        let src = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        src.add_episode(agent.clone(), "ep1", 0.8).unwrap();
+        src.add_episode(agent.clone(), "ep2", 0.6).unwrap();
+
+        let dst = EpisodicStore::new();
+        let count = dst.merge_from(&src, &agent).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(dst.agent_memory_count(&agent).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_memory_item_age_hours_is_non_negative() {
+        let item = MemoryItem::new(AgentId::new("a"), "test", 0.5, vec![]);
+        let age = item.age_hours();
+        assert!(age >= 0.0);
+    }
+
+    #[test]
+    fn test_working_memory_remove_and_contains() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k", "v").unwrap();
+        assert!(wm.contains("k").unwrap());
+        let removed = wm.remove("k").unwrap();
+        assert!(removed);
+        assert!(!wm.contains("k").unwrap());
+        assert!(!wm.remove("k").unwrap()); // second remove returns false
+    }
+
+    #[test]
+    fn test_working_memory_keys_in_insertion_order() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("b", "2").unwrap();
+        wm.set("a", "1").unwrap();
+        wm.set("c", "3").unwrap();
+        assert_eq!(wm.keys().unwrap(), vec!["b", "a", "c"]);
+    }
+
+    #[test]
+    fn test_working_memory_set_many_batch_insert() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set_many([("x", "1"), ("y", "2"), ("z", "3")]).unwrap();
+        assert_eq!(wm.len().unwrap(), 3);
+        assert_eq!(wm.get("y").unwrap(), Some("2".into()));
+    }
+
+    #[test]
+    fn test_working_memory_get_or_default() {
+        let wm = WorkingMemory::new(5).unwrap();
+        wm.set("a", "val").unwrap();
+        assert_eq!(wm.get_or_default("a", "fallback").unwrap(), "val");
+        assert_eq!(wm.get_or_default("missing", "fallback").unwrap(), "fallback");
+    }
+
+    #[test]
+    fn test_semantic_store_remove_deletes_entry() {
+        let store = SemanticStore::new();
+        store.store("k", "v", vec![]).unwrap();
+        assert_eq!(store.len().unwrap(), 1);
+        let removed = store.remove("k").unwrap();
+        assert!(removed);
+        assert_eq!(store.len().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_semantic_store_clear_empties_store() {
+        let store = SemanticStore::new();
+        store.store("a", "1", vec!["t".into()]).unwrap();
+        store.store("b", "2", vec!["t".into()]).unwrap();
+        store.clear().unwrap();
+        assert!(store.is_empty().unwrap());
+    }
+
+    #[test]
+    fn test_semantic_store_update_changes_value() {
+        let store = SemanticStore::new();
+        store.store("k", "old", vec![]).unwrap();
+        let updated = store.update("k", "new").unwrap();
+        assert!(updated);
+        let (val, _) = store.retrieve_by_key("k").unwrap().unwrap();
+        assert_eq!(val, "new");
+    }
+
+    #[test]
+    fn test_semantic_store_retrieve_by_key() {
+        let store = SemanticStore::new();
+        store.store("key", "value", vec!["tag1".into()]).unwrap();
+        let result = store.retrieve_by_key("key").unwrap().unwrap();
+        assert_eq!(result.0, "value");
+        assert_eq!(result.1, vec!["tag1".to_string()]);
+        assert!(store.retrieve_by_key("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_semantic_store_list_tags() {
+        let store = SemanticStore::new();
+        store.store("a", "1", vec!["rust".into(), "sys".into()]).unwrap();
+        store.store("b", "2", vec!["rust".into(), "ml".into()]).unwrap();
+        let tags = store.list_tags().unwrap();
+        assert_eq!(tags, vec!["ml", "rust", "sys"]); // sorted
     }
 }

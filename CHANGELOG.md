@@ -11,6 +11,87 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.7.0] - 2026-03-20
+
+### Added
+
+- **`GraphStore::topological_sort`** (`graph.rs`) — iterative DFS post-order
+  topological ordering; returns `Err(AgentRuntimeError::Graph)` on cycles.
+- **`GraphStore::update_entity_property`** (`graph.rs`) — in-place mutation of a
+  single property on an existing entity without a full replace.
+- **`EpisodicStore::recall_by_id`** (`memory.rs`) — fetch a single episode by its
+  `MemoryId` without a full recall scan.
+- **`EpisodicStore::merge_from`** (`memory.rs`) — bulk-import episodes from
+  another `EpisodicStore` (useful for merging agent memories).
+- **`SemanticStore::update`** (`memory.rs`) — overwrite the value of an existing
+  entry by key; returns `Ok(false)` when the key is not found.
+- **`WorkingMemory::get_or_default`** (`memory.rs`) — return the stored value or
+  a caller-supplied default without requiring an explicit `None` check.
+- **`Message::user`** / **`Message::assistant`** (`agent.rs`) — named constructors
+  that replace the verbose `Message::new(Role::User, …)` pattern.
+- **`AgentConfig::with_model`** (`agent.rs`) — builder method to override the
+  model after initial construction.
+- **`AgentSession::elapsed`** (`runtime.rs`) — typed `std::time::Duration`
+  accessor instead of raw `duration_ms` arithmetic.
+- **`AgentSession::tool_calls_made`** (`runtime.rs`) — counts the number of
+  tool-dispatching steps (excludes the final-answer step).
+- **`LatencyHistogram::min_ms`** / **`LatencyHistogram::max_ms`** (`metrics.rs`) —
+  basic histogram statistics without a full snapshot.
+- **`MetricsSnapshot`** now implements `Display` (`metrics.rs`) — human-readable
+  one-liner suitable for logs and dashboards.
+- **`WorkingMemory::contains`** (`memory.rs`) — O(1) key existence check.
+- **`SemanticStore::list_tags`** (`memory.rs`) — enumerate all unique tags across
+  all stored facts.
+- **`EpisodicStore::update_importance`** (`memory.rs`) — in-place importance
+  mutation avoids a remove + re-insert cycle.
+- **`GraphStore::neighbor_entities`** (`graph.rs`) — return full `Entity` objects
+  for all out-neighbours of a node.
+- **`GraphStore::remove_all_relationships_for`** (`graph.rs`) — bulk-remove all
+  edges incident on a node before deletion.
+- **`CircuitBreaker::reset`** (`orchestrator.rs`) — force the breaker back to
+  `Closed` state; useful for test teardown and manual recovery.
+- **`ToolRegistry::get`** (`agent.rs`) — look up a registered tool by name.
+- **`InMemoryToolCache::contains`** / **`InMemoryToolCache::remove`** (`agent.rs`)
+  — cache introspection and manual invalidation.
+- **`WorkingMemory::remove`** / **`WorkingMemory::keys`** (`memory.rs`) — full
+  CRUD: delete by key and enumerate all keys.
+- **`SemanticStore::remove`** / **`SemanticStore::clear`** /
+  **`SemanticStore::retrieve_by_key`** (`memory.rs`) — complete remove and
+  key-based lookup.
+- **`EpisodicStore::recall_tagged`** (`memory.rs`) — retrieve episodes filtered
+  by a tag set without a full recall pass.
+- **`GraphStore::get_relationships_for`** (`graph.rs`) — all outgoing edges from
+  a node.
+- **`GraphStore::relationships_between`** (`graph.rs`) — all edges from `A` to `B`.
+- **`GraphStore::find_entities_by_property`** (`graph.rs`) — property-value scan
+  across all entities.
+- **`Deduplicator::purge_expired`** (`orchestrator.rs`) — explicit TTL eviction
+  sweep; handy for long-lived deduplicators with infrequent traffic.
+- **`LatencyHistogram::p50`** / **`p95`** / **`p99`** (`metrics.rs`) — named
+  percentile shortcuts.
+- **`MemoryItem::age_hours`** (`memory.rs`) — compute memory age in hours from its
+  `timestamp_ms` field.
+- **`EpisodicStore::recall_recent`** (`memory.rs`) — insertion-order recall,
+  returning the most recently added episodes first.
+- **`GraphStore::entity_count_by_label`** (`graph.rs`) — count entities matching
+  a given label without a full scan.
+- **`GraphStore::update_entity_label`** (`graph.rs`) — rename an entity's label
+  in-place.
+- **`Pipeline::stage_count`** / **`Pipeline::stage_names`** (`orchestrator.rs`)
+  — introspect the number and names of registered pipeline stages.
+- **`RetryPolicy::with_max_attempts`** (`orchestrator.rs`) — builder-style
+  mutation of the attempt budget after construction.
+- **`Deduplicator::clear`** (`orchestrator.rs`) — reset all in-flight and cached
+  state, useful between test runs.
+- **`BackpressureGuard::utilization_ratio`** (`orchestrator.rs`) — current depth
+  divided by capacity as `f32` (0.0–1.0).
+- **`ReActLoop::registry`** (`agent.rs`) — immutable read-only access to the
+  registered tool registry.
+- **`AgentSession::is_successful`** (`runtime.rs`) — returns `true` when the
+  session ended with a `FINAL_ANSWER` step.
+
+---
+
 ## [1.6.0] - 2026-03-20
 
 ### Changed
