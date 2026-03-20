@@ -1053,6 +1053,44 @@ impl EpisodicStore {
             .unwrap_or(0.0))
     }
 
+    /// Return all episodes for `agent_id` whose importance is in the closed
+    /// interval `[min_importance, max_importance]`.
+    pub fn episodes_in_range(
+        &self,
+        agent_id: &AgentId,
+        min_importance: f32,
+        max_importance: f32,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episodes_in_range");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map(|v| {
+                v.iter()
+                    .filter(|m| m.importance >= min_importance && m.importance <= max_importance)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Return `(min_importance, max_importance)` for all episodes of
+    /// `agent_id`, or `None` if the agent has no recorded episodes.
+    pub fn agent_importance_range(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<(f32, f32)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::agent_importance_range");
+        Ok(inner.items.get(agent_id).and_then(|v| {
+            if v.is_empty() {
+                return None;
+            }
+            let min = v.iter().map(|m| m.importance).fold(f32::INFINITY, f32::min);
+            let max = v.iter().map(|m| m.importance).fold(f32::NEG_INFINITY, f32::max);
+            Some((min, max))
+        }))
+    }
+
     /// Return the minimum importance across all episodes for `agent_id`, or
     /// `None` when the agent has no recorded episodes.
     pub fn episodes_min_importance(
@@ -3151,6 +3189,21 @@ impl EpisodicStore {
                     .cloned()
                     .collect()
             }))
+    }
+
+    /// Return the maximum importance score across all episodes for `agent_id`,
+    /// or `None` when the agent has no recorded episodes.
+    pub fn max_episode_importance(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<f32>, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "EpisodicStore::max_episode_importance");
+        Ok(inner.items.get(agent_id).and_then(|v| {
+            v.iter()
+                .map(|m| m.importance)
+                .reduce(f32::max)
+        }))
     }
 
 }
@@ -11404,5 +11457,34 @@ mod tests {
         let wm = WorkingMemory::new(10).unwrap();
         wm.set("k1", "hello").unwrap();
         assert!(wm.values_with_prefix("xyz:").unwrap().is_empty());
+    }
+
+    // ── Round 63: max_episode_importance ─────────────────────────────────────
+
+    #[test]
+    fn test_max_episode_importance_returns_maximum() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r63-max-imp");
+        store.add_episode_with_tags(agent.clone(), "a", 0.3, vec![]).unwrap();
+        store.add_episode_with_tags(agent.clone(), "b", 0.9, vec![]).unwrap();
+        store.add_episode_with_tags(agent.clone(), "c", 0.6, vec![]).unwrap();
+        let max = store.max_episode_importance(&agent).unwrap();
+        assert!((max.unwrap() - 0.9_f32).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_max_episode_importance_none_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r63-max-imp-unknown");
+        assert!(store.max_episode_importance(&agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_max_episode_importance_single_episode() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r63-max-imp-single");
+        store.add_episode_with_tags(agent.clone(), "only", 0.42, vec![]).unwrap();
+        let max = store.max_episode_importance(&agent).unwrap();
+        assert!((max.unwrap() - 0.42_f32).abs() < 1e-6);
     }
 }

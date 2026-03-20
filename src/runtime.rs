@@ -2269,6 +2269,36 @@ impl AgentSession {
             .min()
             .unwrap_or(0)
     }
+
+    /// Return a `Vec` of word counts for each step's `action`, in order.
+    pub fn action_word_counts(&self) -> Vec<usize> {
+        self.steps
+            .iter()
+            .map(|s| s.action.split_whitespace().count())
+            .collect()
+    }
+
+    /// Return the average number of Unicode chars in the `thought` field
+    /// across all steps.  Returns `0.0` for an empty session.
+    pub fn thought_avg_chars(&self) -> f64 {
+        if self.steps.is_empty() {
+            return 0.0;
+        }
+        let total: usize = self.steps.iter().map(|s| s.thought.chars().count()).sum();
+        total as f64 / self.steps.len() as f64
+    }
+
+    /// Return `(min_bytes, max_bytes)` of the `thought` field across all steps.
+    ///
+    /// Returns `(0, 0)` for an empty session.
+    pub fn thought_byte_range(&self) -> (usize, usize) {
+        if self.steps.is_empty() {
+            return (0, 0);
+        }
+        let min = self.steps.iter().map(|s| s.thought.len()).min().unwrap_or(0);
+        let max = self.steps.iter().map(|s| s.thought.len()).max().unwrap_or(0);
+        (min, max)
+    }
 }
 
 // ── AgentRuntimeBuilder ───────────────────────────────────────────────────────
@@ -8026,5 +8056,57 @@ mod tests {
         let steps = vec![make_step("t", "a", "")];
         let session = make_session(steps, 0);
         assert_eq!(session.observation_min_chars(), 0);
+    }
+
+    // ── Round 64: action_word_counts, thought_avg_chars, thought_byte_range ──
+
+    #[test]
+    fn test_action_word_counts_returns_per_step_counts() {
+        let steps = vec![
+            make_step("t1", "one two three", "o1"),
+            make_step("t2", "hello", "o2"),
+            make_step("t3", "a b", "o3"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.action_word_counts(), vec![3, 1, 2]);
+    }
+
+    #[test]
+    fn test_action_word_counts_empty_for_no_steps() {
+        let session = make_session(vec![], 0);
+        assert!(session.action_word_counts().is_empty());
+    }
+
+    #[test]
+    fn test_thought_avg_chars_returns_average() {
+        let steps = vec![
+            make_step("ab", "a", "o"),   // 2 chars
+            make_step("abcd", "a", "o"), // 4 chars
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.thought_avg_chars(), 3.0);
+    }
+
+    #[test]
+    fn test_thought_avg_chars_zero_for_empty() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.thought_avg_chars(), 0.0);
+    }
+
+    #[test]
+    fn test_thought_byte_range_returns_min_max() {
+        let steps = vec![
+            make_step("hi", "a", "o"),     // 2 bytes
+            make_step("hello", "a", "o"),  // 5 bytes
+            make_step("hey", "a", "o"),    // 3 bytes
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.thought_byte_range(), (2, 5));
+    }
+
+    #[test]
+    fn test_thought_byte_range_zero_zero_for_empty() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.thought_byte_range(), (0, 0));
     }
 }

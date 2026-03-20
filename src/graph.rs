@@ -8093,6 +8093,24 @@ mod tests {
         assert!(!g.has_any_relationships().unwrap());
     }
 
+    // ── Round 63: avg_edge_weight ─────────────────────────────────────────────
+
+    #[test]
+    fn test_avg_edge_weight_correct() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("n1", "N")).unwrap();
+        g.add_entity(Entity::new("n2", "N")).unwrap();
+        g.add_relationship(Relationship::new("n1", "n2", "E", 2.0)).unwrap();
+        g.add_relationship(Relationship::new("n1", "n2", "F", 4.0)).unwrap();
+        assert!((g.avg_edge_weight().unwrap() - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_avg_edge_weight_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.avg_edge_weight().unwrap(), 0.0);
+    }
+
     // ── Round 58: nodes_with_no_outgoing ──────────────────────────────────────
 
     #[test]
@@ -8334,5 +8352,33 @@ mod tests {
         g.add_entity(e2).unwrap();
         g.add_entity(e3).unwrap();
         assert_eq!(g.entity_properties_count("tag").unwrap(), 2);
+    }
+
+    // ── Round 63: all_entities_have_properties ────────────────────────────────
+
+    #[test]
+    fn test_all_entities_have_properties_true_when_all_have_props() {
+        let g = GraphStore::new();
+        let e1 = Entity::new("a", "N").with_property("k", "v".into());
+        let e2 = Entity::new("b", "N").with_property("k", "v".into());
+        g.add_entity(e1).unwrap();
+        g.add_entity(e2).unwrap();
+        assert!(g.all_entities_have_properties().unwrap());
+    }
+
+    #[test]
+    fn test_all_entities_have_properties_false_when_one_has_none() {
+        let g = GraphStore::new();
+        let e1 = Entity::new("a", "N").with_property("k", "v".into());
+        let e2 = Entity::new("b", "N");
+        g.add_entity(e1).unwrap();
+        g.add_entity(e2).unwrap();
+        assert!(!g.all_entities_have_properties().unwrap());
+    }
+
+    #[test]
+    fn test_all_entities_have_properties_true_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(g.all_entities_have_properties().unwrap());
     }
 }

@@ -4618,6 +4618,24 @@ mod tests {
         assert_eq!(m.memory_to_session_ratio(), 0.0);
     }
 
+    // ── Round 63: total_latency_per_session ───────────────────────────────────
+
+    #[test]
+    fn test_total_latency_per_session_correct() {
+        let m = RuntimeMetrics::new();
+        m.record_step_latency(100);
+        m.record_step_latency(200);
+        m.total_sessions.store(2, Ordering::Relaxed);
+        // total latency = 300ms, sessions = 2 → 150.0
+        assert!((m.total_latency_per_session() - 150.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_total_latency_per_session_zero_when_no_sessions() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.total_latency_per_session(), 0.0);
+    }
+
     // ── Round 57: failure_ratio_for_tool, any_tool_exceeds_calls ─────────────
 
     #[test]

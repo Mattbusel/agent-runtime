@@ -2211,6 +2211,11 @@ impl Pipeline {
         self.stages.iter().filter(|s| s.name.contains(substr)).count()
     }
 
+    /// Return `true` if a stage exists at zero-based index `idx`.
+    pub fn has_stage_at_index(&self, idx: usize) -> bool {
+        idx < self.stages.len()
+    }
+
     /// Return `true` if **all** stage names start with `prefix`.
     ///
     /// Returns `true` for an empty pipeline (vacuously true) and for an empty
@@ -2239,6 +2244,14 @@ impl Pipeline {
     /// [`stage_at_index`]: Pipeline::stage_at_index
     pub fn stage_name_at(&self, idx: usize) -> Option<&str> {
         self.stages.get(idx).map(|s| s.name.as_str())
+    }
+
+    /// Return `true` if every stage name contains `substr` as a substring.
+    ///
+    /// Returns `true` vacuously for an empty pipeline (no stages to violate
+    /// the condition).
+    pub fn all_stage_names_contain(&self, substr: &str) -> bool {
+        self.stages.iter().all(|s| s.name.contains(substr))
     }
 
 }
@@ -4750,6 +4763,29 @@ mod tests {
         assert_eq!(p.stage_count_with_name_containing("beta"), 0);
     }
 
+    // ── Round 63: has_stage_at_index ──────────────────────────────────────────
+
+    #[test]
+    fn test_has_stage_at_index_true_for_valid_index() {
+        let p = Pipeline::new()
+            .add_stage("first", |s: String| Ok(s))
+            .add_stage("second", |s: String| Ok(s));
+        assert!(p.has_stage_at_index(0));
+        assert!(p.has_stage_at_index(1));
+    }
+
+    #[test]
+    fn test_has_stage_at_index_false_for_out_of_bounds() {
+        let p = Pipeline::new().add_stage("only", |s: String| Ok(s));
+        assert!(!p.has_stage_at_index(1));
+    }
+
+    #[test]
+    fn test_has_stage_at_index_false_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(!p.has_stage_at_index(0));
+    }
+
     // ── Round 57: any_stage_has_name ─────────────────────────────────────────
 
     #[test]
@@ -4832,5 +4868,29 @@ mod tests {
     fn test_stage_name_at_none_for_empty_pipeline() {
         let p = Pipeline::new();
         assert!(p.stage_name_at(0).is_none());
+    }
+
+    // ── Round 63: all_stage_names_contain ─────────────────────────────────────
+
+    #[test]
+    fn test_all_stage_names_contain_true_when_all_match() {
+        let p = Pipeline::new()
+            .add_stage("step_alpha", |s: String| Ok(s))
+            .add_stage("step_beta", |s: String| Ok(s));
+        assert!(p.all_stage_names_contain("step_"));
+    }
+
+    #[test]
+    fn test_all_stage_names_contain_false_when_one_does_not_match() {
+        let p = Pipeline::new()
+            .add_stage("step_alpha", |s: String| Ok(s))
+            .add_stage("gamma", |s: String| Ok(s));
+        assert!(!p.all_stage_names_contain("step_"));
+    }
+
+    #[test]
+    fn test_all_stage_names_contain_true_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.all_stage_names_contain("anything"));
     }
 }

@@ -350,6 +350,19 @@ impl ReActStep {
     pub fn has_empty_fields(&self) -> bool {
         self.thought.is_empty() || self.action.is_empty() || self.observation.is_empty()
     }
+
+    /// Return the number of bytes in the `observation` field (UTF-8 encoded length).
+    pub fn observation_byte_len(&self) -> usize {
+        self.observation.len()
+    }
+
+    /// Return `true` if all three fields (`thought`, `action`, `observation`)
+    /// each contain at least one whitespace-delimited word.
+    pub fn all_fields_have_words(&self) -> bool {
+        self.thought.split_whitespace().next().is_some()
+            && self.action.split_whitespace().next().is_some()
+            && self.observation.split_whitespace().next().is_some()
+    }
 }
 
 /// Configuration for the ReAct agent loop.
@@ -787,6 +800,22 @@ impl AgentConfig {
     /// Returns `false` when no stop sequences have been configured.
     pub fn stop_sequences_contain(&self, s: &str) -> bool {
         self.stop_sequences.iter().any(|seq| seq == s)
+    }
+
+    /// Return the byte length of the system prompt string.
+    ///
+    /// Returns `0` when no system prompt has been configured (the default is an
+    /// empty string).
+    pub fn system_prompt_byte_len(&self) -> usize {
+        self.system_prompt.len()
+    }
+
+    /// Return `true` if a temperature has been configured **and** it falls
+    /// within the valid range `[0.0, 2.0]` (inclusive).
+    ///
+    /// Returns `false` when no temperature has been set.
+    pub fn has_valid_temperature(&self) -> bool {
+        self.temperature.map_or(false, |t| (0.0..=2.0).contains(&t))
     }
 }
 
@@ -5340,5 +5369,62 @@ mod tests {
     fn test_stop_sequences_contain_false_for_empty_config() {
         let cfg = AgentConfig::new(3, "m");
         assert!(!cfg.stop_sequences_contain("STOP"));
+    }
+
+    // ── Round 63: observation_byte_len, all_fields_have_words, system_prompt_byte_len, has_valid_temperature ──
+
+    #[test]
+    fn test_observation_byte_len_matches_string_len() {
+        let step = ReActStep::new("t", "a", "result");
+        assert_eq!(step.observation_byte_len(), "result".len());
+    }
+
+    #[test]
+    fn test_observation_byte_len_zero_for_empty() {
+        let step = ReActStep::new("t", "a", "");
+        assert_eq!(step.observation_byte_len(), 0);
+    }
+
+    #[test]
+    fn test_all_fields_have_words_true_when_all_populated() {
+        let step = ReActStep::new("think", "act", "obs");
+        assert!(step.all_fields_have_words());
+    }
+
+    #[test]
+    fn test_all_fields_have_words_false_when_action_empty() {
+        let step = ReActStep::new("think", "", "obs");
+        assert!(!step.all_fields_have_words());
+    }
+
+    #[test]
+    fn test_system_prompt_byte_len_returns_length() {
+        let cfg = AgentConfig::new(3, "m").with_system_prompt("Hello!");
+        assert_eq!(cfg.system_prompt_byte_len(), "Hello!".len());
+    }
+
+    #[test]
+    fn test_system_prompt_byte_len_default_is_nonzero() {
+        let cfg = AgentConfig::new(3, "m");
+        // Default system prompt is "You are a helpful AI agent."
+        assert_eq!(cfg.system_prompt_byte_len(), "You are a helpful AI agent.".len());
+    }
+
+    #[test]
+    fn test_has_valid_temperature_true_for_in_range() {
+        let cfg = AgentConfig::new(3, "m").with_temperature(0.7);
+        assert!(cfg.has_valid_temperature());
+    }
+
+    #[test]
+    fn test_has_valid_temperature_false_when_unset() {
+        let cfg = AgentConfig::new(3, "m");
+        assert!(!cfg.has_valid_temperature());
+    }
+
+    #[test]
+    fn test_has_valid_temperature_true_at_boundaries() {
+        assert!(AgentConfig::new(3, "m").with_temperature(0.0).has_valid_temperature());
+        assert!(AgentConfig::new(3, "m").with_temperature(2.0).has_valid_temperature());
     }
 }

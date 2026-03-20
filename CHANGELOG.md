@@ -11,6 +11,25 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.74.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::action_ends_with_count`** — count steps whose action ends with a given suffix.
+- **`AgentSession::avg_observation_words`** — average word count per observation across all steps.
+- **`EpisodicStore::episode_most_recent`** — most recently stored episode for an agent.
+- **`EpisodicStore::episodes_by_importance_range`** — episodes within an importance range, sorted.
+- **`WorkingMemory::value_bytes_max`** — maximum byte length among all stored values.
+- **`RuntimeMetrics::total_latency_per_session`** — total step latency divided by session count.
+- **`GraphStore::avg_edge_weight`** — average weight across all relationships.
+- **`Pipeline::has_stage_at_index`** — `true` if a stage exists at the given index.
+
+### Fixed
+
+- Fixed `test_system_prompt_byte_len_zero_for_default` — default `AgentConfig` has a non-empty system prompt.
+
+---
+
 ## [1.73.0] - 2026-03-20
 
 ### Added
