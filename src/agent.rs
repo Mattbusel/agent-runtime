@@ -1242,6 +1242,13 @@ impl ToolRegistry {
         let total: usize = self.tools.values().map(|s| s.description.len()).sum();
         total as f64 / self.tools.len() as f64
     }
+
+    /// Return all registered tool names in ascending sorted order.
+    pub fn tool_names_sorted(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.tools.keys().map(|k| k.as_str()).collect();
+        names.sort_unstable();
+        names
+    }
 }
 
 // ── ReActLoop ─────────────────────────────────────────────────────────────────
@@ -3773,5 +3780,22 @@ mod tests {
     fn test_shortest_description_returns_none_when_empty() {
         let reg = ToolRegistry::new();
         assert!(reg.shortest_description().is_none());
+    }
+
+    // ── Round 38 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tool_names_sorted_returns_names_in_alphabetical_order() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("zap", "z tool", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("alpha", "a tool", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("middle", "m tool", |_| serde_json::json!({})));
+        assert_eq!(reg.tool_names_sorted(), vec!["alpha", "middle", "zap"]);
+    }
+
+    #[test]
+    fn test_tool_names_sorted_empty_returns_empty() {
+        let reg = ToolRegistry::new();
+        assert!(reg.tool_names_sorted().is_empty());
     }
 }

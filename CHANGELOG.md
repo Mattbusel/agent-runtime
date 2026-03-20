@@ -11,6 +11,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.57.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::first_step_action`** — action string of the first step in the session.
+- **`AgentSession::last_step_action`** — action string of the last step in the session.
+- **`EpisodicStore::content_contains_count`** — count of episodes whose content contains a substring.
+- **`SemanticStore::min_value_bytes`** — byte length of the shortest stored value.
+- **`WorkingMemory::max_value_length`** — byte length of the longest stored value.
+- **`MetricsSnapshot::total_agent_count`** — number of distinct agents with recorded tool-call data.
+- **`MetricsSnapshot::steps_per_tool_call`** — ratio of total steps to total tool calls.
+- **`GraphStore::total_in_degree`** — sum of in-degrees across all entities (equals relationship count).
+- **`GraphStore::relationship_count_between`** — count of directed relationships between two specific entities.
+- **`ToolRegistry::tool_names_sorted`** — all registered tool names in ascending sorted order.
+
+---
+
 ## [1.56.0] - 2026-03-20
 
 ### Added

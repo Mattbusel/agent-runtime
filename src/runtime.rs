@@ -822,6 +822,20 @@ impl AgentSession {
             .map(|s| s.action.as_str())
     }
 
+    /// Return the action string of the first step in the session.
+    ///
+    /// Returns `None` if the session has no steps.
+    pub fn first_step_action(&self) -> Option<&str> {
+        self.steps.first().map(|s| s.action.as_str())
+    }
+
+    /// Return the action string of the last step in the session.
+    ///
+    /// Returns `None` if the session has no steps.
+    pub fn last_step_action(&self) -> Option<&str> {
+        self.steps.last().map(|s| s.action.as_str())
+    }
+
     /// Return the count of steps that have a non-empty thought string.
     pub fn count_nonempty_thoughts(&self) -> usize {
         self.steps.iter().filter(|s| !s.thought.is_empty()).count()
@@ -4123,5 +4137,39 @@ mod tests {
     fn test_shortest_action_returns_none_for_empty_session() {
         let session = make_session(vec![], 0);
         assert!(session.shortest_action().is_none());
+    }
+
+    // ── Round 38 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_first_step_action_returns_action_of_first_step() {
+        let steps = vec![
+            make_step("t", "first", "o"),
+            make_step("t", "second", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.first_step_action(), Some("first"));
+    }
+
+    #[test]
+    fn test_first_step_action_returns_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.first_step_action().is_none());
+    }
+
+    #[test]
+    fn test_last_step_action_returns_action_of_last_step() {
+        let steps = vec![
+            make_step("t", "first", "o"),
+            make_step("t", "last_one", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.last_step_action(), Some("last_one"));
+    }
+
+    #[test]
+    fn test_last_step_action_returns_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.last_step_action().is_none());
     }
 }

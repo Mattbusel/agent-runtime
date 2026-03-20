@@ -719,6 +719,21 @@ impl MetricsSnapshot {
         names
     }
 
+    /// Return the number of distinct agents that have recorded tool-call data.
+    pub fn total_agent_count(&self) -> usize {
+        self.per_agent_tool_calls.len()
+    }
+
+    /// Return the ratio of total steps to total tool calls.
+    ///
+    /// Returns `0.0` if no tool calls have been recorded.
+    pub fn steps_per_tool_call(&self) -> f64 {
+        if self.total_tool_calls == 0 {
+            return 0.0;
+        }
+        self.total_steps as f64 / self.total_tool_calls as f64
+    }
+
     /// Return the agent id with the most total tool calls across all tools.
     ///
     /// Returns `None` if no per-agent tool-call data has been recorded.
@@ -2758,5 +2773,43 @@ mod tests {
     fn test_agent_with_most_calls_returns_none_when_empty() {
         let snap = MetricsSnapshot::default();
         assert!(snap.agent_with_most_calls().is_none());
+    }
+
+    // ── Round 38 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_total_agent_count_returns_number_of_distinct_agents() {
+        let snap = MetricsSnapshot {
+            per_agent_tool_calls: [
+                ("a".to_string(), std::collections::HashMap::new()),
+                ("b".to_string(), std::collections::HashMap::new()),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        assert_eq!(snap.total_agent_count(), 2);
+    }
+
+    #[test]
+    fn test_total_agent_count_zero_when_empty() {
+        let snap = MetricsSnapshot::default();
+        assert_eq!(snap.total_agent_count(), 0);
+    }
+
+    #[test]
+    fn test_steps_per_tool_call_returns_ratio() {
+        let snap = MetricsSnapshot {
+            total_steps: 10,
+            total_tool_calls: 5,
+            ..Default::default()
+        };
+        assert!((snap.steps_per_tool_call() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_steps_per_tool_call_zero_when_no_tool_calls() {
+        let snap = MetricsSnapshot::default();
+        assert_eq!(snap.steps_per_tool_call(), 0.0);
     }
 }

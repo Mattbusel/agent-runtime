@@ -449,6 +449,30 @@ impl GraphStore {
         Ok(total as f64 / inner.relationships.len() as f64)
     }
 
+    /// Return the sum of in-degrees across all entities.
+    ///
+    /// Equal to the total number of relationships in the graph (each relationship
+    /// contributes 1 to the in-degree of its target entity).
+    pub fn total_in_degree(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::total_in_degree");
+        Ok(inner.relationships.len())
+    }
+
+    /// Return the count of directed relationships from `from` to `to`.
+    ///
+    /// Returns `0` if no such relationships exist.
+    pub fn relationship_count_between(
+        &self,
+        from: &EntityId,
+        to: &EntityId,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::relationship_count_between");
+        Ok(inner
+            .adjacency
+            .get(from)
+            .map_or(0, |rels| rels.iter().filter(|r| &r.to == to).count()))
+    }
+
     /// Add a directed relationship between two existing entities.
     ///
     /// Both source and target entities must already exist in the graph.
@@ -4925,5 +4949,46 @@ mod tests {
     fn test_avg_relationship_weight_zero_when_no_relationships() {
         let g = GraphStore::new();
         assert_eq!(g.avg_relationship_weight().unwrap(), 0.0);
+    }
+
+    // ── Round 38 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_total_in_degree_equals_relationship_count() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "link", 1.0)).unwrap();
+        assert_eq!(g.total_in_degree().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_total_in_degree_zero_when_no_relationships() {
+        let g = GraphStore::new();
+        assert_eq!(g.total_in_degree().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_relationship_count_between_counts_edges_between_pair() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "friend", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "colleague", 1.0)).unwrap();
+        let from = EntityId::new("a");
+        let to = EntityId::new("b");
+        assert_eq!(g.relationship_count_between(&from, &to).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_relationship_count_between_returns_zero_for_no_edge() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        let from = EntityId::new("a");
+        let to = EntityId::new("b");
+        assert_eq!(g.relationship_count_between(&from, &to).unwrap(), 0);
     }
 }
