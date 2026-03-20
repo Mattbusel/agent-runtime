@@ -310,6 +310,18 @@ impl RetryPolicy {
         (attempt as f64 / self.max_attempts as f64).min(1.0)
     }
 
+    /// Return the maximum delay for any single attempt in milliseconds.
+    ///
+    /// For `Exponential` policies this is the delay for the last attempt
+    /// (which may be capped by `MAX_RETRY_DELAY`).  For `Constant` policies it
+    /// equals the base delay.  Returns `0` for a `none()` policy.
+    pub fn max_delay_ms(&self) -> u64 {
+        if self.max_attempts == 0 {
+            return 0;
+        }
+        self.delay_ms_for(self.max_attempts)
+    }
+
     /// Return `true` if another attempt is permitted after `attempt` failures.
     ///
     /// `attempt` is the number of attempts already made (0-based: `0` means
@@ -1961,6 +1973,13 @@ impl Pipeline {
     /// Returns an empty `Vec` for an empty pipeline.
     pub fn stages_reversed(&self) -> Vec<&str> {
         self.stages.iter().rev().map(|s| s.name.as_str()).collect()
+    }
+
+    /// Return `true` if the pipeline has no stages.
+    ///
+    /// Equivalent to `stage_count() == 0`.
+    pub fn pipeline_is_empty(&self) -> bool {
+        self.stages.is_empty()
     }
 
     /// Return the position of the stage named `name` counted from the end of
@@ -4034,5 +4053,19 @@ mod tests {
     fn test_stages_reversed_empty_for_empty_pipeline() {
         let p = Pipeline::new();
         assert!(p.stages_reversed().is_empty());
+    }
+
+    // ── Round 46: pipeline_is_empty ────────────────────────────────────────────
+
+    #[test]
+    fn test_pipeline_is_empty_true_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.pipeline_is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_is_empty_false_after_adding_stage() {
+        let p = Pipeline::new().add_stage("a", |s: String| Ok(s));
+        assert!(!p.pipeline_is_empty());
     }
 }

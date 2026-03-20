@@ -887,6 +887,21 @@ impl MetricsSnapshot {
         let count = self.per_tool_calls.get(name).copied().unwrap_or(0);
         count as f64 / self.total_tool_calls as f64
     }
+
+    /// Return all per-tool call counts sorted by count descending.
+    ///
+    /// Returns a `Vec` of `(tool_name, count)` pairs where the first entry is
+    /// the most-called tool.  Returns an empty `Vec` when no calls have been
+    /// recorded.  Ties are broken alphabetically (ascending).
+    pub fn per_tool_calls_sorted(&self) -> Vec<(String, u64)> {
+        let mut pairs: Vec<(String, u64)> = self
+            .per_tool_calls
+            .iter()
+            .map(|(k, &v)| (k.clone(), v))
+            .collect();
+        pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        pairs
+    }
 }
 
 impl std::fmt::Display for MetricsSnapshot {
@@ -3467,5 +3482,22 @@ mod tests {
     fn test_is_degraded_false_for_empty_snapshot() {
         let snap = MetricsSnapshot::default();
         assert!(!snap.is_degraded(0.1));
+    }
+
+    // ── Round 46: total_errors ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_total_errors_sums_failed_tool_calls_and_checkpoint_errors() {
+        use std::sync::atomic::Ordering;
+        let m = RuntimeMetrics::default();
+        m.failed_tool_calls.store(5, Ordering::Relaxed);
+        m.checkpoint_errors.store(3, Ordering::Relaxed);
+        assert_eq!(m.total_errors(), 8);
+    }
+
+    #[test]
+    fn test_total_errors_zero_when_no_errors() {
+        let m = RuntimeMetrics::default();
+        assert_eq!(m.total_errors(), 0);
     }
 }

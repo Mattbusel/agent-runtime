@@ -124,6 +124,14 @@ impl Message {
     pub fn word_count(&self) -> usize {
         self.content.split_whitespace().count()
     }
+
+    /// Return the byte length of the content string.
+    ///
+    /// For ASCII-only content this equals the character count; for multi-byte
+    /// UTF-8 sequences it will be larger.  Useful for rough token estimation.
+    pub fn byte_len(&self) -> usize {
+        self.content.len()
+    }
 }
 
 impl std::fmt::Display for Role {
@@ -4347,5 +4355,26 @@ mod tests {
     fn test_tool_names_with_required_fields_empty_for_empty_registry() {
         let reg = ToolRegistry::new();
         assert!(reg.tool_names_with_required_fields().is_empty());
+    }
+
+    // ── Round 46: tools_without_required_fields ────────────────────────────────
+
+    #[test]
+    fn test_tools_without_required_fields_returns_tools_with_no_required_fields() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("no-req", "desc", |_| serde_json::json!({})));
+        reg.register(
+            ToolSpec::new("with-req", "desc", |_| serde_json::json!({}))
+                .with_required_fields(vec!["x".to_string()]),
+        );
+        let result = reg.tools_without_required_fields();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "no-req");
+    }
+
+    #[test]
+    fn test_tools_without_required_fields_empty_for_empty_registry() {
+        let reg = ToolRegistry::new();
+        assert!(reg.tools_without_required_fields().is_empty());
     }
 }

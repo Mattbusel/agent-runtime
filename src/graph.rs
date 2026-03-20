@@ -6266,4 +6266,40 @@ mod tests {
         g.add_relationship(Relationship::new("a", "b", "K", 1.0)).unwrap();
         assert!(g.bidirectional_pairs().unwrap().is_empty());
     }
+
+    // ── Round 46: mean_in_degree, entity_count_by_label_prefix ────────────────
+
+    #[test]
+    fn test_mean_in_degree_computes_average() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        g.add_relationship(Relationship::new("a", "b", "EDGE", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "EDGE", 1.0)).unwrap();
+        // 2 total in-degree across 3 entities → mean = 2/3
+        let mean = g.mean_in_degree().unwrap();
+        assert!((mean - 2.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_mean_in_degree_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.mean_in_degree().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_entity_count_by_label_prefix_counts_matching_entities() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Person-Alice")).unwrap();
+        g.add_entity(Entity::new("b", "Person-Bob")).unwrap();
+        g.add_entity(Entity::new("c", "Organization")).unwrap();
+        assert_eq!(g.entity_count_by_label_prefix("Person").unwrap(), 2);
+        assert_eq!(g.entity_count_by_label_prefix("Org").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_entity_count_by_label_prefix_zero_for_no_match() {
+        let g = GraphStore::new();
+        add(&g, "x");
+        assert_eq!(g.entity_count_by_label_prefix("Alien").unwrap(), 0);
+    }
 }
