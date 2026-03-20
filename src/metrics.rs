@@ -4690,4 +4690,28 @@ mod tests {
         let m = RuntimeMetrics::new();
         assert!(!m.has_recorded_agent_calls());
     }
+
+    // ── Round 61: failure_rate_for ─────────────────────────────────────────────
+
+    #[test]
+    fn test_failure_rate_for_returns_correct_ratio() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        m.record_tool_call("search");
+        m.record_tool_failure("search");
+        assert!((m.failure_rate_for("search") - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_failure_rate_for_zero_for_unknown_tool() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.failure_rate_for("unknown"), 0.0);
+    }
+
+    #[test]
+    fn test_failure_rate_for_zero_when_no_failures() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("browse");
+        assert_eq!(m.failure_rate_for("browse"), 0.0);
+    }
 }

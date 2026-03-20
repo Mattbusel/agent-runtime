@@ -7952,6 +7952,21 @@ mod tests {
         assert!(!g.is_connected(&p2, &q2).unwrap());
     }
 
+    // ── Round 61: graph_is_empty ──────────────────────────────────────────────
+
+    #[test]
+    fn test_graph_is_empty_true_for_new_store() {
+        let g = GraphStore::new();
+        assert!(g.graph_is_empty().unwrap());
+    }
+
+    #[test]
+    fn test_graph_is_empty_false_after_adding_entity() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("e", "N")).unwrap();
+        assert!(!g.graph_is_empty().unwrap());
+    }
+
     // ── Round 58: nodes_with_no_outgoing ──────────────────────────────────────
 
     #[test]
