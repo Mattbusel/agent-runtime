@@ -209,6 +209,13 @@ impl DecayPolicy {
     }
 }
 
+impl std::fmt::Display for DecayPolicy {
+    /// Render as `"Exponential(half_life=Xh)"`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Exponential(half_life={:.1}h)", self.half_life_hours)
+    }
+}
+
 // ── RecallPolicy ──────────────────────────────────────────────────────────────
 
 /// Controls how memories are scored and ranked during recall.
@@ -1711,6 +1718,22 @@ impl EpisodicStore {
             .items
             .get(agent_id)
             .map_or(0, |items| items.iter().map(|i| i.recall_count).sum()))
+    }
+
+    /// Return the `recall_count` of the episode identified by `id` for `agent_id`.
+    ///
+    /// Returns `None` if no episode with that `id` exists for the agent.
+    pub fn recall_count_for(
+        &self,
+        agent_id: &AgentId,
+        id: &MemoryId,
+    ) -> Result<Option<u64>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::recall_count_for");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|items| items.iter().find(|i| &i.id == id))
+            .map(|i| i.recall_count))
     }
 
     /// Return summary statistics (count, min, max, mean importance) for `agent_id`.
@@ -3430,6 +3453,20 @@ impl WorkingMemory {
         let mut keys: Vec<String> = inner.map.keys().cloned().collect();
         keys.sort_unstable();
         Ok(keys)
+    }
+
+    /// Return the value associated with the longest key, or `None` if the
+    /// store is empty.
+    ///
+    /// When multiple keys share the maximum byte length, the one that sorts
+    /// first lexicographically is chosen for deterministic output.
+    pub fn value_for_longest_key(&self) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::value_for_longest_key");
+        let best_key = inner
+            .map
+            .keys()
+            .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| b.cmp(a)));
+        Ok(best_key.and_then(|k| inner.map.get(k).cloned()))
     }
 }
 
@@ -7485,5 +7522,50 @@ mod tests {
     fn test_memory_item_is_high_importance_false_below_threshold() {
         let item = MemoryItem::new(AgentId::new("a"), "x", 0.3, vec![]);
         assert!(!item.is_high_importance(0.5));
+    }
+
+    // ── Round 41: EpisodicStore::recall_count_for ──────────────────────────────
+
+    #[test]
+    fn test_episodic_store_recall_count_for_returns_zero_initially() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let id = store.add_episode(agent.clone(), "content", 0.5).unwrap();
+        let count = store.recall_count_for(&agent, &id).unwrap();
+        assert_eq!(count, Some(0));
+    }
+
+    #[test]
+    fn test_episodic_store_recall_count_for_increments_after_recall() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let id = store.add_episode(agent.clone(), "content", 0.5).unwrap();
+        store.recall(&agent, 10).unwrap();
+        let count = store.recall_count_for(&agent, &id).unwrap();
+        assert_eq!(count, Some(1));
+    }
+
+    #[test]
+    fn test_episodic_store_recall_count_for_returns_none_for_unknown_id() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        let missing = MemoryId::new("no-such-id");
+        assert_eq!(store.recall_count_for(&agent, &missing).unwrap(), None);
+    }
+
+    // ── Round 42 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_working_memory_value_for_longest_key_returns_correct_value() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("short", "v1").unwrap();
+        wm.set("this-is-longer", "v2").unwrap();
+        assert_eq!(wm.value_for_longest_key().unwrap(), Some("v2".to_string()));
+    }
+
+    #[test]
+    fn test_working_memory_value_for_longest_key_returns_none_when_empty() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.value_for_longest_key().unwrap(), None);
     }
 }

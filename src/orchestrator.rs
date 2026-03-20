@@ -325,6 +325,26 @@ impl RetryPolicy {
     }
 }
 
+impl std::fmt::Display for RetryPolicy {
+    /// Render as `"Exponential(n×, base=Xms)"` or `"Constant(n×, delay=Xms)"`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.kind {
+            RetryKind::Exponential => write!(
+                f,
+                "Exponential({}×, base={}ms)",
+                self.max_attempts,
+                self.base_delay.as_millis()
+            ),
+            RetryKind::Constant => write!(
+                f,
+                "Constant({}×, delay={}ms)",
+                self.max_attempts,
+                self.base_delay.as_millis()
+            ),
+        }
+    }
+}
+
 // ── CircuitBreaker ────────────────────────────────────────────────────────────
 
 /// Tracks failure rates and opens when the threshold is exceeded.
@@ -359,6 +379,17 @@ impl PartialEq for CircuitState {
 }
 
 impl Eq for CircuitState {}
+
+impl std::fmt::Display for CircuitState {
+    /// Render as `"Closed"`, `"Open"`, or `"HalfOpen"`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CircuitState::Closed => write!(f, "Closed"),
+            CircuitState::Open { .. } => write!(f, "Open"),
+            CircuitState::HalfOpen => write!(f, "HalfOpen"),
+        }
+    }
+}
 
 /// Backend for circuit breaker state storage.
 ///
@@ -1746,6 +1777,49 @@ impl Pipeline {
             .iter()
             .min_by_key(|s| s.name.len())
             .map(|s| s.name.as_str())
+    }
+
+    /// Return the byte lengths of all stage names in order.
+    ///
+    /// Returns an empty `Vec` for an empty pipeline.
+    pub fn stage_name_lengths(&self) -> Vec<usize> {
+        self.stages.iter().map(|s| s.name.len()).collect()
+    }
+
+    /// Return the average byte length of stage names.
+    ///
+    /// Returns `0.0` for an empty pipeline.
+    pub fn avg_stage_name_length(&self) -> f64 {
+        if self.stages.is_empty() {
+            return 0.0;
+        }
+        let total: usize = self.stages.iter().map(|s| s.name.len()).sum();
+        total as f64 / self.stages.len() as f64
+    }
+
+    /// Return the names of stages whose name contains `substring` (case-sensitive).
+    ///
+    /// Returns an empty `Vec` if no stage names match.
+    pub fn stages_containing(&self, substring: &str) -> Vec<&str> {
+        self.stages
+            .iter()
+            .filter(|s| s.name.contains(substring))
+            .map(|s| s.name.as_str())
+            .collect()
+    }
+
+    /// Return `true` if the stage named `name` is the first stage in the pipeline.
+    ///
+    /// Returns `false` if the pipeline is empty or the stage is not present.
+    pub fn stage_is_first(&self, name: &str) -> bool {
+        self.stages.first().map_or(false, |s| s.name == name)
+    }
+
+    /// Return `true` if the stage named `name` is the last stage in the pipeline.
+    ///
+    /// Returns `false` if the pipeline is empty or the stage is not present.
+    pub fn stage_is_last(&self, name: &str) -> bool {
+        self.stages.last().map_or(false, |s| s.name == name)
     }
 
 }
@@ -3436,5 +3510,117 @@ mod tests {
     fn test_pipeline_has_unique_stage_names_true_for_empty_pipeline() {
         let p = Pipeline::new();
         assert!(p.has_unique_stage_names());
+    }
+
+    // ── Round 42 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pipeline_stage_name_lengths_returns_byte_lengths_in_order() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))
+            .add_stage("cdef", |s: String| Ok(s));
+        assert_eq!(p.stage_name_lengths(), vec![2, 4]);
+    }
+
+    #[test]
+    fn test_pipeline_stage_name_lengths_empty_pipeline_returns_empty() {
+        let p = Pipeline::new();
+        assert!(p.stage_name_lengths().is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_avg_stage_name_length_computed_correctly() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))   // 2
+            .add_stage("abcd", |s: String| Ok(s)); // 4
+        assert!((p.avg_stage_name_length() - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_pipeline_avg_stage_name_length_zero_for_empty() {
+        assert_eq!(Pipeline::new().avg_stage_name_length(), 0.0);
+    }
+
+    #[test]
+    fn test_pipeline_stages_containing_returns_matching_names() {
+        let p = Pipeline::new()
+            .add_stage("tokenize", |s: String| Ok(s))
+            .add_stage("encode", |s: String| Ok(s))
+            .add_stage("token-validate", |s: String| Ok(s));
+        let result = p.stages_containing("token");
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&"tokenize"));
+        assert!(result.contains(&"token-validate"));
+    }
+
+    #[test]
+    fn test_pipeline_stages_containing_returns_empty_when_no_match() {
+        let p = Pipeline::new().add_stage("process", |s: String| Ok(s));
+        assert!(p.stages_containing("xyz").is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_stage_is_first_returns_true_for_first_stage() {
+        let p = Pipeline::new()
+            .add_stage("first", |s: String| Ok(s))
+            .add_stage("second", |s: String| Ok(s));
+        assert!(p.stage_is_first("first"));
+        assert!(!p.stage_is_first("second"));
+    }
+
+    #[test]
+    fn test_pipeline_stage_is_last_returns_true_for_last_stage() {
+        let p = Pipeline::new()
+            .add_stage("first", |s: String| Ok(s))
+            .add_stage("last", |s: String| Ok(s));
+        assert!(p.stage_is_last("last"));
+        assert!(!p.stage_is_last("first"));
+    }
+
+    // ── Round 41: stage_names_sorted, longest/shortest_stage_name ─────────────
+
+    #[test]
+    fn test_stage_names_sorted_returns_alphabetical_order() {
+        let p = Pipeline::new()
+            .add_stage("zebra", |s: String| Ok(s))
+            .add_stage("alpha", |s: String| Ok(s))
+            .add_stage("mango", |s: String| Ok(s));
+        assert_eq!(p.stage_names_sorted(), vec!["alpha", "mango", "zebra"]);
+    }
+
+    #[test]
+    fn test_stage_names_sorted_empty_pipeline_returns_empty() {
+        let p = Pipeline::new();
+        assert!(p.stage_names_sorted().is_empty());
+    }
+
+    #[test]
+    fn test_longest_stage_name_returns_longest() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))
+            .add_stage("abcde", |s: String| Ok(s))
+            .add_stage("abc", |s: String| Ok(s));
+        assert_eq!(p.longest_stage_name(), Some("abcde"));
+    }
+
+    #[test]
+    fn test_longest_stage_name_empty_pipeline_returns_none() {
+        let p = Pipeline::new();
+        assert_eq!(p.longest_stage_name(), None);
+    }
+
+    #[test]
+    fn test_shortest_stage_name_returns_shortest() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))
+            .add_stage("abcde", |s: String| Ok(s))
+            .add_stage("a", |s: String| Ok(s));
+        assert_eq!(p.shortest_stage_name(), Some("a"));
+    }
+
+    #[test]
+    fn test_shortest_stage_name_empty_pipeline_returns_none() {
+        let p = Pipeline::new();
+        assert_eq!(p.shortest_stage_name(), None);
     }
 }

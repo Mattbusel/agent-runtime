@@ -956,6 +956,20 @@ impl AgentSession {
             .count()
     }
 
+    /// Return the minimum `step_duration_ms` across all steps in the session.
+    ///
+    /// Returns `0` for empty sessions.
+    pub fn min_step_duration_ms(&self) -> u64 {
+        self.steps.iter().map(|s| s.step_duration_ms).min().unwrap_or(0)
+    }
+
+    /// Return the maximum `step_duration_ms` across all steps in the session.
+    ///
+    /// Returns `0` for empty sessions.
+    pub fn max_step_duration_ms(&self) -> u64 {
+        self.steps.iter().map(|s| s.step_duration_ms).max().unwrap_or(0)
+    }
+
     /// Return the sum of byte lengths of all action strings in the session.
     ///
     /// Useful alongside [`total_thought_bytes`] and [`total_observation_bytes`]
@@ -998,6 +1012,26 @@ impl AgentSession {
             .iter()
             .filter(|s| s.observation.to_ascii_lowercase().contains("error"))
             .collect()
+    }
+
+    /// Return references to steps whose observation byte length exceeds `threshold_bytes`.
+    ///
+    /// Useful for identifying steps that produced unusually verbose tool output.
+    pub fn steps_with_long_observations(&self, threshold_bytes: usize) -> Vec<&ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.observation.len() > threshold_bytes)
+            .collect()
+    }
+
+    /// Return the number of distinct observation strings across all steps.
+    ///
+    /// Two steps with the same observation text are counted as one.
+    /// Returns `0` for empty sessions.
+    pub fn unique_observations_count(&self) -> usize {
+        let unique: std::collections::HashSet<&str> =
+            self.steps.iter().map(|s| s.observation.as_str()).collect();
+        unique.len()
     }
 
     /// Persist this session as a checkpoint under `"session:<session_id>"`.
@@ -4553,5 +4587,84 @@ mod tests {
         let steps = vec![make_step("t", "a", "ok"), make_step("t", "b", "done")];
         let session = make_session(steps, 0);
         assert!(session.steps_with_errors().is_empty());
+    }
+
+    // ── Round 41: min_step_duration_ms, max_step_duration_ms ──────────────────
+
+    #[test]
+    fn test_min_step_duration_ms_returns_minimum() {
+        let mut steps = vec![
+            make_step("t", "a", "o"),
+            make_step("t", "b", "o"),
+            make_step("t", "c", "o"),
+        ];
+        steps[0].step_duration_ms = 50;
+        steps[1].step_duration_ms = 10;
+        steps[2].step_duration_ms = 30;
+        let session = make_session(steps, 0);
+        assert_eq!(session.min_step_duration_ms(), 10);
+    }
+
+    #[test]
+    fn test_min_step_duration_ms_empty_returns_zero() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.min_step_duration_ms(), 0);
+    }
+
+    #[test]
+    fn test_max_step_duration_ms_returns_maximum() {
+        let mut steps = vec![
+            make_step("t", "a", "o"),
+            make_step("t", "b", "o"),
+            make_step("t", "c", "o"),
+        ];
+        steps[0].step_duration_ms = 50;
+        steps[1].step_duration_ms = 10;
+        steps[2].step_duration_ms = 30;
+        let session = make_session(steps, 0);
+        assert_eq!(session.max_step_duration_ms(), 50);
+    }
+
+    #[test]
+    fn test_max_step_duration_ms_empty_returns_zero() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.max_step_duration_ms(), 0);
+    }
+
+    // ── Round 42 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_steps_with_long_observations_returns_steps_above_threshold() {
+        let steps = vec![
+            make_step("t", "a", "short"),    // 5 bytes
+            make_step("t", "b", "this is a long observation"),  // 26 bytes
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_with_long_observations(10).len(), 1);
+        assert_eq!(session.steps_with_long_observations(4).len(), 2);
+    }
+
+    #[test]
+    fn test_steps_with_long_observations_empty_for_high_threshold() {
+        let steps = vec![make_step("t", "a", "hi")];
+        let session = make_session(steps, 0);
+        assert!(session.steps_with_long_observations(1000).is_empty());
+    }
+
+    #[test]
+    fn test_unique_observations_count_counts_distinct_values() {
+        let steps = vec![
+            make_step("t", "a", "ok"),
+            make_step("t", "b", "ok"),
+            make_step("t", "c", "done"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.unique_observations_count(), 2);
+    }
+
+    #[test]
+    fn test_unique_observations_count_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.unique_observations_count(), 0);
     }
 }

@@ -494,6 +494,21 @@ impl MetricsSnapshot {
         self.per_tool_calls.get(name).copied().unwrap_or(0)
     }
 
+    /// Return a concise single-line summary of this snapshot.
+    ///
+    /// Format: `"sessions={n}, steps={n}, tool_calls={n}, failures={n}, latency_mean={n}ms"`.
+    /// Intended for logging and debugging — not a stable serialization format.
+    pub fn summary_line(&self) -> String {
+        format!(
+            "sessions={s}, steps={st}, tool_calls={tc}, failures={f}, latency_mean={l}ms",
+            s = self.total_sessions,
+            st = self.total_steps,
+            tc = self.total_tool_calls,
+            f = self.failed_tool_calls,
+            l = self.step_latency_mean_ms as u64,
+        )
+    }
+
     /// Return the number of failures recorded for the named tool.
     ///
     /// Returns `0` if no failures have been recorded for that tool name.
@@ -1258,6 +1273,21 @@ impl RuntimeMetrics {
         snap.into_iter()
             .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
             .map(|(name, _)| name)
+    }
+
+    /// Return the ratio of failed tool calls to total tool calls.
+    ///
+    /// Returns `0.0` when no tool calls have been recorded.  Unlike the
+    /// per-tool [`tool_failure_rate`] on `MetricsSnapshot`, this operates on
+    /// the live atomic counters for the current process without snapshotting.
+    ///
+    /// [`tool_failure_rate`]: MetricsSnapshot::tool_failure_rate
+    pub fn tool_call_to_failure_ratio(&self) -> f64 {
+        let total = self.total_tool_calls.load(Ordering::Relaxed);
+        if total == 0 {
+            return 0.0;
+        }
+        self.failed_tool_calls.load(Ordering::Relaxed) as f64 / total as f64
     }
 
     /// Return the top `n` tools by total call count, sorted descending.
@@ -3046,5 +3076,62 @@ mod tests {
     fn test_most_used_tool_returns_none_when_no_calls() {
         let m = RuntimeMetrics::new();
         assert_eq!(m.most_used_tool(), None);
+    }
+
+    // ── Round 42 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tool_call_to_failure_ratio_zero_when_no_calls() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.tool_call_to_failure_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_tool_call_to_failure_ratio_computed_correctly() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("t");
+        m.record_tool_call("t");
+        m.record_tool_failure("t");
+        // 1 failure out of 2 calls (total_tool_calls = 2)
+        assert!((m.tool_call_to_failure_ratio() - 0.5).abs() < 1e-9);
+    }
+
+    // ── Round 41: MetricsSnapshot::total_tool_failures, least_called_tool ─────
+
+    #[test]
+    fn test_metrics_snapshot_total_tool_failures_sums_all_failures() {
+        let snap = MetricsSnapshot {
+            per_tool_failures: [
+                ("search".to_string(), 3u64),
+                ("write".to_string(), 2u64),
+            ].into_iter().collect(),
+            ..Default::default()
+        };
+        assert_eq!(snap.total_tool_failures(), 5);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_total_tool_failures_zero_when_empty() {
+        let snap = MetricsSnapshot::default();
+        assert_eq!(snap.total_tool_failures(), 0);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_least_called_tool_returns_tool_with_fewest_calls() {
+        let snap = MetricsSnapshot {
+            per_tool_calls: [
+                ("search".to_string(), 10u64),
+                ("lookup".to_string(), 2u64),
+                ("write".to_string(), 5u64),
+            ].into_iter().collect(),
+            ..Default::default()
+        };
+        assert_eq!(snap.least_called_tool(), Some("lookup".to_string()));
+    }
+
+    #[test]
+    fn test_metrics_snapshot_least_called_tool_returns_none_when_empty() {
+        let snap = MetricsSnapshot::default();
+        assert_eq!(snap.least_called_tool(), None);
     }
 }

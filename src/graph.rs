@@ -224,6 +224,28 @@ impl Entity {
     pub fn properties_is_empty(&self) -> bool {
         self.properties.is_empty()
     }
+
+    /// Return a sorted list of property keys for this entity.
+    ///
+    /// Useful for inspecting an entity's schema without cloning all values.
+    pub fn property_keys(&self) -> Vec<&str> {
+        let mut keys: Vec<&str> = self.properties.keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        keys
+    }
+}
+
+impl std::fmt::Display for Entity {
+    /// Render as `"Entity[id='...', label='...', props=n]"`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Entity[id='{}', label='{}', props={}]",
+            self.id,
+            self.label,
+            self.properties.len()
+        )
+    }
 }
 
 // ── Relationship ──────────────────────────────────────────────────────────────
@@ -272,6 +294,15 @@ impl Relationship {
             kind: self.kind.clone(),
             weight: self.weight,
         }
+    }
+}
+
+impl std::fmt::Display for Relationship {
+    /// Render as `"from --kind(weight)--> to"`.
+    ///
+    /// For example: `"alice --KNOWS(1.00)--> bob"`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} --{}({:.2})--> {}", self.from, self.kind, self.weight, self.to)
     }
 }
 
@@ -1943,6 +1974,30 @@ impl GraphStore {
             .map_or(0, |srcs| srcs.len()))
     }
 
+    /// Return the total degree (in-degree + out-degree) for entity `id`.
+    ///
+    /// Returns `0` for unknown entities.  Self-loops are counted once in each
+    /// direction (so they contribute `2` to the total degree).
+    pub fn total_degree(&self, id: &EntityId) -> Result<usize, AgentRuntimeError> {
+        let out = self.out_degree(id)?;
+        let r#in = self.in_degree(id)?;
+        Ok(out + r#in)
+    }
+
+    /// Return the sorted property keys for entity `id`.
+    ///
+    /// Returns an empty `Vec` if the entity has no properties or does not exist.
+    pub fn entity_property_keys(&self, id: &EntityId) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "entity_property_keys");
+        let entity = match inner.entities.get(id) {
+            Some(e) => e,
+            None => return Ok(vec![]),
+        };
+        let mut keys: Vec<String> = entity.properties.keys().cloned().collect();
+        keys.sort_unstable();
+        Ok(keys)
+    }
+
     /// Return `true` if there is any path from `from` to `to`.
     ///
     /// Both nodes must exist or returns `Err`. Uses BFS internally.
@@ -2726,6 +2781,25 @@ impl GraphStore {
         }
         let total: usize = inner.entities.values().map(|e| e.properties.len()).sum();
         Ok(total as f64 / n as f64)
+    }
+
+    /// Return a map of property key → number of entities that have that key.
+    ///
+    /// Useful for auditing schema coverage: a key that appears on all entities
+    /// has count == entity_count; a key that appears on only one entity may
+    /// indicate a one-off annotation.
+    ///
+    /// Returns an empty map when the graph has no entities or no entity has
+    /// any properties.
+    pub fn property_key_frequency(&self) -> Result<HashMap<String, usize>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::property_key_frequency");
+        let mut freq: HashMap<String, usize> = HashMap::new();
+        for entity in inner.entities.values() {
+            for key in entity.properties.keys() {
+                *freq.entry(key.clone()).or_insert(0) += 1;
+            }
+        }
+        Ok(freq)
     }
 }
 
@@ -5464,5 +5538,122 @@ mod tests {
     fn test_avg_property_count_empty_graph_returns_zero() {
         let g = GraphStore::new();
         assert_eq!(g.avg_property_count().unwrap(), 0.0);
+    }
+
+    // ── Round 42 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_property_key_frequency_counts_correctly() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")
+            .with_property("age", serde_json::json!(30))
+            .with_property("role", serde_json::json!("admin"))).unwrap();
+        g.add_entity(Entity::new("b", "N")
+            .with_property("age", serde_json::json!(25))).unwrap();
+        let freq = g.property_key_frequency().unwrap();
+        assert_eq!(freq.get("age"), Some(&2));
+        assert_eq!(freq.get("role"), Some(&1));
+    }
+
+    #[test]
+    fn test_property_key_frequency_empty_graph_returns_empty() {
+        let g = GraphStore::new();
+        assert!(g.property_key_frequency().unwrap().is_empty());
+    }
+
+    // ── Round 41: GraphStore::has_edge ─────────────────────────────────────────
+
+    #[test]
+    fn test_has_edge_returns_true_when_edge_exists() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b");
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        assert!(g.has_edge(&EntityId::new("a"), &EntityId::new("b")).unwrap());
+    }
+
+    #[test]
+    fn test_has_edge_returns_false_when_no_edge() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b");
+        assert!(!g.has_edge(&EntityId::new("a"), &EntityId::new("b")).unwrap());
+    }
+
+    #[test]
+    fn test_has_edge_is_directional() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b");
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        // a→b exists but b→a does not
+        assert!(!g.has_edge(&EntityId::new("b"), &EntityId::new("a")).unwrap());
+    }
+
+    // ── Round 42: Display, total_degree, entity_property_keys ────────────────
+
+    #[test]
+    fn test_entity_display_with_props() {
+        let e = Entity::new("alice", "Person")
+            .with_property("age", serde_json::json!(30));
+        let s = e.to_string();
+        assert!(s.contains("alice") && s.contains("Person") && s.contains("props=1"));
+    }
+
+    #[test]
+    fn test_entity_display_no_props() {
+        let e = Entity::new("bob", "Node");
+        assert_eq!(e.to_string(), "Entity[id='bob', label='Node', props=0]");
+    }
+
+    #[test]
+    fn test_relationship_display_format() {
+        let r = Relationship::new("alice", "bob", "KNOWS", 1.5);
+        let s = r.to_string();
+        assert!(s.contains("alice") && s.contains("KNOWS") && s.contains("bob") && s.contains("1.50"));
+    }
+
+    #[test]
+    fn test_graph_total_degree_sum_of_in_and_out() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("c", "a", "e", 1.0)).unwrap();
+        assert_eq!(g.total_degree(&EntityId::new("a")).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_graph_total_degree_zero_for_isolated_node() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("iso", "N")).unwrap();
+        assert_eq!(g.total_degree(&EntityId::new("iso")).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_graph_entity_property_keys_returns_sorted() {
+        let g = GraphStore::new();
+        let e = Entity::new("e1", "X")
+            .with_property("z", serde_json::json!(1))
+            .with_property("a", serde_json::json!(2))
+            .with_property("m", serde_json::json!(3));
+        g.add_entity(e).unwrap();
+        assert_eq!(
+            g.entity_property_keys(&EntityId::new("e1")).unwrap(),
+            vec!["a", "m", "z"]
+        );
+    }
+
+    #[test]
+    fn test_graph_entity_property_keys_empty_for_unknown() {
+        let g = GraphStore::new();
+        assert!(g.entity_property_keys(&EntityId::new("missing")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_entity_property_keys_method_sorted() {
+        let e = Entity::new("p", "T")
+            .with_property("b", serde_json::json!(0))
+            .with_property("a", serde_json::json!(0));
+        let keys = e.property_keys();
+        assert_eq!(keys, vec!["a", "b"]);
     }
 }

@@ -4083,4 +4083,37 @@ mod tests {
         let reg = ToolRegistry::new();
         assert_eq!(reg.shortest_description_length(), 0);
     }
+
+    // ── Round 41: ToolRegistry::tool_count_with_validators ────────────────────
+
+    struct AlwaysOk;
+    impl ToolValidator for AlwaysOk {
+        fn validate(&self, _args: &Value) -> Result<(), AgentRuntimeError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_tool_count_with_validators_counts_tools_that_have_validators() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("a", "desc", |_| serde_json::json!({}))
+            .with_validators(vec![Box::new(AlwaysOk)]));
+        reg.register(ToolSpec::new("b", "desc", |_| serde_json::json!({}))); // no validators
+        reg.register(ToolSpec::new("c", "desc", |_| serde_json::json!({}))
+            .with_validators(vec![Box::new(AlwaysOk)]));
+        assert_eq!(reg.tool_count_with_validators(), 2);
+    }
+
+    #[test]
+    fn test_tool_count_with_validators_zero_when_none_have_validators() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("a", "desc", |_| serde_json::json!({})));
+        assert_eq!(reg.tool_count_with_validators(), 0);
+    }
+
+    #[test]
+    fn test_tool_count_with_validators_zero_for_empty_registry() {
+        let reg = ToolRegistry::new();
+        assert_eq!(reg.tool_count_with_validators(), 0);
+    }
 }
