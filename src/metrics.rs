@@ -1740,6 +1740,22 @@ impl RuntimeMetrics {
         self.per_tool_calls_snapshot().len()
     }
 
+    /// Return the failure rate (failed / total) for the given tool `name`.
+    ///
+    /// Returns `0.0` when the tool has never been called or doesn't exist.
+    pub fn failure_rate_for(&self, name: &str) -> f64 {
+        let calls = self.tool_call_count_for(name);
+        if calls == 0 {
+            return 0.0;
+        }
+        let failures = self
+            .per_tool_failures_snapshot()
+            .get(name)
+            .copied()
+            .unwrap_or(0);
+        failures as f64 / calls as f64
+    }
+
     /// Return the total number of tool calls recorded for the given `agent_id`.
     ///
     /// Returns `0` when the agent has never called a tool.
@@ -1874,6 +1890,11 @@ impl RuntimeMetrics {
     /// building the full per-agent snapshot map when a boolean answer suffices.
     pub fn has_recorded_agent_calls(&self) -> bool {
         !self.per_agent_tool_calls_snapshot().is_empty()
+    }
+
+    /// Return the current count of active (in-progress) sessions.
+    pub fn active_session_count(&self) -> usize {
+        self.active_sessions.load(Ordering::Relaxed)
     }
 
     /// Capture a snapshot of global counters as plain integers.
@@ -4468,6 +4489,21 @@ mod tests {
     fn test_agent_tool_count_zero_when_no_calls() {
         let m = RuntimeMetrics::new();
         assert_eq!(m.agent_tool_count(), 0);
+    }
+
+    // ── Round 61: active_session_count ────────────────────────────────────────
+
+    #[test]
+    fn test_active_session_count_correct() {
+        let m = RuntimeMetrics::new();
+        m.active_sessions.store(3, Ordering::Relaxed);
+        assert_eq!(m.active_session_count(), 3);
+    }
+
+    #[test]
+    fn test_active_session_count_zero_initially() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.active_session_count(), 0);
     }
 
     // ── Round 57: failure_ratio_for_tool, any_tool_exceeds_calls ─────────────

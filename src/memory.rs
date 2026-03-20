@@ -1053,6 +1053,39 @@ impl EpisodicStore {
             .unwrap_or(0.0))
     }
 
+    /// Return the minimum importance across all episodes for `agent_id`, or
+    /// `None` when the agent has no recorded episodes.
+    pub fn episodes_min_importance(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<f32>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episodes_min_importance");
+        Ok(inner.items.get(agent_id).and_then(|v| {
+            v.iter()
+                .map(|m| m.importance)
+                .reduce(f32::min)
+        }))
+    }
+
+    /// Return the minimum word count among all episode content strings for
+    /// `agent_id`.
+    ///
+    /// Returns `0` when the agent has no recorded episodes.
+    pub fn episode_min_content_words(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(
+            self.inner.lock(),
+            "EpisodicStore::episode_min_content_words",
+        );
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|v| v.iter().map(|m| m.content.split_whitespace().count()).min())
+            .unwrap_or(0))
+    }
+
     /// Return the `AgentId` of the agent with the most stored episodes, or
     /// `None` if the store is empty.
     pub fn agent_with_most_episodes(&self) -> Result<Option<AgentId>, AgentRuntimeError> {
@@ -2500,6 +2533,39 @@ impl EpisodicStore {
                 .iter()
                 .filter(|m| m.timestamp >= start && m.timestamp <= end)
                 .count()
+        }))
+    }
+
+    /// Return the total number of tags across all episodes for `agent_id`.
+    ///
+    /// Episodes with no tags contribute `0` to the sum.  Returns `0` for
+    /// unknown agents.
+    pub fn total_tag_count(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::total_tag_count");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or(0, |items| items.iter().map(|m| m.tags.len()).sum()))
+    }
+
+    /// Return the average number of tags per episode for `agent_id`.
+    ///
+    /// Returns `0.0` for unknown agents or when there are no episodes.
+    pub fn avg_tag_count_per_episode(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<f64, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "EpisodicStore::avg_tag_count_per_episode");
+        Ok(inner.items.get(agent_id).map_or(0.0, |items| {
+            if items.is_empty() {
+                return 0.0;
+            }
+            let total: usize = items.iter().map(|m| m.tags.len()).sum();
+            total as f64 / items.len() as f64
         }))
     }
 
@@ -4199,6 +4265,37 @@ impl WorkingMemory {
         Ok(inner.map.keys().map(|k| k.len()).sum())
     }
 
+    /// Return all keys whose string representation ends with `suffix`,
+    /// sorted alphabetically.
+    ///
+    /// Returns an empty `Vec` when no key qualifies.
+    pub fn keys_with_suffix(
+        &self,
+        suffix: &str,
+    ) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::keys_with_suffix");
+        let mut keys: Vec<String> = inner
+            .map
+            .keys()
+            .filter(|k| k.ends_with(suffix))
+            .cloned()
+            .collect();
+        keys.sort_unstable();
+        Ok(keys)
+    }
+
+    /// Return the average byte length of all stored keys.
+    ///
+    /// Returns `0.0` for an empty store.
+    pub fn avg_key_length(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::avg_key_length");
+        if inner.map.is_empty() {
+            return Ok(0.0);
+        }
+        let total: usize = inner.map.keys().map(|k| k.len()).sum();
+        Ok(total as f64 / inner.map.len() as f64)
+    }
+
     /// Return the maximum key byte length, or `0` if the store is empty.
     ///
     /// Useful as a quick bound on the widest key that will be emitted.
@@ -4412,6 +4509,14 @@ impl WorkingMemory {
     pub fn keys_longer_than(&self, min_bytes: usize) -> Result<Vec<String>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::keys_longer_than");
         Ok(inner.map.keys().filter(|k| k.len() > min_bytes).cloned().collect())
+    }
+
+    /// Return all keys whose byte length is strictly less than `max_bytes`.
+    ///
+    /// Returns an empty `Vec` when no keys satisfy the condition.
+    pub fn keys_shorter_than(&self, max_bytes: usize) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::keys_shorter_than");
+        Ok(inner.map.keys().filter(|k| k.len() < max_bytes).cloned().collect())
     }
 
     /// Return `true` if the value stored under `key` starts with `prefix`.
@@ -10639,6 +10744,82 @@ mod tests {
         assert_eq!(count, 0);
     }
 
+    // ── Round 61: total_tag_count, avg_tag_count_per_episode, keys_with_suffix, avg_key_length ──
+
+    #[test]
+    fn test_total_tag_count_sums_tags_across_episodes() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r61-tags");
+        store
+            .add_episode_with_tags(agent.clone(), "ep1", 0.5, vec!["a".to_string(), "b".to_string()])
+            .unwrap();
+        store
+            .add_episode_with_tags(agent.clone(), "ep2", 0.5, vec!["c".to_string()])
+            .unwrap();
+        assert_eq!(store.total_tag_count(&agent).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_total_tag_count_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r61-tags-unknown");
+        assert_eq!(store.total_tag_count(&agent).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_avg_tag_count_per_episode_correct() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r61-avg-tags");
+        store
+            .add_episode_with_tags(agent.clone(), "e1", 0.5, vec!["x".to_string(), "y".to_string()])
+            .unwrap();
+        store
+            .add_episode_with_tags(agent.clone(), "e2", 0.5, vec![])
+            .unwrap();
+        // 2 tags over 2 episodes = 1.0
+        assert!((store.avg_tag_count_per_episode(&agent).unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_tag_count_per_episode_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r61-avg-tags-unknown");
+        assert_eq!(store.avg_tag_count_per_episode(&agent).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_keys_with_suffix_returns_matching_keys() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("config.json", "data").unwrap();
+        wm.set("readme.md", "doc").unwrap();
+        wm.set("schema.json", "meta").unwrap();
+        let keys = wm.keys_with_suffix(".json").unwrap();
+        assert_eq!(keys, vec!["config.json".to_string(), "schema.json".to_string()]);
+    }
+
+    #[test]
+    fn test_keys_with_suffix_empty_when_none_match() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("hello", "world").unwrap();
+        let keys = wm.keys_with_suffix(".json").unwrap();
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn test_avg_key_length_correct() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("ab", "v").unwrap();   // 2
+        wm.set("abcd", "v").unwrap(); // 4
+        let avg = wm.avg_key_length().unwrap();
+        assert!((avg - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_key_length_zero_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.avg_key_length().unwrap(), 0.0);
+    }
+
     #[test]
     fn test_total_content_words_returns_total_word_count() {
         let store = EpisodicStore::new();
@@ -10795,5 +10976,58 @@ mod tests {
     fn test_average_value_length_zero_for_empty_store() {
         let wm = WorkingMemory::new(10).unwrap();
         assert_eq!(wm.average_value_length().unwrap(), 0.0);
+    }
+
+    // ── Round 61: episodes_min_importance, episode_min_content_words, keys_shorter_than ──
+
+    #[test]
+    fn test_episodes_min_importance_returns_minimum() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r61-min-imp");
+        store.add_episode_with_tags(agent.clone(), "a", 0.8, vec![]).unwrap();
+        store.add_episode_with_tags(agent.clone(), "b", 0.2, vec![]).unwrap();
+        let min = store.episodes_min_importance(&agent).unwrap();
+        assert!((min.unwrap() - 0.2_f32).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_episodes_min_importance_none_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r61-min-imp-unknown");
+        assert!(store.episodes_min_importance(&agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_episode_min_content_words_returns_minimum() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r61-min-words");
+        store.add_episode_with_tags(agent.clone(), "one two three", 0.5, vec![]).unwrap();
+        store.add_episode_with_tags(agent.clone(), "hello", 0.5, vec![]).unwrap();
+        assert_eq!(store.episode_min_content_words(&agent).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_episode_min_content_words_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r61-min-words-unknown");
+        assert_eq!(store.episode_min_content_words(&agent).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_keys_shorter_than_filters_correctly() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("a", "v").unwrap();
+        wm.set("abcdef", "v").unwrap();
+        wm.set("abc", "v").unwrap();
+        let mut keys = wm.keys_shorter_than(3).unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn test_keys_shorter_than_empty_when_none_qualify() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("long_key", "v").unwrap();
+        assert!(wm.keys_shorter_than(1).unwrap().is_empty());
     }
 }

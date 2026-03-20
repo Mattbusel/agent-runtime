@@ -3409,6 +3409,27 @@ impl GraphStore {
             .collect())
     }
 
+    /// Return the number of distinct entity labels currently in the graph.
+    pub fn labels_unique_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::labels_unique_count");
+        let labels: std::collections::HashSet<&str> =
+            inner.entities.values().map(|e| e.label.as_str()).collect();
+        Ok(labels.len())
+    }
+
+    /// Return all outgoing `Relationship`s from the entity with the given `id`.
+    ///
+    /// Returns an empty `Vec` when the entity has no outgoing edges or does
+    /// not exist.
+    pub fn relationships_from(&self, id: &EntityId) -> Result<Vec<Relationship>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::relationships_from");
+        Ok(inner
+            .adjacency
+            .get(id)
+            .map(|rels| rels.clone())
+            .unwrap_or_default())
+    }
+
     ///
     /// Entities with no outgoing edges have an out-degree of 0 and are
     /// excluded unless `min_degree` is 0.  Returns an empty `Vec` for an
@@ -3656,6 +3677,12 @@ impl GraphStore {
             .adjacency
             .get(from_id)
             .map_or(false, |rels| rels.iter().any(|r| &r.to == to_id)))
+    }
+
+    /// Return `true` if the graph contains no entities and no relationships.
+    pub fn graph_is_empty(&self) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::graph_is_empty");
+        Ok(inner.entities.is_empty() && inner.adjacency.is_empty())
     }
 
     /// Return all entities that have at least one **incoming** relationship
@@ -8081,5 +8108,42 @@ mod tests {
         g.add_entity(Entity::new("b", "N")).unwrap();
         g.add_relationship(Relationship::new("a", "b", "likes", 1.0)).unwrap();
         assert!(!g.has_relationship_with_kind("follows").unwrap());
+    }
+
+    // ── Round 61: labels_unique_count, relationships_from ─────────────────────
+
+    #[test]
+    fn test_labels_unique_count_returns_distinct_count() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("e1", "Person")).unwrap();
+        g.add_entity(Entity::new("e2", "Person")).unwrap();
+        g.add_entity(Entity::new("e3", "Place")).unwrap();
+        assert_eq!(g.labels_unique_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_labels_unique_count_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.labels_unique_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_relationships_from_returns_outgoing_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "link", 1.0)).unwrap();
+        let from = EntityId("a".to_string());
+        assert_eq!(g.relationships_from(&from).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_relationships_from_empty_for_node_with_no_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("lone", "N")).unwrap();
+        let id = EntityId("lone".to_string());
+        assert!(g.relationships_from(&id).unwrap().is_empty());
     }
 }

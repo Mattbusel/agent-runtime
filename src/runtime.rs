@@ -1716,6 +1716,32 @@ impl AgentSession {
             .count()
     }
 
+    /// Return the number of steps whose `observation` field starts with
+    /// `prefix`.
+    ///
+    /// Returns `0` for an empty session or when no step qualifies.
+    pub fn steps_with_observation_prefix(&self, prefix: &str) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| s.observation.starts_with(prefix))
+            .count()
+    }
+
+    /// Return the total byte count of all `observation` fields across all
+    /// steps.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn observation_bytes_total(&self) -> usize {
+        self.steps.iter().map(|s| s.observation.len()).sum()
+    }
+
+    /// Return the character count of the first step's `thought` field.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn first_thought_chars(&self) -> usize {
+        self.steps.first().map_or(0, |s| s.thought.chars().count())
+    }
+
     /// Return the statistical variance of thought byte lengths across all steps.
     ///
     /// Returns `0.0` for a session with fewer than two steps.
@@ -2117,6 +2143,24 @@ impl AgentSession {
     /// When multiple steps tie, the first is returned.
     pub fn step_with_longest_action(&self) -> Option<&ReActStep> {
         self.steps.iter().max_by_key(|s| s.action.chars().count())
+    }
+
+    /// Return `true` if any step's `action` ends with the given `suffix`.
+    pub fn action_ends_with(&self, suffix: &str) -> bool {
+        self.steps.iter().any(|s| s.action.ends_with(suffix))
+    }
+
+    /// Return `true` if any step's `thought` ends with the given `suffix`.
+    pub fn thought_ends_with(&self, suffix: &str) -> bool {
+        self.steps.iter().any(|s| s.thought.ends_with(suffix))
+    }
+
+    /// Return `true` if any step's `thought` contains `thought_term` AND that
+    /// same step's `action` contains `action_term`.
+    pub fn has_step_with_both(&self, thought_term: &str, action_term: &str) -> bool {
+        self.steps
+            .iter()
+            .any(|s| s.thought.contains(thought_term) && s.action.contains(action_term))
     }
 
     /// Return the number of steps whose `observation` byte length strictly
@@ -7347,6 +7391,56 @@ mod tests {
         assert_eq!(session.steps_with_both_thought_and_action(), 0);
     }
 
+    // ── Round 61: steps_with_observation_prefix, observation_bytes_total, first_thought_chars ──
+
+    #[test]
+    fn test_steps_with_observation_prefix_correct() {
+        let steps = vec![
+            make_step("t", "a", "[error] bad"),
+            make_step("t", "a", "ok"),
+            make_step("t", "a", "[error] also bad"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_with_observation_prefix("[error]"), 2);
+    }
+
+    #[test]
+    fn test_steps_with_observation_prefix_zero_when_none_match() {
+        let steps = vec![make_step("t", "a", "ok")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_with_observation_prefix("[error]"), 0);
+    }
+
+    #[test]
+    fn test_observation_bytes_total_sums_all_observations() {
+        let steps = vec![
+            make_step("t", "a", "abc"),   // 3
+            make_step("t", "a", "de"),    // 2
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.observation_bytes_total(), 5);
+    }
+
+    #[test]
+    fn test_observation_bytes_total_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.observation_bytes_total(), 0);
+    }
+
+    #[test]
+    fn test_first_thought_chars_returns_first_step_count() {
+        let steps = vec![make_step("héllo", "a", "o"), make_step("ignored", "a", "o")];
+        let session = make_session(steps, 0);
+        // "héllo" has 5 chars (é is one char)
+        assert_eq!(session.first_thought_chars(), 5);
+    }
+
+    #[test]
+    fn test_first_thought_chars_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.first_thought_chars(), 0);
+    }
+
     // ── Round 58: steps_matching_thought, median_observation_chars, cumulative_thought_chars, count_steps_with_thought_containing ──
 
     #[test]
@@ -7628,5 +7722,54 @@ mod tests {
     fn test_step_count_with_observation_longer_than_zero_for_empty_session() {
         let session = make_session(vec![], 0);
         assert_eq!(session.step_count_with_observation_longer_than(0), 0);
+    }
+
+    // ── Round 61: action_ends_with, thought_ends_with, has_step_with_both ──────
+
+    #[test]
+    fn test_action_ends_with_true_when_present() {
+        let steps = vec![make_step("t", "search(query)", "o")];
+        let session = make_session(steps, 0);
+        assert!(session.action_ends_with(")"));
+    }
+
+    #[test]
+    fn test_action_ends_with_false_when_absent() {
+        let steps = vec![make_step("t", "search(query)", "o")];
+        let session = make_session(steps, 0);
+        assert!(!session.action_ends_with("!"));
+    }
+
+    #[test]
+    fn test_thought_ends_with_true_when_present() {
+        let steps = vec![make_step("I should search.", "a", "o")];
+        let session = make_session(steps, 0);
+        assert!(session.thought_ends_with("."));
+    }
+
+    #[test]
+    fn test_thought_ends_with_false_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(!session.thought_ends_with("x"));
+    }
+
+    #[test]
+    fn test_has_step_with_both_true_when_step_matches_both() {
+        let steps = vec![
+            make_step("need to search", "search(foo)", "o"),
+            make_step("done", "noop", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(session.has_step_with_both("search", "foo"));
+    }
+
+    #[test]
+    fn test_has_step_with_both_false_when_no_step_matches_both() {
+        let steps = vec![
+            make_step("need to search", "noop", "o"),
+            make_step("done", "search(foo)", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(!session.has_step_with_both("search", "foo"));
     }
 }
