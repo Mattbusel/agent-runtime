@@ -891,6 +891,36 @@ impl GraphStore {
         Ok(!self.contains_cycle()?)
     }
 
+    /// Return the mean out-degree across all entities.
+    ///
+    /// Returns `0.0` for graphs with no entities.
+    pub fn avg_out_degree(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::avg_out_degree");
+        let n = inner.entities.len();
+        if n == 0 {
+            return Ok(0.0);
+        }
+        let total: usize = inner.entities.keys().map(|id| {
+            inner.adjacency.get(id).map_or(0, |v| v.len())
+        }).sum();
+        Ok(total as f64 / n as f64)
+    }
+
+    /// Return the mean in-degree across all entities.
+    ///
+    /// Returns `0.0` for graphs with no entities.
+    pub fn avg_in_degree(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::avg_in_degree");
+        let n = inner.entities.len();
+        if n == 0 {
+            return Ok(0.0);
+        }
+        let total: usize = inner.entities.keys().map(|id| {
+            inner.reverse_adjacency.get(id).map_or(0, |v| v.len())
+        }).sum();
+        Ok(total as f64 / n as f64)
+    }
+
     /// Return the maximum out-degree across all entities, or `0` for empty graphs.
     pub fn max_out_degree(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "max_out_degree");
@@ -4367,5 +4397,47 @@ mod tests {
             .shortest_path_length(&EntityId::new("a"), &EntityId::new("c"))
             .unwrap();
         assert_eq!(len, Some(2));
+    }
+
+    // ── Round 25: avg_out_degree / avg_in_degree ──────────────────────────────
+
+    #[test]
+    fn test_avg_out_degree_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!((g.avg_out_degree().unwrap() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_out_degree_correct_mean() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        // a → b, a → c (a has out-degree 2), b and c have 0
+        g.add_relationship(Relationship::new("a", "b", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "e", 1.0)).unwrap();
+        // mean = (2 + 0 + 0) / 3 ≈ 0.667
+        let avg = g.avg_out_degree().unwrap();
+        assert!((avg - 2.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_in_degree_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!((g.avg_in_degree().unwrap() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_in_degree_correct_mean() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        // a → c, b → c (c has in-degree 2), a and b have 0
+        g.add_relationship(Relationship::new("a", "c", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "e", 1.0)).unwrap();
+        // mean = (0 + 0 + 2) / 3 ≈ 0.667
+        let avg = g.avg_in_degree().unwrap();
+        assert!((avg - 2.0 / 3.0).abs() < 1e-9);
     }
 }

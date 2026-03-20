@@ -264,6 +264,33 @@ impl AgentSession {
         self.steps.iter().filter(|s| !s.observation.is_empty()).count()
     }
 
+    /// Return up to the last `n` non-empty observation strings, ordered oldest
+    /// to newest.
+    ///
+    /// Empty observations are skipped.  If the session has fewer than `n`
+    /// non-empty observations, all of them are returned.
+    pub fn last_n_observations(&self, n: usize) -> Vec<&str> {
+        let all: Vec<&str> = self
+            .steps
+            .iter()
+            .filter(|s| !s.observation.is_empty())
+            .map(|s| s.observation.as_str())
+            .collect();
+        let skip = all.len().saturating_sub(n);
+        all[skip..].to_vec()
+    }
+
+    /// Return the action names from the last `n` steps, ordered oldest to newest.
+    ///
+    /// If the session has fewer than `n` steps, all action names are returned.
+    pub fn actions_in_window(&self, n: usize) -> Vec<&str> {
+        let skip = self.steps.len().saturating_sub(n);
+        self.steps[skip..]
+            .iter()
+            .map(|s| s.action.as_str())
+            .collect()
+    }
+
     /// Return the number of steps whose observation string is empty.
     pub fn steps_without_observation(&self) -> usize {
         self.steps.iter().filter(|s| s.observation.is_empty()).count()
@@ -3420,5 +3447,94 @@ mod tests {
         // mean = (5 + 2) / 2 = 3.5
         let session = make_session(steps, 0);
         assert!((session.avg_thought_length() - 3.5).abs() < 1e-9);
+    }
+
+    // ── Round 25: last_n_observations / actions_in_window ─────────────────────
+
+    #[test]
+    fn test_last_n_observations_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.last_n_observations(3).is_empty());
+    }
+
+    #[test]
+    fn test_last_n_observations_returns_last_n_nonempty() {
+        let steps = vec![
+            make_step("t", "a", "obs1"),
+            make_step("t", "b", ""),        // skipped
+            make_step("t", "c", "obs2"),
+            make_step("t", "d", "obs3"),
+        ];
+        let session = make_session(steps, 0);
+        let last2 = session.last_n_observations(2);
+        assert_eq!(last2, vec!["obs2", "obs3"]);
+    }
+
+    #[test]
+    fn test_last_n_observations_returns_all_when_fewer_than_n() {
+        let steps = vec![make_step("t", "a", "only")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.last_n_observations(5), vec!["only"]);
+    }
+
+    #[test]
+    fn test_actions_in_window_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.actions_in_window(3).is_empty());
+    }
+
+    #[test]
+    fn test_actions_in_window_returns_last_n_steps() {
+        let steps = vec![
+            make_step("t", "alpha", "r"),
+            make_step("t", "beta", "r"),
+            make_step("t", "gamma", "r"),
+        ];
+        let session = make_session(steps, 0);
+        let window = session.actions_in_window(2);
+        assert_eq!(window, vec!["beta", "gamma"]);
+    }
+
+    #[test]
+    fn test_actions_in_window_all_when_fewer_than_n() {
+        let steps = vec![make_step("t", "solo", "r")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.actions_in_window(10), vec!["solo"]);
+    }
+
+    // ── Round 31: observation_at, action_at ───────────────────────────────────
+
+    #[test]
+    fn test_observation_at_returns_correct_observation() {
+        let steps = vec![
+            make_step("t1", "a1", "obs-zero"),
+            make_step("t2", "a2", "obs-one"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.observation_at(0), Some("obs-zero"));
+        assert_eq!(session.observation_at(1), Some("obs-one"));
+    }
+
+    #[test]
+    fn test_observation_at_returns_none_out_of_bounds() {
+        let session = make_session(vec![], 0);
+        assert!(session.observation_at(0).is_none());
+    }
+
+    #[test]
+    fn test_action_at_returns_correct_action() {
+        let steps = vec![
+            make_step("t1", "first-action", "obs"),
+            make_step("t2", "second-action", "obs"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.action_at(0), Some("first-action"));
+        assert_eq!(session.action_at(1), Some("second-action"));
+    }
+
+    #[test]
+    fn test_action_at_returns_none_out_of_bounds() {
+        let session = make_session(vec![], 0);
+        assert!(session.action_at(5).is_none());
     }
 }

@@ -1125,6 +1125,16 @@ impl ToolRegistry {
         pairs.sort_unstable_by_key(|(name, _)| *name);
         pairs
     }
+
+    /// Return references to all tool specs whose description contains
+    /// `keyword` (case-insensitive).
+    pub fn find_by_description_keyword(&self, keyword: &str) -> Vec<&ToolSpec> {
+        let lower = keyword.to_ascii_lowercase();
+        self.tools
+            .values()
+            .filter(|s| s.description.to_ascii_lowercase().contains(&lower))
+            .collect()
+    }
 }
 
 // ── ReActLoop ─────────────────────────────────────────────────────────────────
@@ -3348,5 +3358,91 @@ mod tests {
         let tool = ToolSpec::new("t", "original", |_| serde_json::json!({}))
             .with_description("updated description");
         assert_eq!(tool.description, "updated description");
+    }
+
+    // ── Round 25: stop_sequence_count / find_by_description_keyword ───────────
+
+    #[test]
+    fn test_agent_config_stop_sequence_count_zero_by_default() {
+        let cfg = AgentConfig::new(5, "gpt-4");
+        assert_eq!(cfg.stop_sequence_count(), 0);
+    }
+
+    #[test]
+    fn test_agent_config_stop_sequence_count_reflects_configured_count() {
+        let cfg = AgentConfig::new(5, "gpt-4")
+            .with_stop_sequences(vec!["STOP".to_string(), "END".to_string()]);
+        assert_eq!(cfg.stop_sequence_count(), 2);
+    }
+
+    #[test]
+    fn test_tool_registry_find_by_description_keyword_empty_when_no_match() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("calc", "Performs arithmetic", |_| serde_json::json!({})));
+        let results = reg.find_by_description_keyword("weather");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_tool_registry_find_by_description_keyword_case_insensitive() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("calc", "Performs ARITHMETIC operations", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("search", "Searches the web", |_| serde_json::json!({})));
+        let results = reg.find_by_description_keyword("arithmetic");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "calc");
+    }
+
+    #[test]
+    fn test_tool_registry_find_by_description_keyword_multiple_matches() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "query the database", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("t2", "query the cache", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("t3", "send a message", |_| serde_json::json!({})));
+        let results = reg.find_by_description_keyword("query");
+        assert_eq!(results.len(), 2);
+    }
+
+    // ── Round 31: ConversationMessage::is_user/is_assistant,
+    //             AgentConfig::stop_sequence_count/has_request_timeout ─────────
+
+    #[test]
+    fn test_conversation_message_is_user_true_for_user_role() {
+        let msg = ConversationMessage::user("hello");
+        assert!(msg.is_user());
+        assert!(!msg.is_assistant());
+    }
+
+    #[test]
+    fn test_conversation_message_is_assistant_true_for_assistant_role() {
+        let msg = ConversationMessage::assistant("hi there");
+        assert!(msg.is_assistant());
+        assert!(!msg.is_user());
+    }
+
+    #[test]
+    fn test_agent_config_stop_sequence_count_zero_by_default() {
+        let cfg = AgentConfig::new(5, "model");
+        assert_eq!(cfg.stop_sequence_count(), 0);
+    }
+
+    #[test]
+    fn test_agent_config_stop_sequence_count_after_setting() {
+        let cfg = AgentConfig::new(5, "model")
+            .with_stop_sequences(vec!["<stop>".to_string(), "END".to_string()]);
+        assert_eq!(cfg.stop_sequence_count(), 2);
+    }
+
+    #[test]
+    fn test_agent_config_has_request_timeout_false_by_default() {
+        let cfg = AgentConfig::new(5, "model");
+        assert!(!cfg.has_request_timeout());
+    }
+
+    #[test]
+    fn test_agent_config_has_request_timeout_true_after_setting() {
+        let cfg = AgentConfig::new(5, "model")
+            .with_request_timeout(std::time::Duration::from_secs(30));
+        assert!(cfg.has_request_timeout());
     }
 }

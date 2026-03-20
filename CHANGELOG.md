@@ -11,6 +11,37 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.42.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::last_n_observations`** (`runtime.rs`) — last `n` non-empty
+  observation strings (oldest to newest); skips empty observations.
+- **`AgentSession::actions_in_window`** (`runtime.rs`) — action names from the
+  last `n` steps; returns all steps when fewer than `n` exist.
+- **`AgentConfig::stop_sequence_count`** (`agent.rs`) — number of configured
+  stop sequences.
+- **`GraphStore::avg_out_degree`** (`graph.rs`) — mean outbound edges per
+  entity; `0.0` for empty graphs.
+- **`GraphStore::avg_in_degree`** (`graph.rs`) — mean inbound edges per entity;
+  `0.0` for empty graphs.
+- **`RetryPolicy::will_retry_at_all`** (`orchestrator.rs`) — `true` when
+  `max_attempts > 1`; complement of `is_no_retry`.
+- **`Deduplicator::total_count`** (`orchestrator.rs`) — total items tracked
+  (in-flight + cached), regardless of TTL expiry.
+- **`BackpressureGuard::acquired_count`** (`orchestrator.rs`) — number of
+  currently held slots (`capacity - available_capacity()`).
+- **`Pipeline::swap_stages`** (`orchestrator.rs`) — swap positions of two named
+  stages by name; returns `false` if either is not found.
+- **`ToolRegistry::find_by_description_keyword`** (`agent.rs`) — return all
+  tool specs whose description contains a keyword (case-insensitive).
+
+### Tests
+
+- 33 new unit tests covering all ten methods listed above.
+
+---
+
 ## [1.41.0] - 2026-03-20
 
 ### Added
