@@ -315,6 +315,12 @@ impl GraphStore {
             .ok_or_else(|| AgentRuntimeError::Graph(format!("entity '{}' not found", id.0)))
     }
 
+    /// Return `true` if an entity with the given `id` exists in the graph.
+    pub fn has_entity(&self, id: &EntityId) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::has_entity");
+        Ok(inner.entities.contains_key(id))
+    }
+
     /// Add a directed relationship between two existing entities.
     ///
     /// Both source and target entities must already exist in the graph.

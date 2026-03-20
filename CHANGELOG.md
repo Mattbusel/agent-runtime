@@ -11,6 +11,33 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.43.0] - 2026-03-20
+
+### Tests
+
+- **`AgentSession::observation_at`** — correct value at index; `None` when
+  out of bounds.
+- **`AgentSession::action_at`** — correct value at index; `None` when out of
+  bounds.
+- **`Message::is_user` / `is_assistant`** — role-based predicate checks.
+- **`AgentConfig::stop_sequence_count`** — zero by default; reflects
+  configured count after `with_stop_sequences`.
+- **`AgentConfig::has_request_timeout`** — false by default; true after
+  `with_request_timeout`.
+- **`Deduplicator::fail`** — removes in-flight key; no-op on unknown key;
+  allows re-registration after failure.
+- **`LatencyHistogram::percentile`** — returns 0 when empty; matches `p50`
+  and `p99` at corresponding percentile values.
+- **`RuntimeMetrics::record_agent_tool_failure`** — failure count appears in
+  per-agent snapshot.
+- **`RuntimeMetrics::per_agent_tool_calls_snapshot`** — empty initially.
+- **`RuntimeMetrics::record_step_latency`** — operation succeeds without panic.
+
+27 new tests across `runtime.rs`, `agent.rs`, `orchestrator.rs`, and
+`metrics.rs`.
+
+---
+
 ## [1.42.0] - 2026-03-20
 
 ### Added

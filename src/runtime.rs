@@ -514,6 +514,32 @@ impl AgentSession {
         with_obs as f64 / n as f64
     }
 
+    /// Return `true` if at least one knowledge-graph lookup was performed during
+    /// this session.
+    pub fn has_graph_lookups(&self) -> bool {
+        self.graph_lookups > 0
+    }
+
+    /// Return how many times the last action in the session repeats consecutively
+    /// at the end of the step list.
+    ///
+    /// Returns `0` for empty sessions or single-step sessions where no repeat
+    /// is possible.  Useful for detecting a stuck agent that keeps retrying the
+    /// same action.
+    pub fn consecutive_same_action_at_end(&self) -> usize {
+        let n = self.steps.len();
+        if n == 0 {
+            return 0;
+        }
+        let last_action = &self.steps[n - 1].action;
+        self.steps
+            .iter()
+            .rev()
+            .take_while(|s| &s.action == last_action)
+            .count()
+            .saturating_sub(1) // don't count the step itself; only the *repeats*
+    }
+
     /// Return the fraction of steps (from the second onward) that repeat the
     /// immediately preceding action.
     ///

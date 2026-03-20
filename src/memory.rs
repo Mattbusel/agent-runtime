@@ -1559,6 +1559,15 @@ impl EpisodicStore {
         Ok(inner.items.get(agent_id).map_or(0, |v| v.len()))
     }
 
+    /// Return `true` if `agent_id` has at least one stored episode.
+    pub fn has_episodes(&self, agent_id: &AgentId) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::has_episodes");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or(false, |v| !v.is_empty()))
+    }
+
     /// Return the most recently inserted episode for `agent_id`, or `None` if
     /// the agent has no stored episodes.
     ///
@@ -2048,6 +2057,17 @@ impl SemanticStore {
     pub fn has_key(&self, key: &str) -> Result<bool, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::has_key");
         Ok(inner.entries.iter().any(|e| e.key == key))
+    }
+
+    /// Return the value string of the first entry whose key matches `key`,
+    /// or `None` if no such entry exists.
+    pub fn value_for(&self, key: &str) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::value_for");
+        Ok(inner
+            .entries
+            .iter()
+            .find(|e| e.key == key)
+            .map(|e| e.value.clone()))
     }
 
     /// Return the number of entries that have no tags.
@@ -2712,6 +2732,12 @@ impl WorkingMemory {
         }
         let total: usize = inner.map.values().map(|v| v.len()).sum();
         Ok(total as f64 / n as f64)
+    }
+
+    /// Return the number of entries whose value exceeds `min_bytes` bytes in length.
+    pub fn count_above_value_length(&self, min_bytes: usize) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::count_above_value_length");
+        Ok(inner.map.values().filter(|v| v.len() > min_bytes).count())
     }
 
     /// Return the key with the most bytes, or `None` if the store is empty.
