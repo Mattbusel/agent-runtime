@@ -259,6 +259,26 @@ impl AgentSession {
             .collect()
     }
 
+    /// Return a count of how many times each action was taken in this session.
+    ///
+    /// The map key is the action name (e.g. `"search"`, `"FINAL_ANSWER"`).
+    pub fn action_counts(&self) -> std::collections::HashMap<String, usize> {
+        let mut counts = std::collections::HashMap::new();
+        for step in &self.steps {
+            *counts.entry(step.action.clone()).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    /// Return a sorted list of unique action names used in this session.
+    pub fn unique_actions(&self) -> Vec<String> {
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for step in &self.steps {
+            seen.insert(step.action.clone());
+        }
+        seen.into_iter().collect()
+    }
+
     /// Return `true` if any checkpoint errors were recorded during the session.
     ///
     /// A non-empty `checkpoint_errors` list means some step snapshots may be
@@ -2019,5 +2039,41 @@ mod tests {
             checkpoint_errors: vec![],
         };
         assert_eq!(session.graph_lookup_count(), 7usize);
+    }
+
+    // ── Round 7: action_counts / unique_actions ───────────────────────────────
+
+    #[test]
+    fn test_action_counts_counts_each_action() {
+        let session = make_session(
+            vec![
+                ReActStep::new("t1", "search", "r1"),
+                ReActStep::new("t2", "search", "r2"),
+                ReActStep::new("t3", "FINAL_ANSWER", "done"),
+            ],
+            0,
+        );
+        let counts = session.action_counts();
+        assert_eq!(counts.get("search").copied().unwrap_or(0), 2);
+        assert_eq!(counts.get("FINAL_ANSWER").copied().unwrap_or(0), 1);
+    }
+
+    #[test]
+    fn test_unique_actions_returns_sorted_deduped() {
+        let session = make_session(
+            vec![
+                ReActStep::new("t", "b_action", "r"),
+                ReActStep::new("t", "a_action", "r"),
+                ReActStep::new("t", "b_action", "r"),
+            ],
+            0,
+        );
+        assert_eq!(session.unique_actions(), vec!["a_action", "b_action"]);
+    }
+
+    #[test]
+    fn test_unique_actions_empty_when_no_steps() {
+        let session = make_session(vec![], 0);
+        assert!(session.unique_actions().is_empty());
     }
 }

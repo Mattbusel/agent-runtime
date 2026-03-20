@@ -11,6 +11,33 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.16.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::action_counts`** (`runtime.rs`) — `HashMap<action, count>`
+  of how many times each action was taken in a session.
+- **`AgentSession::unique_actions`** (`runtime.rs`) — sorted, deduplicated list
+  of action names used in a session.
+- **`EpisodicStore::agent_ids`** (`memory.rs`) — return all `AgentId`s that have
+  at least one stored episode.
+- **`EpisodicStore::find_by_content`** (`memory.rs`) — find episodes whose
+  content contains a given substring, sorted by descending importance.
+- **`GraphStore::top_n_by_out_degree`** (`graph.rs`) — return the top-N entities
+  sorted by outgoing-edge count; useful for finding hub nodes.
+- **`GraphStore::remove_entity_and_edges`** (`graph.rs`) — remove an entity and
+  all incident edges in a single lock acquisition.
+- **`ToolRegistry::tool_specs`** (`agent.rs`) — return references to all
+  registered `ToolSpec`s for inspection or serialization.
+- **`RetryPolicy::delay_ms_for`** (`orchestrator.rs`) — return the delay for a
+  given attempt as a `u64` millisecond value; easier for logging than `Duration`.
+- **`BackpressureGuard::soft_limit`** (`orchestrator.rs`) — read accessor for
+  the configured soft capacity, or `None` if no soft limit was set.
+- **`Pipeline::has_stage`** (`orchestrator.rs`) — return `true` if a stage with
+  the given name is registered.
+
+---
+
 ## [1.15.0] - 2026-03-20
 
 ### Added

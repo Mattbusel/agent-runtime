@@ -178,6 +178,16 @@ impl RetryPolicy {
         Ok(self)
     }
 
+    /// Return the delay for `attempt` in whole milliseconds.
+    ///
+    /// Convenience wrapper around [`delay_for`] for use in logging and metrics
+    /// where a `u64` is easier to handle than a `Duration`.
+    ///
+    /// [`delay_for`]: RetryPolicy::delay_for
+    pub fn delay_ms_for(&self, attempt: u32) -> u64 {
+        self.delay_for(attempt).as_millis() as u64
+    }
+
     /// Return the total maximum delay in milliseconds across all retry attempts.
     ///
     /// Sums `delay_for(attempt)` for every attempt from 1 to `max_attempts`.
@@ -957,6 +967,15 @@ impl Deduplicator {
         self.ttl
     }
 
+    /// Return the configured maximum number of cached entries, if any.
+    ///
+    /// Returns `None` if no cap was set via [`with_max_entries`].
+    ///
+    /// [`with_max_entries`]: Deduplicator::with_max_entries
+    pub fn max_entries(&self) -> Option<usize> {
+        self.max_entries
+    }
+
     /// Remove all in-flight entries and cached results.
     ///
     /// Useful for test teardown or hard resets.
@@ -1096,6 +1115,11 @@ impl BackpressureGuard {
     /// Return the hard capacity (maximum concurrent slots) configured for this guard.
     pub fn hard_capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Return the soft capacity limit if one was configured, or `None`.
+    pub fn soft_limit(&self) -> Option<usize> {
+        self.soft_capacity
     }
 
     /// Return the current depth.
@@ -1245,6 +1269,11 @@ impl Pipeline {
     /// Return the number of stages in the pipeline.
     pub fn stage_count(&self) -> usize {
         self.stages.len()
+    }
+
+    /// Return `true` if a stage with the given name is registered.
+    pub fn has_stage(&self, name: &str) -> bool {
+        self.stages.iter().any(|s| s.name == name)
     }
 
     /// Return the names of all stages in execution order.
@@ -2244,5 +2273,40 @@ mod tests {
         g.try_acquire().unwrap();
         let ratio = g.soft_depth_ratio();
         assert!((ratio - 0.5).abs() < 1e-6);
+    }
+
+    // ── Round 7: delay_ms_for / soft_limit / has_stage ───────────────────────
+
+    #[test]
+    fn test_retry_delay_ms_for_matches_delay_for() {
+        let p = RetryPolicy::exponential(5, 100).unwrap();
+        assert_eq!(p.delay_ms_for(1), p.delay_for(1).as_millis() as u64);
+        assert_eq!(p.delay_ms_for(3), p.delay_for(3).as_millis() as u64);
+    }
+
+    #[test]
+    fn test_backpressure_soft_limit_returns_configured_value() {
+        let g = BackpressureGuard::new(10).unwrap()
+            .with_soft_limit(5).unwrap();
+        assert_eq!(g.soft_limit(), Some(5));
+    }
+
+    #[test]
+    fn test_backpressure_soft_limit_none_when_not_set() {
+        let g = BackpressureGuard::new(10).unwrap();
+        assert_eq!(g.soft_limit(), None);
+    }
+
+    #[test]
+    fn test_pipeline_has_stage_returns_true_when_present() {
+        let p = Pipeline::new().add_stage("step1", |s| Ok(s));
+        assert!(p.has_stage("step1"));
+        assert!(!p.has_stage("step2"));
+    }
+
+    #[test]
+    fn test_pipeline_has_stage_false_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(!p.has_stage("anything"));
     }
 }

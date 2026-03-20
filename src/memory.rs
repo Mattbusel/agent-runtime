@@ -732,6 +732,39 @@ impl EpisodicStore {
         Ok(inner.items.get(agent_id).map_or(0, |v| v.len()))
     }
 
+    /// Return all `AgentId`s that have at least one stored episode.
+    pub fn agent_ids(&self) -> Result<Vec<AgentId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::agent_ids");
+        Ok(inner.items.keys().cloned().collect())
+    }
+
+    /// Return all episodes for `agent_id` whose `content` contains `pattern`
+    /// (case-sensitive substring match), sorted by descending importance.
+    pub fn find_by_content(
+        &self,
+        agent_id: &AgentId,
+        pattern: &str,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::find_by_content");
+        let mut matches: Vec<MemoryItem> = inner
+            .items
+            .get(agent_id)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|i| i.content.contains(pattern))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        matches.sort_unstable_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(matches)
+    }
+
     /// Remove all episodes stored for `agent_id`.
     ///
     /// Returns the number of episodes that were removed.
@@ -1667,6 +1700,20 @@ impl SemanticStore {
     /// [`list_keys`]: SemanticStore::list_keys
     pub fn keys(&self) -> Result<Vec<String>, AgentRuntimeError> {
         self.list_keys()
+    }
+
+    /// Return all keys that contain `pattern` as a substring (case-insensitive).
+    ///
+    /// Useful for prefix/contains searches without loading values.
+    pub fn keys_matching(&self, pattern: &str) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::keys_matching");
+        let lower = pattern.to_ascii_lowercase();
+        Ok(inner
+            .entries
+            .iter()
+            .filter(|e| e.key.to_ascii_lowercase().contains(&lower))
+            .map(|e| e.key.clone())
+            .collect())
     }
 
     /// Update the stored value of the first entry whose key matches `key`.
@@ -3917,5 +3964,47 @@ mod tests {
     fn test_semantic_update_value_returns_false_when_missing() {
         let store = SemanticStore::new();
         assert!(!store.update_value("nope", "x").unwrap());
+    }
+
+    // ── Round 7: EpisodicStore::agent_ids / find_by_content ──────────────────
+
+    #[test]
+    fn test_episodic_agent_ids_returns_all_agents() {
+        let store = EpisodicStore::new();
+        let a1 = AgentId::new("agent-1");
+        let a2 = AgentId::new("agent-2");
+        store.add_episode(a1.clone(), "e", 0.5).unwrap();
+        store.add_episode(a2.clone(), "e", 0.5).unwrap();
+        let mut ids = store.agent_ids().unwrap();
+        ids.sort_by_key(|id| id.0.clone());
+        assert_eq!(ids, vec![a1, a2]);
+    }
+
+    #[test]
+    fn test_episodic_agent_ids_empty_for_new_store() {
+        let store = EpisodicStore::new();
+        assert!(store.agent_ids().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_find_by_content_returns_matching_episodes() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "hello world", 0.5).unwrap();
+        store.add_episode(agent.clone(), "goodbye world", 0.8).unwrap();
+        store.add_episode(agent.clone(), "something else", 0.9).unwrap();
+        let results = store.find_by_content(&agent, "world").unwrap();
+        assert_eq!(results.len(), 2);
+        // sorted by descending importance
+        assert_eq!(results[0].content, "goodbye world");
+    }
+
+    #[test]
+    fn test_find_by_content_returns_empty_when_no_match() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "hello", 0.5).unwrap();
+        let results = store.find_by_content(&agent, "xyz").unwrap();
+        assert!(results.is_empty());
     }
 }

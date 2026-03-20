@@ -908,6 +908,11 @@ impl ToolRegistry {
         self.tools.keys().cloned().collect()
     }
 
+    /// Return references to all registered `ToolSpec`s.
+    pub fn tool_specs(&self) -> Vec<&ToolSpec> {
+        self.tools.values().collect()
+    }
+
     /// Return the number of registered tools.
     pub fn tool_count(&self) -> usize {
         self.tools.len()
@@ -2710,5 +2715,22 @@ mod tests {
     fn test_tool_registry_tool_names_owned_empty_when_no_tools() {
         let reg = ToolRegistry::new();
         assert!(reg.tool_names_owned().is_empty());
+    }
+
+    // ── Round 7: ToolRegistry::tool_specs ────────────────────────────────────
+
+    #[test]
+    fn test_tool_registry_tool_specs_returns_all_specs() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "desc1", |_| serde_json::json!("ok")));
+        reg.register(ToolSpec::new("t2", "desc2", |_| serde_json::json!("ok")));
+        let specs = reg.tool_specs();
+        assert_eq!(specs.len(), 2);
+    }
+
+    #[test]
+    fn test_tool_registry_tool_specs_empty_when_no_tools() {
+        let reg = ToolRegistry::new();
+        assert!(reg.tool_specs().is_empty());
     }
 }

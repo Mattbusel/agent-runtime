@@ -1748,6 +1748,57 @@ impl GraphStore {
             .reduce(f32::min))
     }
 
+    /// Return the top-N entities by out-degree (most outgoing edges first).
+    ///
+    /// If `n == 0` or the graph is empty, returns an empty Vec.  Ties are
+    /// broken by arbitrary hash-map iteration order.
+    pub fn top_n_by_out_degree(&self, n: usize) -> Result<Vec<Entity>, AgentRuntimeError> {
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let inner = recover_lock(self.inner.lock(), "top_n_by_out_degree");
+        let mut pairs: Vec<(&EntityId, usize)> = inner
+            .adjacency
+            .iter()
+            .map(|(id, rels)| (id, rels.len()))
+            .collect();
+        pairs.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        Ok(pairs
+            .into_iter()
+            .take(n)
+            .filter_map(|(id, _)| inner.entities.get(id).cloned())
+            .collect())
+    }
+
+    /// Remove `id` and all relationships where it is the source or target.
+    ///
+    /// Equivalent to calling `remove_entity` and `remove_all_relationships_for`
+    /// in a single lock acquisition, avoiding two separate look-ups.
+    ///
+    /// Returns `Ok(())` if the entity was found and removed.  Returns
+    /// `Err(AgentRuntimeError::Graph)` if no entity with that ID exists.
+    pub fn remove_entity_and_edges(&self, id: &EntityId) -> Result<(), AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "remove_entity_and_edges");
+        if !inner.entities.contains_key(id) {
+            return Err(AgentRuntimeError::Graph(format!(
+                "entity '{}' not found",
+                id.0
+            )));
+        }
+        inner.entities.remove(id);
+        inner.relationships.retain(|r| &r.from != id && &r.to != id);
+        inner.adjacency.remove(id);
+        for adj in inner.adjacency.values_mut() {
+            adj.retain(|r| &r.to != id);
+        }
+        inner.reverse_adjacency.remove(id);
+        for rev in inner.reverse_adjacency.values_mut() {
+            rev.retain(|src| src != id);
+        }
+        inner.cycle_cache = None;
+        Ok(())
+    }
+
     /// Return the entity with the highest out-degree (most outgoing edges),
     /// or `None` if the graph is empty.
     ///
@@ -1782,6 +1833,45 @@ impl GraphStore {
                     .map_or(true, |rels| rels.is_empty())
             })
             .cloned()
+            .collect())
+    }
+
+    /// Return the top `n` entities sorted by out-degree (descending).
+    ///
+    /// Uses the adjacency index for O(V log V) computation.  Useful for finding
+    /// hub nodes — entities with the most outgoing connections.
+    /// Returns fewer than `n` entities if the graph has fewer nodes.
+    pub fn top_nodes_by_out_degree(&self, n: usize) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "top_nodes_by_out_degree");
+        let mut pairs: Vec<(&EntityId, usize)> = inner
+            .entities
+            .keys()
+            .map(|id| (id, inner.adjacency.get(id).map_or(0, |v| v.len())))
+            .collect();
+        pairs.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        pairs.truncate(n);
+        Ok(pairs
+            .into_iter()
+            .filter_map(|(id, _)| inner.entities.get(id).cloned())
+            .collect())
+    }
+
+    /// Return the top `n` entities sorted by in-degree (descending).
+    ///
+    /// Uses the reverse adjacency index for O(V log V) computation.  Useful for
+    /// finding sink hubs — entities with the most incoming connections.
+    pub fn top_nodes_by_in_degree(&self, n: usize) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "top_nodes_by_in_degree");
+        let mut pairs: Vec<(&EntityId, usize)> = inner
+            .entities
+            .keys()
+            .map(|id| (id, inner.reverse_adjacency.get(id).map_or(0, |v| v.len())))
+            .collect();
+        pairs.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        pairs.truncate(n);
+        Ok(pairs
+            .into_iter()
+            .filter_map(|(id, _)| inner.entities.get(id).cloned())
             .collect())
     }
 }
@@ -3072,5 +3162,42 @@ mod tests {
         let g = make_graph();
         add(&g, "a"); add(&g, "b");
         assert_eq!(g.leaf_nodes().unwrap().len(), 2);
+    }
+
+    // ── Round 7: top_n_by_out_degree / remove_entity_and_edges ───────────────
+
+    #[test]
+    fn test_top_n_by_out_degree_returns_descending() {
+        let g = make_graph();
+        add(&g, "hub"); add(&g, "mid"); add(&g, "tip"); add(&g, "leaf");
+        link(&g, "hub", "mid"); link(&g, "hub", "tip"); link(&g, "hub", "leaf");
+        link(&g, "mid", "leaf");
+        let top2 = g.top_n_by_out_degree(2).unwrap();
+        assert_eq!(top2.len(), 2);
+        assert_eq!(top2[0].id, EntityId::new("hub"));
+    }
+
+    #[test]
+    fn test_top_n_by_out_degree_zero_returns_empty() {
+        let g = make_graph();
+        add(&g, "x");
+        assert!(g.top_n_by_out_degree(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_remove_entity_and_edges_removes_node_and_incident_edges() {
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        link(&g, "a", "b"); link(&g, "b", "c");
+        g.remove_entity_and_edges(&EntityId::new("b")).unwrap();
+        assert_eq!(g.entity_count().unwrap(), 2);
+        assert_eq!(g.relationship_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_remove_entity_and_edges_errors_for_unknown_id() {
+        let g = make_graph();
+        let result = g.remove_entity_and_edges(&EntityId::new("ghost"));
+        assert!(result.is_err());
     }
 }
