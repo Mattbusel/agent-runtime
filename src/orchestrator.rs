@@ -2132,4 +2132,25 @@ mod tests {
         let p = Pipeline::new();
         assert!(p.stage_names_owned().is_empty());
     }
+
+    // ── Round 17: attempts_remaining ─────────────────────────────────────────
+
+    #[test]
+    fn test_attempts_remaining_full_at_zero() {
+        let p = RetryPolicy::exponential(4, 100).unwrap();
+        assert_eq!(p.attempts_remaining(0), 4);
+    }
+
+    #[test]
+    fn test_attempts_remaining_decrements_correctly() {
+        let p = RetryPolicy::exponential(4, 100).unwrap();
+        assert_eq!(p.attempts_remaining(2), 2);
+        assert_eq!(p.attempts_remaining(4), 0);
+    }
+
+    #[test]
+    fn test_attempts_remaining_zero_when_exhausted() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert_eq!(p.attempts_remaining(10), 0);
+    }
 }

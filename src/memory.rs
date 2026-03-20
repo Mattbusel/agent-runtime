@@ -1199,6 +1199,17 @@ impl EpisodicStore {
         Ok(item)
     }
 
+    /// Return the most recently inserted episode for `agent_id`, or `None`
+    /// if the agent has no stored episodes.
+    pub fn newest(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::newest");
+        let item = inner.items.get(agent_id).and_then(|v| v.last()).cloned();
+        Ok(item)
+    }
+
     /// Return the total number of stored episodes across all agents.
     pub fn len(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "EpisodicStore::len");
@@ -3525,5 +3536,151 @@ mod tests {
     fn test_working_memory_get_or_default_returns_default_when_absent() {
         let wm = WorkingMemory::new(10).unwrap();
         assert_eq!(wm.get_or_default("missing", "fallback").unwrap(), "fallback");
+    }
+
+    // ── Round 5: EpisodicStore new helpers ───────────────────────────────────
+
+    #[test]
+    fn test_episodic_count_for_returns_correct_count() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "e1", 0.5).unwrap();
+        store.add_episode(agent.clone(), "e2", 0.5).unwrap();
+        assert_eq!(store.count_for(&agent).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_episodic_count_for_returns_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("unknown");
+        assert_eq!(store.count_for(&agent).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_recall_by_tag_returns_matching_sorted_by_importance() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store
+            .add_episode_with_tags(agent.clone(), "low", 0.1, vec!["news".to_string()])
+            .unwrap();
+        store
+            .add_episode_with_tags(agent.clone(), "high", 0.9, vec!["news".to_string()])
+            .unwrap();
+        store
+            .add_episode_with_tags(agent.clone(), "other", 0.8, vec!["other".to_string()])
+            .unwrap();
+        let items = store.recall_by_tag(&agent, "news", 0).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].content, "high");
+    }
+
+    #[test]
+    fn test_recall_by_tag_respects_limit() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        for i in 0..5 {
+            store
+                .add_episode_with_tags(agent.clone(), format!("ep{i}"), 0.5, vec!["t".to_string()])
+                .unwrap();
+        }
+        let items = store.recall_by_tag(&agent, "t", 2).unwrap();
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_from_copies_episodes() {
+        let src = EpisodicStore::new();
+        let dst = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        src.add_episode(agent.clone(), "ep1", 0.5).unwrap();
+        src.add_episode(agent.clone(), "ep2", 0.9).unwrap();
+        let count = dst.merge_from(&src, &agent).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(dst.count_for(&agent).unwrap(), 2);
+    }
+
+    // ── Round 5: WorkingMemory get_all_keys / replace_all ────────────────────
+
+    #[test]
+    fn test_working_memory_get_all_keys_preserves_insertion_order() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("first", "1").unwrap();
+        wm.set("second", "2").unwrap();
+        wm.set("third", "3").unwrap();
+        assert_eq!(wm.get_all_keys().unwrap(), vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn test_working_memory_replace_all_replaces_contents() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("old", "x").unwrap();
+        let mut new_map = std::collections::HashMap::new();
+        new_map.insert("a".to_string(), "1".to_string());
+        new_map.insert("b".to_string(), "2".to_string());
+        wm.replace_all(new_map).unwrap();
+        assert_eq!(wm.len().unwrap(), 2);
+        assert!(wm.get("old").unwrap().is_none());
+        assert_eq!(wm.get("a").unwrap().unwrap(), "1");
+    }
+
+    // ── Round 5: SemanticStore::remove / count ───────────────────────────────
+
+    #[test]
+    fn test_semantic_store_remove_returns_true_and_removes() {
+        let store = SemanticStore::new();
+        store.store("k1", "v1", vec![]).unwrap();
+        store.store("k2", "v2", vec![]).unwrap();
+        assert!(store.remove("k1").unwrap());
+        assert_eq!(store.count().unwrap(), 1);
+        let keys = store.list_keys().unwrap();
+        assert_eq!(keys, vec!["k2"]);
+    }
+
+    #[test]
+    fn test_semantic_store_remove_returns_false_when_missing() {
+        let store = SemanticStore::new();
+        assert!(!store.remove("ghost").unwrap());
+    }
+
+    #[test]
+    fn test_semantic_store_count_matches_len() {
+        let store = SemanticStore::new();
+        store.store("a", "1", vec![]).unwrap();
+        store.store("b", "2", vec![]).unwrap();
+        assert_eq!(store.count().unwrap(), store.len().unwrap());
+    }
+
+    // ── Round 17: newest, values ─────────────────────────────────────────────
+
+    #[test]
+    fn test_episodic_newest_returns_last_inserted() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("agent-newest");
+        store.add_episode(agent.clone(), "first", 0.3).unwrap();
+        store.add_episode(agent.clone(), "last", 0.8).unwrap();
+        let newest = store.newest(&agent).unwrap().unwrap();
+        assert_eq!(newest.content, "last");
+    }
+
+    #[test]
+    fn test_episodic_newest_none_when_empty() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("no-ep");
+        assert!(store.newest(&agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_working_memory_values_returns_values_in_insertion_order() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("a", "apple").unwrap();
+        wm.set("b", "banana").unwrap();
+        let vals = wm.values().unwrap();
+        assert_eq!(vals, vec!["apple", "banana"]);
+    }
+
+    #[test]
+    fn test_working_memory_values_empty_when_no_entries() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(wm.values().unwrap().is_empty());
     }
 }

@@ -1693,6 +1693,20 @@ impl GraphStore {
             .cloned()
             .unwrap_or_default())
     }
+
+    /// Return the graph density: `edges / (nodes * (nodes − 1))` for a directed graph.
+    ///
+    /// Returns `0.0` when the graph has fewer than 2 nodes (no directed edges are
+    /// possible). Values range from `0.0` (sparse) to `1.0` (complete).
+    pub fn density(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "density");
+        let n = inner.entities.len();
+        if n < 2 {
+            return Ok(0.0);
+        }
+        let max_edges = n * (n - 1);
+        Ok(inner.relationships.len() as f64 / max_edges as f64)
+    }
 }
 
 impl Default for GraphStore {
@@ -2794,5 +2808,97 @@ mod tests {
         let g = make_graph();
         add(&g, "a"); add(&g, "b");
         assert!(!g.path_exists("a", "b").unwrap());
+    }
+
+    // ── Round 5: GraphStore::neighbor_ids ─────────────────────────────────────
+
+    #[test]
+    fn test_neighbor_ids_returns_direct_successors() {
+        let g = make_graph();
+        add(&g, "src"); add(&g, "dst1"); add(&g, "dst2");
+        link(&g, "src", "dst1"); link(&g, "src", "dst2");
+        let mut ids = g.neighbor_ids(&EntityId::new("src")).unwrap();
+        ids.sort_by_key(|id| id.0.clone());
+        assert_eq!(ids, vec![EntityId::new("dst1"), EntityId::new("dst2")]);
+    }
+
+    #[test]
+    fn test_neighbor_ids_empty_for_isolated_node() {
+        let g = make_graph();
+        add(&g, "isolated");
+        let ids = g.neighbor_ids(&EntityId::new("isolated")).unwrap();
+        assert!(ids.is_empty());
+    }
+
+    // ── Round 17: density, all_entities, all_relationships, find_entities_by_label, bfs_bounded
+
+    #[test]
+    fn test_density_zero_for_empty_graph() {
+        let g = make_graph();
+        assert_eq!(g.density().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_density_zero_for_single_node() {
+        let g = make_graph();
+        add(&g, "solo");
+        assert_eq!(g.density().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_density_one_for_complete_directed_graph() {
+        // 2 nodes with both directed edges → density = 2 / (2*1) = 1.0
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b");
+        link(&g, "a", "b"); link(&g, "b", "a");
+        assert!((g.density().unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_density_partial() {
+        // 3 nodes, 1 edge → max edges = 6, density = 1/6
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        link(&g, "a", "b");
+        let d = g.density().unwrap();
+        assert!((d - 1.0/6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_all_entities_returns_all_nodes() {
+        let g = make_graph();
+        add(&g, "x"); add(&g, "y"); add(&g, "z");
+        assert_eq!(g.all_entities().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_all_relationships_returns_all_edges() {
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        link(&g, "a", "b"); link(&g, "b", "c");
+        assert_eq!(g.all_relationships().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_find_entities_by_label_returns_matches() {
+        let g = make_graph();
+        g.add_entity(Entity::new("n1", "Person")).unwrap();
+        g.add_entity(Entity::new("n2", "Person")).unwrap();
+        g.add_entity(Entity::new("n3", "Car")).unwrap();
+        let people = g.find_entities_by_label("Person").unwrap();
+        assert_eq!(people.len(), 2);
+    }
+
+    #[test]
+    fn test_bfs_bounded_limits_depth() {
+        // a → b → c → d, bounded at depth 2 should only reach a,b,c
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b"); add(&g, "c"); add(&g, "d");
+        link(&g, "a", "b"); link(&g, "b", "c"); link(&g, "c", "d");
+        let visited = g.bfs_bounded("a", 2, 100).unwrap();
+        assert!(visited.contains(&EntityId::new("a")));
+        assert!(visited.contains(&EntityId::new("b")));
+        assert!(visited.contains(&EntityId::new("c")));
+        assert!(!visited.contains(&EntityId::new("d")));
     }
 }

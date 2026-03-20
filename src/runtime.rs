@@ -1863,4 +1863,124 @@ mod tests {
         };
         assert!(session.failed_steps().is_empty());
     }
+
+    // ── Round 17: untested AgentSession methods ───────────────────────────────
+
+    fn make_session(steps: Vec<ReActStep>, duration_ms: u64) -> AgentSession {
+        AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps,
+            memory_hits: 0,
+            graph_lookups: 0,
+            duration_ms,
+            checkpoint_errors: vec![],
+        }
+    }
+
+    #[test]
+    fn test_step_count_returns_number_of_steps() {
+        let s = make_session(vec![ReActStep::new("t", "a", "o"), ReActStep::new("t", "a", "o")], 0);
+        assert_eq!(s.step_count(), 2);
+    }
+
+    #[test]
+    fn test_is_empty_true_for_no_steps() {
+        let s = make_session(vec![], 0);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn test_is_empty_false_with_steps() {
+        let s = make_session(vec![ReActStep::new("t", "a", "o")], 0);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn test_is_successful_true_with_final_answer() {
+        let s = make_session(vec![ReActStep::new("t", "FINAL_ANSWER yes", "")], 0);
+        assert!(s.is_successful());
+    }
+
+    #[test]
+    fn test_is_successful_false_without_final_answer() {
+        let s = make_session(vec![ReActStep::new("t", "search {}", "result")], 0);
+        assert!(!s.is_successful());
+    }
+
+    #[test]
+    fn test_elapsed_returns_duration_from_duration_ms() {
+        let s = make_session(vec![], 500);
+        assert_eq!(s.elapsed(), std::time::Duration::from_millis(500));
+    }
+
+    #[test]
+    fn test_tool_calls_made_excludes_final_answer() {
+        let s = make_session(vec![
+            ReActStep::new("t", "search {}", "res"),
+            ReActStep::new("t", "lookup {}", "res"),
+            ReActStep::new("t", "FINAL_ANSWER done", ""),
+        ], 0);
+        assert_eq!(s.tool_calls_made(), 2);
+    }
+
+    #[test]
+    fn test_total_step_duration_ms_sums_all_steps() {
+        let mut s1 = ReActStep::new("t", "a", "o"); s1.step_duration_ms = 10;
+        let mut s2 = ReActStep::new("t", "a", "o"); s2.step_duration_ms = 30;
+        let s = make_session(vec![s1, s2], 0);
+        assert_eq!(s.total_step_duration_ms(), 40);
+    }
+
+    #[test]
+    fn test_average_step_duration_ms() {
+        let mut s1 = ReActStep::new("t", "a", "o"); s1.step_duration_ms = 20;
+        let mut s2 = ReActStep::new("t", "a", "o"); s2.step_duration_ms = 40;
+        let s = make_session(vec![s1, s2], 0);
+        assert_eq!(s.average_step_duration_ms(), 30);
+    }
+
+    #[test]
+    fn test_all_thoughts_returns_thoughts_in_order() {
+        let s = make_session(vec![
+            ReActStep::new("first thought", "a1", "o1"),
+            ReActStep::new("second thought", "a2", "o2"),
+        ], 0);
+        assert_eq!(s.all_thoughts(), vec!["first thought", "second thought"]);
+    }
+
+    #[test]
+    fn test_all_observations_returns_observations_in_order() {
+        let s = make_session(vec![
+            ReActStep::new("t1", "a1", "obs one"),
+            ReActStep::new("t2", "a2", "obs two"),
+        ], 0);
+        assert_eq!(s.all_observations(), vec!["obs one", "obs two"]);
+    }
+
+    #[test]
+    fn test_observations_matching_finds_matching_steps() {
+        let s = make_session(vec![
+            ReActStep::new("t1", "a1", "found the answer"),
+            ReActStep::new("t2", "a2", "nothing relevant"),
+        ], 0);
+        let matching = s.observations_matching("answer");
+        assert_eq!(matching.len(), 1);
+        assert!(matching[0].observation.contains("answer"));
+    }
+
+    #[test]
+    fn test_first_step_returns_first() {
+        let s = make_session(vec![
+            ReActStep::new("first", "a1", "o1"),
+            ReActStep::new("second", "a2", "o2"),
+        ], 0);
+        assert_eq!(s.first_step().map(|s| s.thought.as_str()), Some("first"));
+    }
+
+    #[test]
+    fn test_first_step_none_when_empty() {
+        let s = make_session(vec![], 0);
+        assert!(s.first_step().is_none());
+    }
 }
