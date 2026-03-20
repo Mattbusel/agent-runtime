@@ -622,6 +622,15 @@ impl CircuitBreaker {
         failures as f64 / self.threshold as f64
     }
 
+    /// Return `true` when `failure_count()` has reached the configured threshold.
+    ///
+    /// The circuit opens immediately when this returns `true` on the next
+    /// `record_failure` call.
+    pub fn is_at_threshold(&self) -> bool {
+        let failures = self.backend.get_failures(&self.service);
+        failures >= self.threshold
+    }
+
     /// Return the configured recovery window duration.
     ///
     /// After the circuit has been `Open` for this long, it transitions to
@@ -1290,6 +1299,13 @@ impl BackpressureGuard {
         let mut depth = timed_lock(&self.inner, "BackpressureGuard::reset_depth");
         *depth = 0;
         Ok(())
+    }
+
+    /// Return the fraction of capacity that is still available, in `[0.0, 1.0]`.
+    ///
+    /// `1.0` means completely empty; `0.0` means at full capacity.
+    pub fn headroom_ratio(&self) -> Result<f64, AgentRuntimeError> {
+        Ok(self.available_capacity()? as f64 / self.capacity as f64)
     }
 }
 
@@ -2756,5 +2772,35 @@ mod tests {
     fn test_evict_oldest_returns_false_when_empty() {
         let d = Deduplicator::new(std::time::Duration::from_secs(60));
         assert!(!d.evict_oldest().unwrap());
+    }
+
+    // ── Round 17: CircuitBreaker::is_at_threshold / BackpressureGuard::headroom_ratio
+
+    #[test]
+    fn test_circuit_breaker_is_at_threshold_false_initially() {
+        let cb = CircuitBreaker::new("svc", 3, std::time::Duration::from_secs(60)).unwrap();
+        assert!(!cb.is_at_threshold());
+    }
+
+    #[test]
+    fn test_circuit_breaker_is_at_threshold_true_after_threshold_failures() {
+        let cb = CircuitBreaker::new("svc-t", 3, std::time::Duration::from_secs(60)).unwrap();
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_failure();
+        assert!(cb.is_at_threshold());
+    }
+
+    #[test]
+    fn test_backpressure_headroom_ratio_one_when_empty() {
+        let g = BackpressureGuard::new(4).unwrap();
+        assert!((g.headroom_ratio().unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_backpressure_headroom_ratio_decreases_on_acquire() {
+        let g = BackpressureGuard::new(4).unwrap();
+        g.try_acquire().unwrap();
+        assert!((g.headroom_ratio().unwrap() - 0.75).abs() < 1e-9);
     }
 }

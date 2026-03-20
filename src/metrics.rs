@@ -454,6 +454,26 @@ impl MetricsSnapshot {
             self.total_steps as f64 / self.total_sessions as f64
         }
     }
+
+    /// Return the overall tool error rate: `failed_tool_calls / total_tool_calls`.
+    ///
+    /// Returns `0.0` when no tool calls have been recorded.
+    pub fn error_rate(&self) -> f64 {
+        if self.total_tool_calls == 0 {
+            return 0.0;
+        }
+        self.failed_tool_calls as f64 / self.total_tool_calls as f64
+    }
+
+    /// Return memory recalls per completed session.
+    ///
+    /// Returns `0.0` when no sessions have been recorded.
+    pub fn memory_recall_rate(&self) -> f64 {
+        if self.total_sessions == 0 {
+            return 0.0;
+        }
+        self.memory_recall_count as f64 / self.total_sessions as f64
+    }
 }
 
 impl std::fmt::Display for MetricsSnapshot {
@@ -1714,5 +1734,39 @@ mod tests {
         let mode = h.mode_bucket_ms().unwrap();
         // The low-latency bucket should win
         assert!(mode <= 50, "expected low-latency bucket, got {mode}");
+    }
+
+    // ── Round 17: MetricsSnapshot::error_rate / memory_recall_rate ───────────
+
+    #[test]
+    fn test_metrics_snapshot_error_rate_zero_when_no_tool_calls() {
+        let snap = MetricsSnapshot::default();
+        assert!((snap.error_rate() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_error_rate_correct_ratio() {
+        let snap = MetricsSnapshot {
+            total_tool_calls: 10,
+            failed_tool_calls: 3,
+            ..Default::default()
+        };
+        assert!((snap.error_rate() - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_memory_recall_rate_zero_when_no_sessions() {
+        let snap = MetricsSnapshot::default();
+        assert!((snap.memory_recall_rate() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_memory_recall_rate_correct_ratio() {
+        let snap = MetricsSnapshot {
+            total_sessions: 5,
+            memory_recall_count: 15,
+            ..Default::default()
+        };
+        assert!((snap.memory_recall_rate() - 3.0).abs() < 1e-9);
     }
 }

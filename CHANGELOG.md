@@ -11,6 +11,33 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.36.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::throughput_steps_per_sec`** (`runtime.rs`) — ReAct steps per
+  second; `0.0` when `duration_ms` is zero.
+- **`AgentConfig::temperature`** (`agent.rs`) — getter for the optional sampling
+  temperature field.
+- **`AgentConfig::max_tokens`** (`agent.rs`) — getter for the optional
+  max-output-tokens field.
+- **`AgentConfig::request_timeout`** (`agent.rs`) — getter for the optional
+  per-inference request timeout.
+- **`MetricsSnapshot::error_rate`** (`metrics.rs`) — `failed_tool_calls /
+  total_tool_calls`; `0.0` when no calls recorded.
+- **`MetricsSnapshot::memory_recall_rate`** (`metrics.rs`) — memory recalls per
+  completed session; `0.0` when no sessions recorded.
+- **`CircuitBreaker::is_at_threshold`** (`orchestrator.rs`) — `true` when the
+  current failure count has reached the configured threshold.
+- **`BackpressureGuard::headroom_ratio`** (`orchestrator.rs`) — fraction of
+  capacity still available; `1.0` when empty, `0.0` when full.
+- **`GraphStore::sum_edge_weights`** (`graph.rs`) — sum of all relationship
+  weights; `0.0` for graphs with no relationships.
+- **`EpisodicStore::sum_recall_counts`** (`memory.rs`) — total `recall_count`
+  across all episodes for an agent; `0` when the agent has no episodes.
+
+---
+
 ## [1.35.0] - 2026-03-20
 
 ### Added
@@ -42,6 +69,21 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **`AgentSession::throughput_steps_per_sec()`** (`runtime.rs`) — steps per
   second computed as `step_count / (duration_ms / 1000.0)`; `0.0` for zero
   duration sessions.
+- **`AgentConfig::temperature()`** / **`max_tokens()`** / **`request_timeout()`**
+  (`agent.rs`) — direct getters for the optional config fields that previously
+  required field access.
+- **`GraphStore::sum_edge_weights()`** (`graph.rs`) — sum of all relationship
+  weights as `f64` for cost/flow computations.
+- **`EpisodicStore::sum_recall_counts(agent_id)`** (`memory.rs`) — sum of
+  `recall_count` across all episodes for an agent.
+- **`MetricsSnapshot::error_rate()`** (`metrics.rs`) — `failed_tool_calls /
+  total_tool_calls`; `0.0` when no calls recorded.
+- **`MetricsSnapshot::memory_recall_rate()`** (`metrics.rs`) — `memory_recall_count
+  / total_steps`; `0.0` when no steps recorded.
+- **`BackpressureGuard::is_at_threshold()`** (`orchestrator.rs`) — `true` when
+  depth is at or above the soft limit.
+- **`BackpressureGuard::headroom_ratio()`** (`orchestrator.rs`) — remaining
+  capacity as a fraction of total capacity in `[0.0, 1.0]`.
 
 ---
 

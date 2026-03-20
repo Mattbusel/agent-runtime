@@ -913,6 +913,19 @@ impl GraphStore {
             .unwrap_or(0))
     }
 
+    /// Return the sum of all relationship weights in the graph.
+    ///
+    /// Returns `0.0` for graphs with no relationships.
+    pub fn sum_edge_weights(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "sum_edge_weights");
+        Ok(inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter())
+            .map(|r| r.weight as f64)
+            .sum())
+    }
+
     /// Return all entity IDs in the graph without allocating full `Entity` objects.
     ///
     /// Cheaper than [`all_entities`] when only IDs are needed.
@@ -4162,5 +4175,25 @@ mod tests {
     fn test_max_in_degree_zero_for_empty_graph() {
         let g = GraphStore::new();
         assert_eq!(g.max_in_degree().unwrap(), 0);
+    }
+
+    // ── Round 17: sum_edge_weights ────────────────────────────────────────────
+
+    #[test]
+    fn test_sum_edge_weights_correct_sum() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "e", 1.5)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "e", 2.5)).unwrap();
+        let total = g.sum_edge_weights().unwrap();
+        assert!((total - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_sum_edge_weights_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!((g.sum_edge_weights().unwrap() - 0.0).abs() < 1e-9);
     }
 }

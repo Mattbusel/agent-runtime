@@ -1559,6 +1559,18 @@ impl EpisodicStore {
         Ok(inner.items.get(agent_id).map_or(0, |v| v.len()))
     }
 
+    /// Return the total `recall_count` across all episodes for `agent_id`.
+    ///
+    /// Returns `0` if the agent has no stored episodes.
+    pub fn sum_recall_counts(&self, agent_id: &AgentId) -> Result<u64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::sum_recall_counts");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map(|v| v.iter().map(|i| i.recall_count).sum())
+            .unwrap_or(0))
+    }
+
     /// Return all agent IDs that have at least one stored episode.
     ///
     /// The order of agents in the returned vector is not guaranteed.
@@ -5409,5 +5421,26 @@ mod tests {
         // Recall from far past (should include both)
         let all = store.recall_since(&agent, past - chrono::Duration::seconds(1), 0).unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    // ── Round 17: EpisodicStore::sum_recall_counts ────────────────────────────
+
+    #[test]
+    fn test_sum_recall_counts_zero_for_new_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("new");
+        assert_eq!(store.sum_recall_counts(&agent).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_sum_recall_counts_increases_with_recalls() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "ep1", 0.5).unwrap();
+        store.add_episode(agent.clone(), "ep2", 0.8).unwrap();
+        // Recall both episodes once
+        store.recall(&agent, 2).unwrap();
+        let total = store.sum_recall_counts(&agent).unwrap();
+        assert!(total >= 2);
     }
 }

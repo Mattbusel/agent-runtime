@@ -439,9 +439,24 @@ impl AgentConfig {
         self.temperature.is_some()
     }
 
+    /// Return the configured sampling temperature, if any.
+    pub fn temperature(&self) -> Option<f32> {
+        self.temperature
+    }
+
+    /// Return the configured maximum output tokens, if any.
+    pub fn max_tokens(&self) -> Option<usize> {
+        self.max_tokens
+    }
+
     /// Return `true` if a per-inference request timeout has been configured.
     pub fn has_request_timeout(&self) -> bool {
         self.request_timeout.is_some()
+    }
+
+    /// Return the configured per-inference request timeout, if any.
+    pub fn request_timeout(&self) -> Option<std::time::Duration> {
+        self.request_timeout
     }
 
     /// Return the number of iterations still available after `n` have been completed.
@@ -3103,5 +3118,44 @@ mod tests {
     fn test_observation_is_empty_false_for_non_empty() {
         let step = ReActStep::new("think", "search", "found results");
         assert!(!step.observation_is_empty());
+    }
+
+    // ── Round 17: AgentConfig::temperature / max_tokens / request_timeout ────
+
+    #[test]
+    fn test_agent_config_temperature_getter_none_by_default() {
+        let cfg = AgentConfig::new(5, "gpt-4");
+        assert!(cfg.temperature().is_none());
+    }
+
+    #[test]
+    fn test_agent_config_temperature_getter_some_when_set() {
+        let cfg = AgentConfig::new(5, "gpt-4").with_temperature(0.7);
+        assert!((cfg.temperature().unwrap() - 0.7).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_agent_config_max_tokens_getter_none_by_default() {
+        let cfg = AgentConfig::new(5, "gpt-4");
+        assert!(cfg.max_tokens().is_none());
+    }
+
+    #[test]
+    fn test_agent_config_max_tokens_getter_some_when_set() {
+        let cfg = AgentConfig::new(5, "gpt-4").with_max_tokens(512);
+        assert_eq!(cfg.max_tokens(), Some(512));
+    }
+
+    #[test]
+    fn test_agent_config_request_timeout_getter_none_by_default() {
+        let cfg = AgentConfig::new(5, "gpt-4");
+        assert!(cfg.request_timeout().is_none());
+    }
+
+    #[test]
+    fn test_agent_config_request_timeout_getter_some_when_set() {
+        let cfg = AgentConfig::new(5, "gpt-4")
+            .with_request_timeout(std::time::Duration::from_secs(10));
+        assert_eq!(cfg.request_timeout(), Some(std::time::Duration::from_secs(10)));
     }
 }
