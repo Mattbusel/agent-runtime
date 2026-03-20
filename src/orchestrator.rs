@@ -295,6 +295,21 @@ impl RetryPolicy {
         self.max_attempts.saturating_sub(attempt)
     }
 
+    /// Return the fraction of the retry budget consumed after `attempt` attempts.
+    ///
+    /// Computed as `attempt / max_attempts`, clamped to `[0.0, 1.0]`.
+    /// Returns `1.0` when `max_attempts` is zero (budget fully consumed by
+    /// definition).
+    ///
+    /// Useful for surfacing "how far through the retry budget are we" in
+    /// dashboards and progress logs.
+    pub fn attempts_budget_used(&self, attempt: u32) -> f64 {
+        if self.max_attempts == 0 {
+            return 1.0;
+        }
+        (attempt as f64 / self.max_attempts as f64).min(1.0)
+    }
+
     /// Return `true` if another attempt is permitted after `attempt` failures.
     ///
     /// `attempt` is the number of attempts already made (0-based: `0` means
@@ -751,6 +766,24 @@ impl CircuitBreaker {
         self.backend.reset_failures(&self.service);
         self.backend.clear_open_at(&self.service);
         tracing::info!("circuit manually reset to Closed for {}", self.service);
+    }
+
+    /// Return a human-readable one-line summary of the circuit breaker state.
+    ///
+    /// Format: `"service='<name>' state=<State> failures=<n>/<threshold>"`.
+    ///
+    /// # Errors
+    /// Propagates any error returned by [`state`] or [`failure_count`].
+    ///
+    /// [`state`]: CircuitBreaker::state
+    /// [`failure_count`]: CircuitBreaker::failure_count
+    pub fn describe(&self) -> Result<String, AgentRuntimeError> {
+        let state = self.state()?;
+        let failures = self.failure_count()?;
+        Ok(format!(
+            "service='{}' state={} failures={}/{}",
+            self.service, state, failures, self.threshold
+        ))
     }
 
     /// Execute an async fallible operation under the circuit breaker using an
@@ -1879,6 +1912,55 @@ impl Pipeline {
             None | Some(0) => Vec::new(),
             Some(idx) => self.stages[..idx].iter().map(|s| s.name.as_str()).collect(),
         }
+    }
+
+    /// Return the names of all stages that appear after `name` in the pipeline.
+    ///
+    /// Returns an empty `Vec` if `name` is not present, is the last stage,
+    /// or the pipeline is empty.
+    pub fn stages_after(&self, name: &str) -> Vec<&str> {
+        let pos = self.stages.iter().position(|s| s.name == name);
+        match pos {
+            None => Vec::new(),
+            Some(idx) if idx + 1 >= self.stages.len() => Vec::new(),
+            Some(idx) => self.stages[idx + 1..].iter().map(|s| s.name.as_str()).collect(),
+        }
+    }
+
+    /// Return all consecutive stage name pairs `(from, to)` in pipeline order.
+    ///
+    /// For a pipeline with stages `[a, b, c]` this returns `[("a", "b"), ("b", "c")]`.
+    /// Returns an empty `Vec` for pipelines with fewer than two stages.
+    pub fn stage_pairs(&self) -> Vec<(&str, &str)> {
+        self.stages
+            .windows(2)
+            .map(|w| (w[0].name.as_str(), w[1].name.as_str()))
+            .collect()
+    }
+
+    /// Return the number of stages whose name byte length is strictly greater
+    /// than `min_len`.
+    ///
+    /// Returns `0` for an empty pipeline or when no stage name exceeds
+    /// `min_len` bytes.
+    pub fn stage_count_above_name_len(&self, min_len: usize) -> usize {
+        self.stages.iter().filter(|s| s.name.len() > min_len).count()
+    }
+
+    /// Return the position of the stage named `name` counted from the end of
+    /// the pipeline (0 = last stage, 1 = second-to-last, …).
+    ///
+    /// Returns `None` if no stage with that name exists.
+    pub fn stage_position_from_end(&self, name: &str) -> Option<usize> {
+        let pos = self.stages.iter().position(|s| s.name == name)?;
+        Some(self.stages.len() - 1 - pos)
+    }
+
+    /// Return `true` if every name in `names` corresponds to an existing stage.
+    ///
+    /// Returns `true` for an empty `names` slice (vacuously true).
+    pub fn contains_all_stages(&self, names: &[&str]) -> bool {
+        names.iter().all(|&n| self.stages.iter().any(|s| s.name == n))
     }
 
 }
@@ -3750,5 +3832,157 @@ mod tests {
     fn test_pipeline_stages_before_returns_empty_for_unknown_stage() {
         let p = Pipeline::new().add_stage("a", |s: String| Ok(s));
         assert!(p.stages_before("missing").is_empty());
+    }
+
+    // ── Round 43: stages_after, stage_position_from_end, contains_all_stages ──
+
+    #[test]
+    fn test_stages_after_returns_stages_following_name() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("b", |s: String| Ok(s))
+            .add_stage("c", |s: String| Ok(s));
+        assert_eq!(p.stages_after("a"), vec!["b", "c"]);
+    }
+
+    #[test]
+    fn test_stages_after_last_stage_returns_empty() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("b", |s: String| Ok(s));
+        assert!(p.stages_after("b").is_empty());
+    }
+
+    #[test]
+    fn test_stages_after_unknown_name_returns_empty() {
+        let p = Pipeline::new().add_stage("a", |s: String| Ok(s));
+        assert!(p.stages_after("missing").is_empty());
+    }
+
+    #[test]
+    fn test_stage_position_from_end_last_is_zero() {
+        let p = Pipeline::new()
+            .add_stage("x", |s: String| Ok(s))
+            .add_stage("y", |s: String| Ok(s))
+            .add_stage("z", |s: String| Ok(s));
+        assert_eq!(p.stage_position_from_end("z"), Some(0));
+        assert_eq!(p.stage_position_from_end("x"), Some(2));
+    }
+
+    #[test]
+    fn test_stage_position_from_end_unknown_returns_none() {
+        let p = Pipeline::new().add_stage("a", |s: String| Ok(s));
+        assert_eq!(p.stage_position_from_end("missing"), None);
+    }
+
+    #[test]
+    fn test_contains_all_stages_true_when_all_present() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("b", |s: String| Ok(s));
+        assert!(p.contains_all_stages(&["a", "b"]));
+    }
+
+    #[test]
+    fn test_contains_all_stages_false_when_one_missing() {
+        let p = Pipeline::new().add_stage("a", |s: String| Ok(s));
+        assert!(!p.contains_all_stages(&["a", "b"]));
+    }
+
+    #[test]
+    fn test_contains_all_stages_true_for_empty_names() {
+        let p = Pipeline::new();
+        assert!(p.contains_all_stages(&[]));
+    }
+
+    // ── Round 44: stage_count_above_name_len, stage_pairs ─────────────────────
+
+    #[test]
+    fn test_stage_count_above_name_len_counts_longer_names() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))
+            .add_stage("abcde", |s: String| Ok(s))
+            .add_stage("xyz", |s: String| Ok(s));
+        assert_eq!(p.stage_count_above_name_len(2), 2); // "abcde" (5) and "xyz" (3)
+    }
+
+    #[test]
+    fn test_stage_count_above_name_len_zero_when_none_exceed() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("b", |s: String| Ok(s));
+        assert_eq!(p.stage_count_above_name_len(5), 0);
+    }
+
+    #[test]
+    fn test_stage_pairs_returns_consecutive_pairs() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("b", |s: String| Ok(s))
+            .add_stage("c", |s: String| Ok(s));
+        assert_eq!(p.stage_pairs(), vec![("a", "b"), ("b", "c")]);
+    }
+
+    #[test]
+    fn test_stage_pairs_empty_for_single_stage_pipeline() {
+        let p = Pipeline::new().add_stage("only", |s: String| Ok(s));
+        assert!(p.stage_pairs().is_empty());
+    }
+
+    // ── Round 44: CircuitBreaker::describe, RetryPolicy::attempts_budget_used ──
+
+    #[test]
+    fn test_circuit_breaker_describe_contains_service_name() {
+        let cb = CircuitBreaker::new("my-service", 3, std::time::Duration::from_secs(30)).unwrap();
+        let desc = cb.describe().unwrap();
+        assert!(desc.contains("my-service"));
+    }
+
+    #[test]
+    fn test_circuit_breaker_describe_shows_closed_state_initially() {
+        let cb = CircuitBreaker::new("svc", 5, std::time::Duration::from_secs(10)).unwrap();
+        let desc = cb.describe().unwrap();
+        assert!(desc.contains("Closed"));
+    }
+
+    #[test]
+    fn test_circuit_breaker_describe_shows_failure_counts() {
+        let cb = CircuitBreaker::new("svc", 5, std::time::Duration::from_secs(10)).unwrap();
+        cb.record_failure();
+        cb.record_failure();
+        let desc = cb.describe().unwrap();
+        assert!(desc.contains("2/5"));
+    }
+
+    #[test]
+    fn test_retry_policy_attempts_budget_used_zero_at_start() {
+        let p = RetryPolicy::exponential(4, 10).unwrap();
+        assert_eq!(p.attempts_budget_used(0), 0.0);
+    }
+
+    #[test]
+    fn test_retry_policy_attempts_budget_used_one_when_exhausted() {
+        let p = RetryPolicy::exponential(4, 10).unwrap();
+        assert_eq!(p.attempts_budget_used(4), 1.0);
+    }
+
+    #[test]
+    fn test_retry_policy_attempts_budget_used_clamped_to_one() {
+        let p = RetryPolicy::exponential(4, 10).unwrap();
+        assert_eq!(p.attempts_budget_used(10), 1.0);
+    }
+
+    #[test]
+    fn test_retry_policy_attempts_budget_used_half_way() {
+        let p = RetryPolicy::constant(4, 10).unwrap();
+        assert!((p.attempts_budget_used(2) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_retry_policy_attempts_budget_used_fully_used_for_none_policy_after_one_attempt() {
+        // RetryPolicy::none() has max_attempts=1; after 1 attempt the budget is fully consumed.
+        let p = RetryPolicy::none();
+        assert_eq!(p.attempts_budget_used(1), 1.0);
+        assert_eq!(p.attempts_budget_used(0), 0.0);
     }
 }

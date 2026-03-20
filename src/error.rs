@@ -145,6 +145,32 @@ impl AgentRuntimeError {
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::Provider(_) | Self::Persistence(_))
     }
+
+    /// Extract the primary message string from this error.
+    ///
+    /// For simple string-carrying variants (`Memory`, `Graph`, `Orchestration`,
+    /// `AgentLoop`, `Provider`, `Persistence`) this returns the inner `String`.
+    /// For structured variants the `Display` representation is returned so
+    /// callers always get a non-empty, human-readable string.
+    pub fn message(&self) -> String {
+        match self {
+            Self::Memory(s)
+            | Self::Graph(s)
+            | Self::Orchestration(s)
+            | Self::AgentLoop(s)
+            | Self::Provider(s)
+            | Self::Persistence(s) => s.clone(),
+            Self::NotConfigured(s) => s.to_string(),
+            Self::CircuitOpen { service } => format!("circuit open for '{service}'"),
+            Self::BackpressureShed { depth, capacity } => {
+                format!("backpressure: queue depth {depth}/{capacity}")
+            }
+            Self::DeduplicationConflict { key } => format!("dedup conflict: {key}"),
+            Self::Validation { field, code, message } => {
+                format!("[{code}] {field}: {message}")
+            }
+        }
+    }
 }
 
 impl From<serde_json::Error> for AgentRuntimeError {
@@ -413,5 +439,43 @@ mod tests {
             "custom error message".parse::<i32>().unwrap_err().into();
         let e = AgentRuntimeError::from(boxed);
         assert!(e.is_agent_loop());
+    }
+
+    // ── Round 44: message() ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_message_returns_inner_string_for_memory_variant() {
+        let e = AgentRuntimeError::Memory("store full".into());
+        assert_eq!(e.message(), "store full");
+    }
+
+    #[test]
+    fn test_message_returns_inner_string_for_provider_variant() {
+        let e = AgentRuntimeError::Provider("timeout".into());
+        assert_eq!(e.message(), "timeout");
+    }
+
+    #[test]
+    fn test_message_returns_structured_text_for_circuit_open() {
+        let e = AgentRuntimeError::CircuitOpen { service: "llm".into() };
+        assert!(e.message().contains("llm"));
+    }
+
+    #[test]
+    fn test_message_returns_structured_text_for_validation() {
+        let e = AgentRuntimeError::Validation {
+            field: "n".into(),
+            code: "range".into(),
+            message: "must be positive".into(),
+        };
+        let msg = e.message();
+        assert!(msg.contains("n") && msg.contains("must be positive"));
+    }
+
+    #[test]
+    fn test_message_returns_structured_text_for_backpressure() {
+        let e = AgentRuntimeError::BackpressureShed { depth: 10, capacity: 10 };
+        let msg = e.message();
+        assert!(msg.contains("10"));
     }
 }

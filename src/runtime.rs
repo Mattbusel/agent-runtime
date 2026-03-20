@@ -1062,6 +1062,31 @@ impl AgentSession {
             .count()
     }
 
+    /// Return the maximum byte length of any action string across all steps.
+    ///
+    /// Returns `0` for sessions with no steps or where every action is empty.
+    pub fn max_action_bytes(&self) -> usize {
+        self.steps.iter().map(|s| s.action.len()).max().unwrap_or(0)
+    }
+
+    /// Return the minimum byte length of any action string across all steps.
+    ///
+    /// Returns `0` for sessions with no steps or where every action is empty.
+    pub fn min_action_bytes(&self) -> usize {
+        self.steps.iter().map(|s| s.action.len()).min().unwrap_or(0)
+    }
+
+    /// Return the average number of ReAct steps completed per second.
+    ///
+    /// Computed as `step_count / (duration_ms / 1000.0)`.  Returns `0.0` for
+    /// sessions with no steps or zero duration.
+    pub fn step_throughput_per_sec(&self) -> f64 {
+        if self.duration_ms == 0 || self.steps.is_empty() {
+            return 0.0;
+        }
+        self.steps.len() as f64 / (self.duration_ms as f64 / 1000.0)
+    }
+
     /// Return the number of steps that have a non-empty observation string.
     ///
     /// Steps where the tool produced no output (empty string) are excluded.
@@ -1080,6 +1105,17 @@ impl AgentSession {
             .collect()
     }
 
+    /// Return the 0-based index of the first `FINAL_ANSWER` step, or `None` if
+    /// no such step exists in the session.
+    ///
+    /// Useful when you need the position of the answer step rather than just
+    /// testing whether one exists (see [`has_final_answer`]).
+    ///
+    /// [`has_final_answer`]: AgentSession::has_final_answer
+    pub fn final_answer_step_index(&self) -> Option<usize> {
+        self.steps.iter().position(|s| s.is_final_answer())
+    }
+
     /// Return the `(min, max)` step duration range in milliseconds.
     ///
     /// Returns `(0, 0)` for sessions with no steps.
@@ -1090,6 +1126,23 @@ impl AgentSession {
         let min = self.steps.iter().map(|s| s.step_duration_ms).min().unwrap_or(0);
         let max = self.steps.iter().map(|s| s.step_duration_ms).max().unwrap_or(0);
         (min, max)
+    }
+
+    /// Return the number of distinct thought strings across all steps.
+    ///
+    /// Two steps with identical thought text are counted once.  Returns `0`
+    /// for empty sessions.
+    pub fn count_unique_thoughts(&self) -> usize {
+        let unique: std::collections::HashSet<&str> =
+            self.steps.iter().map(|s| s.thought.as_str()).collect();
+        unique.len()
+    }
+
+    /// Return references to steps whose thought string is empty.
+    ///
+    /// Useful for detecting steps where the model skipped the reasoning phase.
+    pub fn steps_with_empty_thoughts(&self) -> Vec<&ReActStep> {
+        self.steps.iter().filter(|s| s.thought.is_empty()).collect()
     }
 
     /// Persist this session as a checkpoint under `"session:<session_id>"`.
@@ -4831,5 +4884,125 @@ mod tests {
     fn test_step_duration_range_ms_zero_zero_for_empty() {
         let session = make_session(vec![], 0);
         assert_eq!(session.step_duration_range_ms(), (0, 0));
+    }
+
+    // ── Round 43: count_unique_thoughts, steps_with_empty_thoughts ─────────────
+
+    #[test]
+    fn test_count_unique_thoughts_counts_distinct_strings() {
+        let steps = vec![
+            make_step("alpha", "a", "o"),
+            make_step("beta", "b", "o"),
+            make_step("alpha", "c", "o"), // duplicate thought
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.count_unique_thoughts(), 2);
+    }
+
+    #[test]
+    fn test_count_unique_thoughts_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.count_unique_thoughts(), 0);
+    }
+
+    #[test]
+    fn test_steps_with_empty_thoughts_returns_matching_steps() {
+        let steps = vec![
+            make_step("", "a", "o"),
+            make_step("thought", "b", "o"),
+            make_step("", "c", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_with_empty_thoughts().len(), 2);
+    }
+
+    #[test]
+    fn test_steps_with_empty_thoughts_returns_empty_when_all_have_thoughts() {
+        let steps = vec![make_step("t1", "a", "o"), make_step("t2", "b", "o")];
+        let session = make_session(steps, 0);
+        assert!(session.steps_with_empty_thoughts().is_empty());
+    }
+
+    // ── Round 44: max_action_bytes, min_action_bytes, step_throughput_per_sec ─
+
+    #[test]
+    fn test_max_action_bytes_returns_longest_action() {
+        let steps = vec![
+            make_step("t", "short", "o"),
+            make_step("t", "much longer action string", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.max_action_bytes(), "much longer action string".len());
+    }
+
+    #[test]
+    fn test_max_action_bytes_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.max_action_bytes(), 0);
+    }
+
+    #[test]
+    fn test_min_action_bytes_returns_shortest_action() {
+        let steps = vec![
+            make_step("t", "ab", "o"),
+            make_step("t", "abcde", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.min_action_bytes(), 2);
+    }
+
+    #[test]
+    fn test_min_action_bytes_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.min_action_bytes(), 0);
+    }
+
+    #[test]
+    fn test_step_throughput_per_sec_computes_ratio() {
+        let steps = vec![make_step("t", "a", "o"), make_step("t", "b", "o")];
+        let session = make_session(steps, 2000); // 2000 ms
+        assert!((session.step_throughput_per_sec() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_step_throughput_per_sec_zero_for_zero_duration() {
+        let steps = vec![make_step("t", "a", "o")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.step_throughput_per_sec(), 0.0);
+    }
+
+    // ── Round 44: final_answer_step_index ────────────────────────────────────
+
+    #[test]
+    fn test_final_answer_step_index_returns_correct_index() {
+        let steps = vec![
+            make_step("think", "search(x)", "result"),
+            make_step("think2", "FINAL_ANSWER: done", ""),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.final_answer_step_index(), Some(1));
+    }
+
+    #[test]
+    fn test_final_answer_step_index_returns_none_when_no_final_answer() {
+        let steps = vec![make_step("t", "search(x)", "result")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.final_answer_step_index(), None);
+    }
+
+    #[test]
+    fn test_final_answer_step_index_returns_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.final_answer_step_index(), None);
+    }
+
+    #[test]
+    fn test_final_answer_step_index_returns_first_occurrence() {
+        let steps = vec![
+            make_step("t", "FINAL_ANSWER: first", ""),
+            make_step("t", "FINAL_ANSWER: second", ""),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.final_answer_step_index(), Some(0));
     }
 }

@@ -1786,6 +1786,27 @@ impl EpisodicStore {
             .cloned())
     }
 
+    /// Return the `n` most recently stored episodes for `agent_id`, sorted by
+    /// timestamp descending (newest first).
+    ///
+    /// Returns fewer than `n` items when the agent has fewer stored episodes.
+    /// Returns an empty `Vec` for an unknown agent.
+    pub fn recent_episodes(
+        &self,
+        agent_id: &AgentId,
+        n: usize,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::recent_episodes");
+        let mut items: Vec<MemoryItem> = inner
+            .items
+            .get(agent_id)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default();
+        items.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        items.truncate(n);
+        Ok(items)
+    }
+
     /// Return the most recently stored episode for `agent_id` (largest timestamp), or
     /// `None` if the agent has no stored episodes.
     pub fn most_recent_episode(
@@ -1797,6 +1818,29 @@ impl EpisodicStore {
             .items
             .get(agent_id)
             .and_then(|v| v.iter().max_by_key(|i| i.timestamp))
+            .cloned())
+    }
+
+    /// Return the episode with the highest `recall_count` for `agent_id`, or `None`
+    /// if the agent has no stored episodes.  Ties are broken in favour of the
+    /// episode with the higher importance score.
+    pub fn most_recalled_episode(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::most_recalled_episode");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|v| {
+                v.iter().max_by(|a, b| {
+                    a.recall_count.cmp(&b.recall_count).then_with(|| {
+                        a.importance
+                            .partial_cmp(&b.importance)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                })
+            })
             .cloned())
     }
 
@@ -2137,6 +2181,24 @@ impl EpisodicStore {
                     .filter(|m| m.tags.iter().any(|t| t == tag))
                     .cloned()
                     .collect()
+            }))
+    }
+
+    /// Return the count of episodes for `agent_id` whose timestamp is strictly
+    /// before `before`.
+    ///
+    /// Returns `0` for unknown agents or when no episode qualifies.
+    pub fn episode_count_before(
+        &self,
+        agent_id: &AgentId,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episode_count_before");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or(0, |items| {
+                items.iter().filter(|m| m.timestamp < before).count()
             }))
     }
 }
@@ -3548,12 +3610,78 @@ impl WorkingMemory {
             .cloned())
     }
 
+    /// Return a `Vec` of `(key_byte_len, value_byte_len)` pairs for every entry.
+    ///
+    /// The order of the returned pairs is unspecified (hash-map iteration order).
+    /// Returns an empty `Vec` for an empty store.
+    pub fn entry_byte_pairs(&self) -> Result<Vec<(usize, usize)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::entry_byte_pairs");
+        Ok(inner.map.iter().map(|(k, v)| (k.len(), v.len())).collect())
+    }
+
+    /// Return the key whose value has the greatest byte length, or `None` if
+    /// the store is empty.
+    ///
+    /// When multiple values share the maximum byte length, the key that sorts
+    /// first lexicographically is returned for deterministic output.
+    pub fn key_with_longest_value(&self) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::key_with_longest_value");
+        Ok(inner
+            .map
+            .iter()
+            .max_by(|(ka, va), (kb, vb)| va.len().cmp(&vb.len()).then_with(|| kb.cmp(ka)))
+            .map(|(k, _)| k.clone()))
+    }
+
     /// Return the number of entries whose value byte length is strictly less than `max_bytes`.
     ///
     /// Returns `0` for an empty store.
     pub fn count_below_value_length(&self, max_bytes: usize) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::count_below_value_length");
         Ok(inner.map.values().filter(|v| v.len() < max_bytes).count())
+    }
+
+    /// Return the value associated with the shortest key, or `None` if the
+    /// store is empty.
+    ///
+    /// When multiple keys share the minimum byte length, the one that sorts
+    /// first lexicographically is selected for deterministic output.
+    pub fn value_for_shortest_key(&self) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::value_for_shortest_key");
+        let best_key = inner
+            .map
+            .keys()
+            .min_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+        Ok(best_key.and_then(|k| inner.map.get(k).cloned()))
+    }
+
+    /// Return the value for `key` if it exists, otherwise insert `default` and
+    /// return it.
+    ///
+    /// The returned `String` is always the value associated with `key` after
+    /// this call completes.  If the key was absent and the store has a capacity
+    /// limit, the oldest entry may be evicted to make room for the new entry.
+    pub fn get_or_insert(
+        &self,
+        key: impl Into<String>,
+        default: impl Into<String>,
+    ) -> Result<String, AgentRuntimeError> {
+        let key = key.into();
+        let mut inner = recover_lock(self.inner.lock(), "WorkingMemory::get_or_insert");
+        if let Some(v) = inner.map.get(&key) {
+            return Ok(v.clone());
+        }
+        let value = default.into();
+        // Evict oldest entry if at capacity.
+        let cap = self.capacity;
+        if inner.map.len() >= cap && cap > 0 {
+            if let Some(oldest) = inner.order.pop_front() {
+                inner.map.remove(&oldest);
+            }
+        }
+        inner.map.insert(key.clone(), value.clone());
+        inner.order.push_back(key);
+        Ok(value)
     }
 }
 
@@ -7776,5 +7904,95 @@ mod tests {
     fn test_episodic_store_most_recent_episode_returns_none_for_unknown_agent() {
         let store = EpisodicStore::new();
         assert!(store.most_recent_episode(&AgentId::new("nobody")).unwrap().is_none());
+    }
+
+    // ── Round 43: most_recalled_episode, value_for_shortest_key ───────────────
+
+    #[test]
+    fn test_episodic_store_most_recalled_episode_returns_highest_recall_count() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "low", 0.5).unwrap();
+        let id_high = store.add_episode(agent.clone(), "high", 0.8).unwrap();
+        // recall the second episode twice
+        store.recall(&agent, 10).unwrap();
+        store.recall(&agent, 10).unwrap();
+        let ep = store.most_recalled_episode(&agent).unwrap().unwrap();
+        assert_eq!(ep.id, id_high);
+    }
+
+    #[test]
+    fn test_episodic_store_most_recalled_episode_returns_none_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        assert!(store.most_recalled_episode(&AgentId::new("nobody")).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_working_memory_value_for_shortest_key_returns_correct_value() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("abc", "long-key").unwrap();
+        wm.set("a", "short-key").unwrap();
+        wm.set("ab", "mid-key").unwrap();
+        assert_eq!(wm.value_for_shortest_key().unwrap(), Some("short-key".to_string()));
+    }
+
+    #[test]
+    fn test_working_memory_value_for_shortest_key_returns_none_when_empty() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.value_for_shortest_key().unwrap(), None);
+    }
+
+    // ── Round 44: episode_count_before, entry_byte_pairs, key_with_longest_value
+
+    #[test]
+    fn test_episodic_store_episode_count_before_counts_older_episodes() {
+        use chrono::{Duration, Utc};
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "old", 0.5).unwrap();
+        store.add_episode(agent.clone(), "newer", 0.5).unwrap();
+        // All episodes have timestamps <= now, so count before far future == 2
+        let future = Utc::now() + Duration::hours(1);
+        assert_eq!(store.episode_count_before(&agent, future).unwrap(), 2);
+        // Count before epoch == 0
+        let past = Utc::now() - Duration::hours(1);
+        assert_eq!(store.episode_count_before(&agent, past).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_episodic_store_episode_count_before_zero_for_unknown_agent() {
+        use chrono::Utc;
+        let store = EpisodicStore::new();
+        let future = Utc::now();
+        assert_eq!(store.episode_count_before(&AgentId::new("nobody"), future).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_working_memory_entry_byte_pairs_returns_correct_lengths() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("ab", "hello").unwrap();
+        let pairs = wm.entry_byte_pairs().unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0], (2, 5));
+    }
+
+    #[test]
+    fn test_working_memory_entry_byte_pairs_empty_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(wm.entry_byte_pairs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_working_memory_key_with_longest_value_returns_correct_key() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "short").unwrap();
+        wm.set("k2", "much longer value here").unwrap();
+        assert_eq!(wm.key_with_longest_value().unwrap(), Some("k2".to_string()));
+    }
+
+    #[test]
+    fn test_working_memory_key_with_longest_value_returns_none_when_empty() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.key_with_longest_value().unwrap(), None);
     }
 }

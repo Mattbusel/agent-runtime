@@ -838,6 +838,25 @@ impl MetricsSnapshot {
         let total: u64 = self.per_tool_calls.values().sum();
         total as f64 / n as f64
     }
+
+    /// Return the number of distinct tool names that have more than `n` recorded calls.
+    ///
+    /// Returns `0` when no tool-call data has been recorded.
+    pub fn tool_call_count_above(&self, n: u64) -> usize {
+        self.per_tool_calls.values().filter(|&&count| count > n).count()
+    }
+
+    /// Return the fraction of total tool calls accounted for by `name`.
+    ///
+    /// Returns `0.0` if `total_tool_calls` is zero or `name` has no recorded
+    /// calls.  Returns a value in `[0.0, 1.0]`.
+    pub fn tool_call_ratio(&self, name: &str) -> f64 {
+        if self.total_tool_calls == 0 {
+            return 0.0;
+        }
+        let count = self.per_tool_calls.get(name).copied().unwrap_or(0);
+        count as f64 / self.total_tool_calls as f64
+    }
 }
 
 impl std::fmt::Display for MetricsSnapshot {
@@ -1312,6 +1331,18 @@ impl RuntimeMetrics {
             return 0.0;
         }
         self.active_sessions.load(Ordering::Relaxed) as f64 / total as f64
+    }
+
+    /// Return the average number of memory recall operations per session.
+    ///
+    /// Computed as `memory_recall_count / total_sessions`.  Returns `0.0`
+    /// when no sessions have been started.
+    pub fn memory_recall_per_session(&self) -> f64 {
+        let total = self.total_sessions.load(Ordering::Relaxed);
+        if total == 0 {
+            return 0.0;
+        }
+        self.memory_recall_count.load(Ordering::Relaxed) as f64 / total as f64
     }
 
     /// Return the top `n` tools by total call count, sorted descending.
@@ -3216,5 +3247,84 @@ mod tests {
     fn test_avg_tool_calls_per_name_zero_when_no_tools() {
         let snap = MetricsSnapshot::default();
         assert_eq!(snap.avg_tool_calls_per_name(), 0.0);
+    }
+
+    // ── Round 43: MetricsSnapshot::tool_call_count_above ──────────────────────
+
+    #[test]
+    fn test_tool_call_count_above_counts_tools_exceeding_threshold() {
+        let snap = MetricsSnapshot {
+            per_tool_calls: [
+                ("search".to_string(), 10u64),
+                ("write".to_string(), 2u64),
+                ("read".to_string(), 5u64),
+            ].into_iter().collect(),
+            ..Default::default()
+        };
+        assert_eq!(snap.tool_call_count_above(4), 2); // search(10) and read(5)
+    }
+
+    #[test]
+    fn test_tool_call_count_above_returns_zero_when_none_exceed() {
+        let snap = MetricsSnapshot {
+            per_tool_calls: [("t".to_string(), 3u64)].into_iter().collect(),
+            ..Default::default()
+        };
+        assert_eq!(snap.tool_call_count_above(10), 0);
+    }
+
+    #[test]
+    fn test_tool_call_count_above_zero_for_empty_snapshot() {
+        let snap = MetricsSnapshot::default();
+        assert_eq!(snap.tool_call_count_above(0), 0);
+    }
+
+    // ── Round 44: memory_recall_per_session ────────────────────────────────────
+
+    #[test]
+    fn test_memory_recall_per_session_returns_ratio() {
+        use std::sync::atomic::Ordering;
+        let m = RuntimeMetrics::default();
+        m.total_sessions.store(4, Ordering::Relaxed);
+        m.memory_recall_count.store(8, Ordering::Relaxed);
+        assert!((m.memory_recall_per_session() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_memory_recall_per_session_zero_when_no_sessions() {
+        let m = RuntimeMetrics::default();
+        assert_eq!(m.memory_recall_per_session(), 0.0);
+    }
+
+    // ── Round 44: tool_call_ratio ─────────────────────────────────────────────
+
+    #[test]
+    fn test_tool_call_ratio_returns_fraction_for_named_tool() {
+        let snap = MetricsSnapshot {
+            total_tool_calls: 10,
+            per_tool_calls: [
+                ("search".to_string(), 4u64),
+                ("write".to_string(), 6u64),
+            ].into_iter().collect(),
+            ..Default::default()
+        };
+        assert!((snap.tool_call_ratio("search") - 0.4).abs() < 1e-9);
+        assert!((snap.tool_call_ratio("write") - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_tool_call_ratio_returns_zero_for_unknown_tool() {
+        let snap = MetricsSnapshot {
+            total_tool_calls: 5,
+            per_tool_calls: [("a".to_string(), 5u64)].into_iter().collect(),
+            ..Default::default()
+        };
+        assert_eq!(snap.tool_call_ratio("unknown"), 0.0);
+    }
+
+    #[test]
+    fn test_tool_call_ratio_returns_zero_when_no_calls_recorded() {
+        let snap = MetricsSnapshot::default();
+        assert_eq!(snap.tool_call_ratio("any"), 0.0);
     }
 }

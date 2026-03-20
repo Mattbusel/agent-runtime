@@ -295,6 +295,20 @@ impl Relationship {
             weight: self.weight,
         }
     }
+
+    /// Return a copy of this relationship with the weight changed to `w`.
+    ///
+    /// All other fields (`from`, `to`, `kind`) are cloned unchanged, making
+    /// this convenient for builder-style graph construction:
+    ///
+    /// ```rust
+    /// use llm_agent_runtime::graph::Relationship;
+    /// let rel = Relationship::new("a", "b", "KNOWS", 1.0).with_weight(0.5);
+    /// assert_eq!(rel.weight, 0.5);
+    /// ```
+    pub fn with_weight(self, w: f32) -> Self {
+        Self { weight: w, ..self }
+    }
 }
 
 impl std::fmt::Display for Relationship {
@@ -2834,6 +2848,95 @@ impl GraphStore {
     pub fn total_relationship_count(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "GraphStore::total_relationship_count");
         Ok(inner.adjacency.values().map(|rels| rels.len()).sum())
+    }
+
+    /// Format a slice of `EntityId`s as a human-readable path string.
+    ///
+    /// Each ID is rendered using its label if the entity exists in the store,
+    /// otherwise the raw ID string is used.  Nodes are joined with ` → `.
+    ///
+    /// Returns an empty `String` for an empty `path` slice.
+    ///
+    /// # Example
+    /// ```text
+    /// "Alice → Bob → Carol"
+    /// ```
+    pub fn path_to_string(&self, path: &[EntityId]) -> Result<String, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::path_to_string");
+        let parts: Vec<String> = path
+            .iter()
+            .map(|id| {
+                inner
+                    .entities
+                    .get(id)
+                    .map(|e| e.label.clone())
+                    .unwrap_or_else(|| id.0.clone())
+            })
+            .collect();
+        Ok(parts.join(" \u{2192} "))
+    }
+
+    /// Return all entities that have no outgoing edges (out-degree == 0).
+    ///
+    /// Entities that appear only as relationship targets, or entities with no
+    /// relationships at all, are included.
+    pub fn entities_without_outgoing(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entities_without_outgoing");
+        let entities: Vec<Entity> = inner
+            .entities
+            .values()
+            .filter(|e| !inner.adjacency.contains_key(&e.id) || inner.adjacency[&e.id].is_empty())
+            .cloned()
+            .collect();
+        Ok(entities)
+    }
+
+    /// Return all entities that have no incoming edges (in-degree == 0).
+    ///
+    /// These are entities that no other entity points to — i.e., root / source
+    /// nodes in the directed graph.
+    pub fn entities_without_incoming(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entities_without_incoming");
+        let entities: Vec<Entity> = inner
+            .entities
+            .values()
+            .filter(|e| !inner.reverse_adjacency.contains_key(&e.id) || inner.reverse_adjacency[&e.id].is_empty())
+            .cloned()
+            .collect();
+        Ok(entities)
+    }
+
+    /// Return the total out-degree of the graph — the sum of the number of
+    /// outgoing edges across all entities.
+    ///
+    /// Equivalent to `total_relationship_count` but traverses the adjacency
+    /// list directly without accessing the reverse index.
+    pub fn total_out_degree(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::total_out_degree");
+        Ok(inner.adjacency.values().map(|rels| rels.len()).sum())
+    }
+
+    /// Return all relationships whose `weight` is strictly greater than
+    /// `threshold`.
+    ///
+    /// Returns an empty `Vec` when the graph has no relationships or none
+    /// exceeds the threshold.
+    pub fn relationships_with_weight_above(
+        &self,
+        threshold: f32,
+    ) -> Result<Vec<Relationship>, AgentRuntimeError> {
+        let inner = recover_lock(
+            self.inner.lock(),
+            "GraphStore::relationships_with_weight_above",
+        );
+        let rels: Vec<Relationship> = inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter())
+            .filter(|r| r.weight > threshold)
+            .cloned()
+            .collect();
+        Ok(rels)
     }
 }
 
@@ -5744,5 +5847,133 @@ mod tests {
     fn test_total_relationship_count_zero_for_empty_graph() {
         let g = GraphStore::new();
         assert_eq!(g.total_relationship_count().unwrap(), 0);
+    }
+
+    // ── Round 43: entities_without_outgoing, entities_without_incoming ─────────
+
+    #[test]
+    fn test_entities_without_outgoing_returns_nodes_with_no_out_edges() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b");
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        // a has outgoing, b does not
+        let no_out = g.entities_without_outgoing().unwrap();
+        assert_eq!(no_out.len(), 1);
+        assert_eq!(no_out[0].id, EntityId::new("b"));
+    }
+
+    #[test]
+    fn test_entities_without_outgoing_all_returned_for_empty_graph() {
+        let g = GraphStore::new();
+        add(&g, "x");
+        let result = g.entities_without_outgoing().unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_entities_without_incoming_returns_nodes_with_no_in_edges() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b");
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        // a has no incoming; b has incoming from a
+        let no_in = g.entities_without_incoming().unwrap();
+        assert_eq!(no_in.len(), 1);
+        assert_eq!(no_in[0].id, EntityId::new("a"));
+    }
+
+    #[test]
+    fn test_entities_without_incoming_all_returned_for_isolated_node() {
+        let g = GraphStore::new();
+        add(&g, "x");
+        assert_eq!(g.entities_without_incoming().unwrap().len(), 1);
+    }
+
+    // ── Round 44: path_to_string, Relationship::with_weight ──────────────────
+
+    #[test]
+    fn test_path_to_string_uses_labels_when_entities_exist() {
+        let g = GraphStore::new();
+        let mut e1 = Entity::new("a", "Alice");
+        let mut e2 = Entity::new("b", "Bob");
+        let mut e3 = Entity::new("c", "Carol");
+        e1.label = "Alice".into();
+        e2.label = "Bob".into();
+        e3.label = "Carol".into();
+        g.add_entity(e1).unwrap();
+        g.add_entity(e2).unwrap();
+        g.add_entity(e3).unwrap();
+        let path = vec![EntityId::new("a"), EntityId::new("b"), EntityId::new("c")];
+        let s = g.path_to_string(&path).unwrap();
+        assert_eq!(s, "Alice \u{2192} Bob \u{2192} Carol");
+    }
+
+    #[test]
+    fn test_path_to_string_falls_back_to_id_for_unknown_entities() {
+        let g = GraphStore::new();
+        let path = vec![EntityId::new("x"), EntityId::new("y")];
+        let s = g.path_to_string(&path).unwrap();
+        assert!(s.contains("x") && s.contains("y"));
+    }
+
+    #[test]
+    fn test_path_to_string_empty_path_returns_empty_string() {
+        let g = GraphStore::new();
+        assert_eq!(g.path_to_string(&[]).unwrap(), "");
+    }
+
+    #[test]
+    fn test_relationship_with_weight_changes_weight() {
+        let rel = Relationship::new("a", "b", "KNOWS", 1.0).with_weight(0.25);
+        assert_eq!(rel.weight, 0.25);
+        assert_eq!(rel.from, EntityId::new("a"));
+        assert_eq!(rel.kind, "KNOWS");
+    }
+
+    #[test]
+    fn test_relationship_with_weight_zero_allowed() {
+        let rel = Relationship::new("x", "y", "EDGE", 5.0).with_weight(0.0);
+        assert_eq!(rel.weight, 0.0);
+    }
+
+    // ── Round 44: total_out_degree, relationships_with_weight_above ────────────
+
+    #[test]
+    fn test_total_out_degree_sums_all_outgoing_edges() {
+        let g = GraphStore::new();
+        add(&g, "a");
+        add(&g, "b");
+        add(&g, "c");
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "KNOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "KNOWS", 1.0)).unwrap();
+        assert_eq!(g.total_out_degree().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_total_out_degree_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.total_out_degree().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_relationships_with_weight_above_filters_correctly() {
+        let g = GraphStore::new();
+        add(&g, "a");
+        add(&g, "b");
+        add(&g, "c");
+        g.add_relationship(Relationship::new("a", "b", "EDGE", 0.5)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "EDGE", 1.5)).unwrap();
+        let heavy = g.relationships_with_weight_above(1.0).unwrap();
+        assert_eq!(heavy.len(), 1);
+        assert_eq!(heavy[0].to, EntityId::new("c"));
+    }
+
+    #[test]
+    fn test_relationships_with_weight_above_returns_empty_when_none_qualify() {
+        let g = GraphStore::new();
+        add(&g, "a");
+        add(&g, "b");
+        g.add_relationship(Relationship::new("a", "b", "EDGE", 0.3)).unwrap();
+        assert!(g.relationships_with_weight_above(1.0).unwrap().is_empty());
     }
 }

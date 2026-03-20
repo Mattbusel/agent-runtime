@@ -1371,6 +1371,17 @@ impl ToolRegistry {
             .max()
             .unwrap_or(0)
     }
+
+    /// Return references to all `ToolSpec`s that list `field` in their
+    /// `required_fields`.
+    ///
+    /// Returns an empty `Vec` when no tools declare `field` as required.
+    pub fn tools_with_required_field(&self, field: &str) -> Vec<&ToolSpec> {
+        self.tools
+            .values()
+            .filter(|s| s.required_fields.iter().any(|f| f == field))
+            .collect()
+    }
 }
 
 // ── ReActLoop ─────────────────────────────────────────────────────────────────
@@ -4142,5 +4153,41 @@ mod tests {
     fn test_longest_description_length_zero_for_empty_registry() {
         let reg = ToolRegistry::new();
         assert_eq!(reg.longest_description_length(), 0);
+    }
+
+    // ── Round 43: ToolRegistry::tools_with_required_field ─────────────────────
+
+    #[test]
+    fn test_tools_with_required_field_returns_matching_tools() {
+        let mut reg = ToolRegistry::new();
+        reg.register(
+            ToolSpec::new("a", "desc", |_| serde_json::json!({}))
+                .with_required_fields(vec!["query".to_string()]),
+        );
+        reg.register(ToolSpec::new("b", "desc", |_| serde_json::json!({}))); // no required fields
+        reg.register(
+            ToolSpec::new("c", "desc", |_| serde_json::json!({}))
+                .with_required_fields(vec!["query".to_string(), "limit".to_string()]),
+        );
+        let result = reg.tools_with_required_field("query");
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|t| t.name == "a"));
+        assert!(result.iter().any(|t| t.name == "c"));
+    }
+
+    #[test]
+    fn test_tools_with_required_field_empty_when_no_match() {
+        let mut reg = ToolRegistry::new();
+        reg.register(
+            ToolSpec::new("a", "desc", |_| serde_json::json!({}))
+                .with_required_fields(vec!["x".to_string()]),
+        );
+        assert!(reg.tools_with_required_field("missing").is_empty());
+    }
+
+    #[test]
+    fn test_tools_with_required_field_empty_registry_returns_empty() {
+        let reg = ToolRegistry::new();
+        assert!(reg.tools_with_required_field("any").is_empty());
     }
 }
