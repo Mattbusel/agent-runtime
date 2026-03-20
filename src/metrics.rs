@@ -3196,4 +3196,25 @@ mod tests {
         m.total_sessions.fetch_add(2, Ordering::Relaxed);
         assert!((m.active_session_rate() - 1.0).abs() < 1e-9);
     }
+
+    // ── Round 42: MetricsSnapshot::avg_tool_calls_per_name ────────────────────
+
+    #[test]
+    fn test_avg_tool_calls_per_name_computed_correctly() {
+        let snap = MetricsSnapshot {
+            per_tool_calls: [
+                ("search".to_string(), 6u64),
+                ("write".to_string(), 4u64),
+            ].into_iter().collect(),
+            ..Default::default()
+        };
+        // (6 + 4) / 2 = 5.0
+        assert!((snap.avg_tool_calls_per_name() - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_tool_calls_per_name_zero_when_no_tools() {
+        let snap = MetricsSnapshot::default();
+        assert_eq!(snap.avg_tool_calls_per_name(), 0.0);
+    }
 }

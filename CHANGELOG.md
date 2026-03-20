@@ -11,6 +11,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.61.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::total_observation_count`** — count of steps with non-empty observation strings.
+- **`AgentSession::actions_containing`** — steps whose action contains a given substring.
+- **`AgentSession::step_duration_range_ms`** — `(min, max)` step-duration tuple.
+- **`GraphStore::entities_with_property`** — filter entities by property key presence.
+- **`GraphStore::total_relationship_count`** — total directed-edge count.
+- **`WorkingMemory::shortest_key`** — key with the fewest bytes.
+- **`WorkingMemory::count_below_value_length`** — entries with value shorter than a threshold.
+- **`EpisodicStore::most_recent_episode`** — episode with the latest timestamp.
+- **`ToolRegistry::longest_description_length`** — max description byte length.
+- **`MetricsSnapshot::avg_tool_calls_per_name`** — mean calls per distinct tool name.
+
+---
+
 ## [1.60.0] - 2026-03-20
 
 ### Added

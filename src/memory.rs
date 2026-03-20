@@ -7725,4 +7725,56 @@ mod tests {
         let wm = WorkingMemory::new(10).unwrap();
         assert!(!wm.contains_value("anything").unwrap());
     }
+
+    // ── Round 42: shortest_key, count_below_value_length, most_recent_episode ──
+
+    #[test]
+    fn test_working_memory_shortest_key_returns_shortest() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("abc", "v").unwrap();
+        wm.set("a", "v").unwrap();
+        wm.set("ab", "v").unwrap();
+        assert_eq!(wm.shortest_key().unwrap(), Some("a".to_string()));
+    }
+
+    #[test]
+    fn test_working_memory_shortest_key_returns_none_when_empty() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.shortest_key().unwrap(), None);
+    }
+
+    #[test]
+    fn test_working_memory_count_below_value_length_counts_correctly() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "hi").unwrap();      // 2 bytes
+        wm.set("k2", "hello").unwrap();   // 5 bytes
+        wm.set("k3", "yo").unwrap();      // 2 bytes
+        // strictly less than 5: "hi" and "yo"
+        assert_eq!(wm.count_below_value_length(5).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_working_memory_count_below_value_length_zero_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.count_below_value_length(100).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_episodic_store_most_recent_episode_returns_latest() {
+        use std::thread::sleep;
+        use std::time::Duration;
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "old", 0.5).unwrap();
+        sleep(Duration::from_millis(5));
+        store.add_episode(agent.clone(), "new", 0.5).unwrap();
+        let ep = store.most_recent_episode(&agent).unwrap().unwrap();
+        assert_eq!(ep.content, "new");
+    }
+
+    #[test]
+    fn test_episodic_store_most_recent_episode_returns_none_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        assert!(store.most_recent_episode(&AgentId::new("nobody")).unwrap().is_none());
+    }
 }

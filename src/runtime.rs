@@ -4774,4 +4774,62 @@ mod tests {
         let session = make_session(vec![], 0);
         assert_eq!(session.step_count_below_duration_ms(100), 0);
     }
+
+    // ── Round 42: total_observation_count, actions_containing, step_duration_range_ms
+
+    #[test]
+    fn test_total_observation_count_counts_non_empty_observations() {
+        let steps = vec![
+            make_step("t", "a", "result"),
+            make_step("t", "b", ""),
+            make_step("t", "c", "output"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_observation_count(), 2);
+    }
+
+    #[test]
+    fn test_total_observation_count_zero_when_all_empty() {
+        let steps = vec![make_step("t", "a", ""), make_step("t", "b", "")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_observation_count(), 0);
+    }
+
+    #[test]
+    fn test_actions_containing_returns_matching_steps() {
+        let steps = vec![
+            make_step("t", "search(query)", "r"),
+            make_step("t", "write(data)", "r"),
+            make_step("t", "search(other)", "r"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.actions_containing("search").len(), 2);
+    }
+
+    #[test]
+    fn test_actions_containing_empty_when_no_match() {
+        let steps = vec![make_step("t", "write(x)", "r")];
+        let session = make_session(steps, 0);
+        assert!(session.actions_containing("read").is_empty());
+    }
+
+    #[test]
+    fn test_step_duration_range_ms_returns_min_max() {
+        let mut steps = vec![
+            make_step("t", "a", "o"),
+            make_step("t", "b", "o"),
+            make_step("t", "c", "o"),
+        ];
+        steps[0].step_duration_ms = 10;
+        steps[1].step_duration_ms = 50;
+        steps[2].step_duration_ms = 30;
+        let session = make_session(steps, 0);
+        assert_eq!(session.step_duration_range_ms(), (10, 50));
+    }
+
+    #[test]
+    fn test_step_duration_range_ms_zero_zero_for_empty() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.step_duration_range_ms(), (0, 0));
+    }
 }

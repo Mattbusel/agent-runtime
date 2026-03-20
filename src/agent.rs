@@ -1361,6 +1361,16 @@ impl ToolRegistry {
             .min()
             .unwrap_or(0)
     }
+
+    /// Return the byte length of the longest tool description, or `0` if the
+    /// registry is empty.
+    pub fn longest_description_length(&self) -> usize {
+        self.tools
+            .values()
+            .map(|s| s.description.len())
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 // ── ReActLoop ─────────────────────────────────────────────────────────────────
@@ -4115,5 +4125,22 @@ mod tests {
     fn test_tool_count_with_validators_zero_for_empty_registry() {
         let reg = ToolRegistry::new();
         assert_eq!(reg.tool_count_with_validators(), 0);
+    }
+
+    // ── Round 42: ToolRegistry::longest_description_length ────────────────────
+
+    #[test]
+    fn test_longest_description_length_returns_max_bytes() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("a", "hi", |_| serde_json::json!({}))); // 2
+        reg.register(ToolSpec::new("b", "hello world", |_| serde_json::json!({}))); // 11
+        reg.register(ToolSpec::new("c", "yo", |_| serde_json::json!({}))); // 2
+        assert_eq!(reg.longest_description_length(), 11);
+    }
+
+    #[test]
+    fn test_longest_description_length_zero_for_empty_registry() {
+        let reg = ToolRegistry::new();
+        assert_eq!(reg.longest_description_length(), 0);
     }
 }

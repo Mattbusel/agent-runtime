@@ -5710,4 +5710,39 @@ mod tests {
         let g = GraphStore::new();
         assert!(g.entities_sorted_by_label().unwrap().is_empty());
     }
+
+    // ── Round 42: entities_with_property, total_relationship_count ─────────────
+
+    #[test]
+    fn test_entities_with_property_returns_entities_with_key() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N").with_property("age", serde_json::json!(30))).unwrap();
+        g.add_entity(Entity::new("b", "N").with_property("name", serde_json::json!("bob"))).unwrap();
+        g.add_entity(Entity::new("c", "N").with_property("age", serde_json::json!(25))).unwrap();
+        let result = g.entities_with_property("age").unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|e| e.properties.contains_key("age")));
+    }
+
+    #[test]
+    fn test_entities_with_property_returns_empty_when_no_match() {
+        let g = GraphStore::new();
+        add(&g, "a");
+        assert!(g.entities_with_property("missing_key").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_total_relationship_count_returns_edge_count() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "LIKES", 1.0)).unwrap();
+        assert_eq!(g.total_relationship_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_total_relationship_count_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.total_relationship_count().unwrap(), 0);
+    }
 }
