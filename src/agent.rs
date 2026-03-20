@@ -944,6 +944,11 @@ impl ReActLoop {
         self
     }
 
+    /// Return a read-only reference to the tool registry.
+    pub fn registry(&self) -> &ToolRegistry {
+        &self.registry
+    }
+
     /// Register a tool that the agent loop can invoke.
     pub fn register_tool(&mut self, spec: ToolSpec) {
         self.registry.register(spec);

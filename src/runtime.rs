@@ -96,6 +96,14 @@ impl AgentSession {
         }
     }
 
+    /// Return `true` if the session ended with a `FINAL_ANSWER` action.
+    ///
+    /// This is the normal successful exit from a ReAct loop.  `false` means the
+    /// loop was cut short by a timeout, max-iterations limit, or an error.
+    pub fn is_successful(&self) -> bool {
+        self.final_answer().is_some()
+    }
+
     /// Return the session wall-clock duration as a [`std::time::Duration`].
     pub fn elapsed(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.duration_ms)

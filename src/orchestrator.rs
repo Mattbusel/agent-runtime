@@ -810,6 +810,17 @@ impl Deduplicator {
         Ok(inner.cache.len())
     }
 
+    /// Remove all in-flight entries and cached results.
+    ///
+    /// Useful for test teardown or hard resets.
+    pub fn clear(&self) -> Result<(), AgentRuntimeError> {
+        let mut inner = timed_lock(&self.inner, "Deduplicator::clear");
+        inner.cache.clear();
+        inner.in_flight.clear();
+        inner.cache_order.clear();
+        Ok(())
+    }
+
     /// Eagerly evict all cache entries whose TTL has elapsed.
     ///
     /// Under normal operation expired entries are removed lazily on the next
@@ -936,6 +947,17 @@ impl BackpressureGuard {
                 *depth as f32 / soft as f32
             }
         }
+    }
+
+    /// Return the fraction of the hard capacity currently in use: `depth / capacity`.
+    ///
+    /// Returns `0.0` when no slots are in use, `1.0` when fully saturated.
+    pub fn utilization_ratio(&self) -> Result<f32, AgentRuntimeError> {
+        if self.capacity == 0 {
+            return Ok(0.0);
+        }
+        let depth = self.depth()?;
+        Ok(depth as f32 / self.capacity as f32)
     }
 }
 

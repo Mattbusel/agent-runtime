@@ -971,6 +971,77 @@ impl GraphStore {
         Ok(has_cycle)
     }
 
+    /// Compute a topological ordering of all entities.
+    ///
+    /// Returns the entities sorted so that for every directed edge `(A → B)`,
+    /// `A` appears before `B` in the result.  Uses iterative DFS (post-order).
+    ///
+    /// # Errors
+    /// Returns `Err(AgentRuntimeError::Graph(...))` if the graph contains a cycle.
+    pub fn topological_sort(&self) -> Result<Vec<EntityId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "topological_sort");
+
+        // Three-color DFS: 0=white, 1=gray (in-stack), 2=black (done).
+        let mut color: HashMap<&EntityId, u8> =
+            inner.entities.keys().map(|id| (id, 0u8)).collect();
+        let mut result: Vec<EntityId> = Vec::with_capacity(inner.entities.len());
+
+        for start in inner.entities.keys() {
+            if *color.get(start).unwrap_or(&0) != 0 {
+                continue;
+            }
+            // Stack: (node, adjacency_index, already_pushed_post_order)
+            let mut stack: Vec<(&EntityId, usize, bool)> = vec![(start, 0, false)];
+            *color.entry(start).or_insert(0) = 1;
+
+            while let Some((node, idx, pushed)) = stack.last_mut() {
+                let rels = inner.adjacency.get(*node).map(|v| v.as_slice()).unwrap_or(&[]);
+                if *idx < rels.len() {
+                    let next = &rels[*idx].to;
+                    *idx += 1;
+                    match color.get(next).copied().unwrap_or(0) {
+                        1 => return Err(AgentRuntimeError::Graph(
+                            "topological_sort: graph contains a cycle".into(),
+                        )),
+                        0 => {
+                            *color.entry(next).or_insert(0) = 1;
+                            stack.push((next, 0, false));
+                        }
+                        _ => {} // already finished
+                    }
+                } else {
+                    if !*pushed {
+                        result.push((*node).clone());
+                        *pushed = true;
+                    }
+                    *color.entry(*node).or_insert(0) = 2;
+                    stack.pop();
+                }
+            }
+        }
+
+        result.reverse();
+        Ok(result)
+    }
+
+    /// Update a single property on an existing entity.
+    ///
+    /// Returns `Ok(true)` if the entity was found and updated, `Ok(false)` otherwise.
+    pub fn update_entity_property(
+        &self,
+        id: &EntityId,
+        key: impl Into<String>,
+        value: serde_json::Value,
+    ) -> Result<bool, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "update_entity_property");
+        if let Some(entity) = inner.entities.get_mut(id) {
+            entity.properties.insert(key.into(), value);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Return `true` if there is any path from `from` to `to`.
     ///
     /// Both nodes must exist or returns `Err`. Uses BFS internally.

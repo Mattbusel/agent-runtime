@@ -934,6 +934,53 @@ impl EpisodicStore {
         Ok(matched)
     }
 
+    /// Retrieve a single episode by its `MemoryId`.
+    ///
+    /// Returns `Ok(Some(item))` if found, `Ok(None)` if no episode with that ID
+    /// exists for `agent_id`.
+    pub fn recall_by_id(
+        &self,
+        agent_id: &AgentId,
+        id: &MemoryId,
+    ) -> Result<Option<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::recall_by_id");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|items| items.iter().find(|i| &i.id == id).cloned()))
+    }
+
+    /// Import all episodes from `other` for `agent_id` into this store.
+    ///
+    /// Episodes are appended without deduplication.  Capacity eviction is applied
+    /// per-episode exactly as in [`add_episode`].
+    ///
+    /// [`add_episode`]: EpisodicStore::add_episode
+    pub fn merge_from(
+        &self,
+        other: &EpisodicStore,
+        agent_id: &AgentId,
+    ) -> Result<usize, AgentRuntimeError> {
+        let other_items = {
+            let inner = recover_lock(other.inner.lock(), "EpisodicStore::merge_from:read");
+            inner.items.get(agent_id).cloned().unwrap_or_default()
+        };
+        let count = other_items.len();
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::merge_from:write");
+        inner.purge_stale(agent_id);
+        let cap = inner.per_agent_capacity;
+        let bucket = inner.items.entry(agent_id.clone()).or_default();
+        for item in other_items {
+            if let Some(cap) = cap {
+                while bucket.len() >= cap {
+                    bucket.remove(0);
+                }
+            }
+            bucket.push(item);
+        }
+        Ok(count)
+    }
+
     /// Update the importance score of a specific episode in-place.
     ///
     /// Returns `Ok(true)` if the episode was found and updated, `Ok(false)` if no
@@ -1261,6 +1308,20 @@ impl SemanticStore {
         Ok(scored)
     }
 
+    /// Update the `value` of the first entry whose key matches `key`.
+    ///
+    /// Returns `Ok(true)` if found and updated, `Ok(false)` if not found.
+    pub fn update(&self, key: &str, new_value: impl Into<String>) -> Result<bool, AgentRuntimeError> {
+        let new_value = new_value.into();
+        let mut inner = recover_lock(self.inner.lock(), "SemanticStore::update");
+        if let Some(entry) = inner.entries.iter_mut().find(|e| e.key == key) {
+            entry.value = new_value;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Look up a single entry by its exact key.
     ///
     /// Returns `Ok(Some((value, tags)))` if found, `Ok(None)` if not.
@@ -1431,6 +1492,15 @@ impl WorkingMemory {
     pub fn contains(&self, key: &str) -> Result<bool, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::contains");
         Ok(inner.map.contains_key(key))
+    }
+
+    /// Return the value associated with `key`, or `default` if not set.
+    pub fn get_or_default(
+        &self,
+        key: &str,
+        default: impl Into<String>,
+    ) -> Result<String, AgentRuntimeError> {
+        Ok(self.get(key)?.unwrap_or_else(|| default.into()))
     }
 
     /// Remove a single entry by key.  Returns `true` if the key existed.
