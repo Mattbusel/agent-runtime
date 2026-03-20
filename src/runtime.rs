@@ -1382,6 +1382,47 @@ impl AgentSession {
         self.steps.iter().filter(|s| s.action.is_empty()).collect()
     }
 
+    /// Return `true` if any step's action contains `substr` as a substring.
+    ///
+    /// Returns `false` for an empty session.
+    pub fn has_action_containing(&self, substr: &str) -> bool {
+        self.steps.iter().any(|s| s.action.contains(substr))
+    }
+
+    /// Return the maximum UTF-8 character count among all observation strings.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn max_observation_chars(&self) -> usize {
+        self.steps
+            .iter()
+            .map(|s| s.observation.chars().count())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Return the 0-based index of the step with the longest `thought` by
+    /// character count, or `None` for an empty session.
+    ///
+    /// When multiple steps tie for the longest thought the smallest index wins.
+    pub fn step_index_of_longest_thought(&self) -> Option<usize> {
+        self.steps
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, s)| s.thought.chars().count())
+            .map(|(i, _)| i)
+    }
+
+    /// Return the number of whitespace-delimited words in each observation,
+    /// in step order.
+    ///
+    /// Returns an empty `Vec` for an empty session.
+    pub fn observation_word_counts(&self) -> Vec<usize> {
+        self.steps
+            .iter()
+            .map(|s| s.observation.split_whitespace().count())
+            .collect()
+    }
+
     /// Return `true` if any observation starts with one of the given `prefixes`.
     ///
     /// Returns `false` for an empty session or when no prefix matches.
@@ -1472,6 +1513,41 @@ impl AgentSession {
     /// Returns `0` for an empty session.
     pub fn total_observation_chars(&self) -> usize {
         self.steps.iter().map(|s| s.observation.chars().count()).sum()
+    }
+
+    /// Return the statistical variance of action byte lengths across all steps.
+    ///
+    /// Useful for detecting inconsistent action sizes. Returns `0.0` for a
+    /// session with fewer than two steps or all equal lengths.
+    pub fn action_byte_variance(&self) -> f64 {
+        if self.steps.len() < 2 {
+            return 0.0;
+        }
+        let lengths: Vec<f64> = self.steps.iter().map(|s| s.action.len() as f64).collect();
+        let mean = lengths.iter().sum::<f64>() / lengths.len() as f64;
+        lengths.iter().map(|&l| (l - mean).powi(2)).sum::<f64>() / lengths.len() as f64
+    }
+
+    /// Return the statistical variance of thought byte lengths across all steps.
+    ///
+    /// Returns `0.0` for a session with fewer than two steps.
+    pub fn thought_byte_variance(&self) -> f64 {
+        if self.steps.len() < 2 {
+            return 0.0;
+        }
+        let lengths: Vec<f64> = self.steps.iter().map(|s| s.thought.len() as f64).collect();
+        let mean = lengths.iter().sum::<f64>() / lengths.len() as f64;
+        lengths.iter().map(|&l| (l - mean).powi(2)).sum::<f64>() / lengths.len() as f64
+    }
+
+    /// Return all steps whose `thought` byte length exceeds `min_bytes`.
+    ///
+    /// Returns an empty `Vec` if no step qualifies.
+    pub fn steps_above_thought_bytes(&self, min_bytes: usize) -> Vec<&ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.thought.len() > min_bytes)
+            .collect()
     }
 
     /// Return the 0-based index of the first `FINAL_ANSWER` step, or `None` if
@@ -1683,6 +1759,32 @@ impl AgentSession {
     /// returned.  Returns `None` for an empty session.
     pub fn shortest_observation_step(&self) -> Option<&ReActStep> {
         self.steps.iter().min_by_key(|s| s.observation.len())
+    }
+
+    /// Return the number of distinct observation strings across all steps.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn unique_observation_count(&self) -> usize {
+        self.steps
+            .iter()
+            .map(|s| s.observation.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    }
+
+    /// Return the average number of whitespace-delimited words per thought.
+    ///
+    /// Returns `0.0` for an empty session.
+    pub fn avg_thought_word_count(&self) -> f64 {
+        if self.steps.is_empty() {
+            return 0.0;
+        }
+        let total: usize = self
+            .steps
+            .iter()
+            .map(|s| s.thought.split_whitespace().count())
+            .sum();
+        total as f64 / self.steps.len() as f64
     }
 }
 
@@ -6405,5 +6507,129 @@ mod tests {
     fn test_session_max_iterations_returns_config_value() {
         let rt = AgentRuntime::quick(7, "model");
         assert_eq!(rt.session_max_iterations(), 7);
+    }
+
+    // ── Round 55: has_action_containing, max_observation_chars, step_index_of_longest_thought, observation_word_counts ──
+
+    #[test]
+    fn test_has_action_containing_true_when_substr_matches() {
+        let steps = vec![make_step("t", "search[query]", "obs")];
+        let session = make_session(steps, 0);
+        assert!(session.has_action_containing("search"));
+    }
+
+    #[test]
+    fn test_has_action_containing_false_when_no_match() {
+        let steps = vec![make_step("t", "read_file", "obs")];
+        let session = make_session(steps, 0);
+        assert!(!session.has_action_containing("write"));
+    }
+
+    #[test]
+    fn test_max_observation_chars_returns_longest_observation() {
+        let steps = vec![
+            make_step("t", "a", "hi"),
+            make_step("t", "a", "hello world"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.max_observation_chars(), 11);
+    }
+
+    #[test]
+    fn test_max_observation_chars_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.max_observation_chars(), 0);
+    }
+
+    #[test]
+    fn test_step_index_of_longest_thought_returns_correct_index() {
+        let steps = vec![
+            make_step("short", "a", "o"),
+            make_step("a very long thought string", "a", "o"),
+            make_step("mid", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.step_index_of_longest_thought(), Some(1));
+    }
+
+    #[test]
+    fn test_step_index_of_longest_thought_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.step_index_of_longest_thought(), None);
+    }
+
+    #[test]
+    fn test_observation_word_counts_returns_word_counts_in_order() {
+        let steps = vec![
+            make_step("t", "a", "one two three"),
+            make_step("t", "a", "single"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.observation_word_counts(), vec![3, 1]);
+    }
+
+    // ── Round 49 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_action_byte_variance_zero_for_equal_lengths() {
+        let steps = vec![
+            make_step("t", "abc", "o"),
+            make_step("t", "def", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.action_byte_variance()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_action_byte_variance_nonzero_for_different_lengths() {
+        let steps = vec![
+            make_step("t", "a", "o"),
+            make_step("t", "abcde", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(session.action_byte_variance() > 0.0);
+    }
+
+    #[test]
+    fn test_action_byte_variance_zero_for_single_step() {
+        let steps = vec![make_step("t", "hello", "o")];
+        let session = make_session(steps, 0);
+        assert!((session.action_byte_variance()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_thought_byte_variance_nonzero_for_different_lengths() {
+        let steps = vec![
+            make_step("a", "act", "o"),
+            make_step("abcde", "act", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!(session.thought_byte_variance() > 0.0);
+    }
+
+    #[test]
+    fn test_thought_byte_variance_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!((session.thought_byte_variance()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_steps_above_thought_bytes_filters_correctly() {
+        let steps = vec![
+            make_step("hi", "a", "o"),
+            make_step("hello world", "a", "o"),
+            make_step("x", "a", "o"),
+        ];
+        let session = make_session(steps, 0);
+        let above = session.steps_above_thought_bytes(4);
+        assert_eq!(above.len(), 1);
+        assert_eq!(above[0].thought, "hello world");
+    }
+
+    #[test]
+    fn test_steps_above_thought_bytes_empty_when_none_qualify() {
+        let steps = vec![make_step("hi", "a", "o")];
+        let session = make_session(steps, 0);
+        assert!(session.steps_above_thought_bytes(100).is_empty());
     }
 }

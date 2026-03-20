@@ -848,6 +848,43 @@ impl EpisodicStore {
         Ok(sum / items.len() as f64)
     }
 
+    /// Return a map from each agent ID to their episode count.
+    ///
+    /// Returns an empty map for an empty store.
+    pub fn agent_episode_counts(
+        &self,
+    ) -> Result<std::collections::HashMap<AgentId, usize>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::agent_episode_counts");
+        Ok(inner
+            .items
+            .iter()
+            .map(|(id, items)| (id.clone(), items.len()))
+            .collect())
+    }
+
+    /// Return all episodes for `agent_id` sorted by importance descending
+    /// (most important first).
+    ///
+    /// Returns an empty `Vec` for an unknown agent.
+    pub fn episodes_for_agent_sorted_by_importance(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "EpisodicStore::episodes_for_agent_sorted_by_importance");
+        let mut items: Vec<MemoryItem> = inner
+            .items
+            .get(agent_id)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default();
+        items.sort_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(items)
+    }
+
     /// Return the number of episodes stored for the given agent.
     ///
     /// Returns `0` if the agent has no recorded episodes.
@@ -1108,6 +1145,25 @@ impl EpisodicStore {
     pub fn agent_ids(&self) -> Result<Vec<AgentId>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "EpisodicStore::agent_ids");
         Ok(inner.items.keys().cloned().collect())
+    }
+
+    /// Return agent IDs that have more than `min_count` episodes stored.
+    ///
+    /// Useful for identifying high-activity agents in a shared store.
+    pub fn agents_with_episodes_above_count(
+        &self,
+        min_count: usize,
+    ) -> Result<Vec<AgentId>, AgentRuntimeError> {
+        let inner = recover_lock(
+            self.inner.lock(),
+            "EpisodicStore::agents_with_episodes_above_count",
+        );
+        Ok(inner
+            .items
+            .iter()
+            .filter(|(_, episodes)| episodes.len() > min_count)
+            .map(|(id, _)| id.clone())
+            .collect())
     }
 
     /// Return all episodes for `agent_id` whose `content` contains `pattern`
@@ -2596,6 +2652,25 @@ impl EpisodicStore {
             .get(agent_id)
             .map_or(0, |items| items.iter().filter(|m| m.has_tag(tag)).count()))
     }
+
+    /// Return all episodes for `agent_id` whose `importance` is strictly below
+    /// `threshold`.
+    ///
+    /// Returns an empty `Vec` for unknown agents or when no episode qualifies.
+    pub fn episodes_below_importance(
+        &self,
+        agent_id: &AgentId,
+        threshold: f32,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "EpisodicStore::episodes_below_importance");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or_else(Vec::new, |items| {
+                items.iter().filter(|m| m.importance < threshold).cloned().collect()
+            }))
+    }
 }
 
 impl Default for EpisodicStore {
@@ -3880,6 +3955,30 @@ impl WorkingMemory {
         Ok(keys)
     }
 
+    /// Return all values in the store, sorted alphabetically.
+    ///
+    /// Useful for deterministic comparison in tests and diagnostics.
+    /// Returns an empty `Vec` for an empty store.
+    pub fn all_values_sorted(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::all_values_sorted");
+        let mut values: Vec<String> = inner.map.values().cloned().collect();
+        values.sort_unstable();
+        Ok(values)
+    }
+
+    /// Return the keys whose stored value begins with `prefix`.
+    ///
+    /// Returns an empty `Vec` when no value matches.
+    pub fn keys_with_value_prefix(&self, prefix: &str) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::keys_with_value_prefix");
+        Ok(inner
+            .map
+            .iter()
+            .filter(|(_, v)| v.starts_with(prefix))
+            .map(|(k, _)| k.clone())
+            .collect())
+    }
+
     /// Return the number of key-value pairs currently stored.
     pub fn key_count(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::key_count");
@@ -3898,6 +3997,25 @@ impl WorkingMemory {
             .get(key)
             .map(|v| v.clone())
             .unwrap_or_else(|| default.to_string()))
+    }
+
+    /// Return all `(key, value)` pairs whose key starts with `prefix`,
+    /// sorted alphabetically by key.
+    ///
+    /// Returns an empty `Vec` for an empty store or when no key matches.
+    pub fn entries_with_key_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, String)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::entries_with_key_prefix");
+        let mut entries: Vec<(String, String)> = inner
+            .map
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(entries)
     }
 
     /// Return a histogram of value byte lengths bucketed by `bucket_size`.
@@ -4349,6 +4467,23 @@ impl WorkingMemory {
             .values()
             .min_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)))
             .cloned())
+    }
+
+    /// Return all keys whose stored value exactly equals `value`, sorted
+    /// alphabetically.
+    ///
+    /// Returns an empty `Vec` when no key has that value or the store is empty.
+    pub fn keys_with_value_equal_to(&self, value: &str) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "WorkingMemory::keys_with_value_equal_to");
+        let mut keys: Vec<String> = inner
+            .map
+            .iter()
+            .filter(|(_, v)| v.as_str() == value)
+            .map(|(k, _)| k.clone())
+            .collect();
+        keys.sort_unstable();
+        Ok(keys)
     }
 }
 
@@ -9542,5 +9677,95 @@ mod tests {
     fn test_value_for_key_or_default_returns_default_when_absent() {
         let wm = WorkingMemory::new(10).unwrap();
         assert_eq!(wm.value_for_key_or_default("missing", "fallback").unwrap(), "fallback");
+    }
+
+    // ── Round 55: agent_episode_counts, episodes_for_agent_sorted_by_importance, entries_with_key_prefix ──
+
+    #[test]
+    fn test_agent_episode_counts_returns_correct_counts() {
+        let store = EpisodicStore::new();
+        let a1 = AgentId::new("r55-aec-1");
+        let a2 = AgentId::new("r55-aec-2");
+        store.add_episode(a1.clone(), "ep1", 0.5).unwrap();
+        store.add_episode(a1.clone(), "ep2", 0.7).unwrap();
+        store.add_episode(a2.clone(), "ep3", 0.3).unwrap();
+        let counts = store.agent_episode_counts().unwrap();
+        assert_eq!(counts.get(&a1).copied(), Some(2));
+        assert_eq!(counts.get(&a2).copied(), Some(1));
+    }
+
+    #[test]
+    fn test_agent_episode_counts_empty_for_empty_store() {
+        let store = EpisodicStore::new();
+        assert!(store.agent_episode_counts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_episodes_for_agent_sorted_by_importance_descending() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r55-esbi-1");
+        store.add_episode(agent.clone(), "low", 0.2).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        store.add_episode(agent.clone(), "mid", 0.5).unwrap();
+        let sorted = store.episodes_for_agent_sorted_by_importance(&agent).unwrap();
+        assert_eq!(sorted[0].importance, 0.9);
+        assert_eq!(sorted[2].importance, 0.2);
+    }
+
+    #[test]
+    fn test_entries_with_key_prefix_returns_matching_pairs() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("cfg_host", "localhost").unwrap();
+        wm.set("cfg_port", "8080").unwrap();
+        wm.set("debug_mode", "true").unwrap();
+        let entries = wm.entries_with_key_prefix("cfg_").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, "cfg_host");
+        assert_eq!(entries[1].0, "cfg_port");
+    }
+
+    #[test]
+    fn test_entries_with_key_prefix_empty_when_no_match() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("data_x", "v").unwrap();
+        assert!(wm.entries_with_key_prefix("cfg_").unwrap().is_empty());
+    }
+
+    // ── Round 54 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_episodes_below_importance_filters_correctly() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a1");
+        store.add_episode(agent.clone(), "low", 0.2).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        let low = store.episodes_below_importance(&agent, 0.5).unwrap();
+        assert_eq!(low.len(), 1);
+        assert_eq!(low[0].content, "low");
+    }
+
+    #[test]
+    fn test_episodes_below_importance_empty_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("unknown");
+        assert!(store.episodes_below_importance(&agent, 0.5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_keys_with_value_equal_to_returns_correct_keys() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "hello").unwrap();
+        wm.set("k2", "world").unwrap();
+        wm.set("k3", "hello").unwrap();
+        let mut keys = wm.keys_with_value_equal_to("hello").unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["k1", "k3"]);
+    }
+
+    #[test]
+    fn test_keys_with_value_equal_to_empty_when_no_match() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "hello").unwrap();
+        assert!(wm.keys_with_value_equal_to("world").unwrap().is_empty());
     }
 }

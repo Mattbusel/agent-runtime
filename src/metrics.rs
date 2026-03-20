@@ -1013,6 +1013,29 @@ impl MetricsSnapshot {
         let total_failures: u64 = self.per_tool_failures.values().sum();
         total_failures as f64 / count as f64
     }
+
+    /// Return the names of tools whose failure ratio (failures / calls) exceeds
+    /// `threshold`, sorted alphabetically.
+    ///
+    /// Returns an empty `Vec` when no tool exceeds the threshold or when no
+    /// tool calls have been recorded.
+    pub fn tools_above_failure_ratio(&self, threshold: f64) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .per_tool_calls
+            .keys()
+            .filter(|name| {
+                let calls = self.tool_call_count(name);
+                if calls == 0 {
+                    return false;
+                }
+                let failures = self.tool_failure_count(name);
+                failures as f64 / calls as f64 > threshold
+            })
+            .cloned()
+            .collect();
+        names.sort_unstable();
+        names
+    }
 }
 
 impl std::fmt::Display for MetricsSnapshot {
@@ -1602,6 +1625,18 @@ impl RuntimeMetrics {
         self.memory_recall_count() as f64 / calls as f64
     }
 
+    /// Return the fraction of completed steps that recorded at least one tool
+    /// failure.  Computed as `failed_tool_calls / total_steps`.
+    ///
+    /// Returns `0.0` when no steps have been recorded.
+    pub fn step_failure_rate(&self) -> f64 {
+        let steps = self.total_steps.load(std::sync::atomic::Ordering::Relaxed);
+        if steps == 0 {
+            return 0.0;
+        }
+        self.failed_tool_calls() as f64 / steps as f64
+    }
+
     /// Return the top `n` tools by total call count, sorted descending.
     ///
     /// Returns fewer than `n` entries if fewer tools have been called.
@@ -1630,6 +1665,18 @@ impl RuntimeMetrics {
     /// Return the sum of all recorded step latencies in milliseconds.
     pub fn total_step_latency_ms(&self) -> u64 {
         self.step_latency.sum_ms()
+    }
+
+    /// Return the average number of tool calls per recorded step.
+    ///
+    /// Returns `0.0` when no steps have been recorded to avoid division by
+    /// zero.
+    pub fn avg_calls_per_step(&self) -> f64 {
+        let steps = self.total_steps.load(Ordering::Relaxed);
+        if steps == 0 {
+            return 0.0;
+        }
+        self.total_tool_calls.load(Ordering::Relaxed) as f64 / steps as f64
     }
 
     /// Return the ratio of memory recall events to total steps recorded.
@@ -4083,5 +4130,65 @@ mod tests {
     fn test_sessions_per_step_zero_when_no_steps() {
         let m = RuntimeMetrics::new();
         assert_eq!(m.sessions_per_step(), 0.0);
+    }
+
+    // ── Round 55: step_failure_rate ────────────────────────────────────────────
+
+    #[test]
+    fn test_step_failure_rate_returns_ratio() {
+        let m = RuntimeMetrics::new();
+        m.total_steps.store(4, std::sync::atomic::Ordering::Relaxed);
+        m.record_tool_failure("a");
+        m.record_tool_failure("b");
+        assert_eq!(m.step_failure_rate(), 0.5);
+    }
+
+    #[test]
+    fn test_step_failure_rate_zero_when_no_steps() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.step_failure_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_step_failure_rate_zero_when_no_failures() {
+        let m = RuntimeMetrics::new();
+        m.total_steps.store(3, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(m.step_failure_rate(), 0.0);
+    }
+
+    // ── Round 49 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_avg_calls_per_step_correct_ratio() {
+        use std::sync::atomic::Ordering;
+        let m = RuntimeMetrics::new();
+        m.total_steps.store(4, Ordering::Relaxed);
+        m.total_tool_calls.store(8, Ordering::Relaxed);
+        assert!((m.avg_calls_per_step() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_calls_per_step_zero_when_no_steps() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.avg_calls_per_step(), 0.0);
+    }
+
+    // ── Round 54 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tools_above_failure_ratio_returns_failing_tools() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        m.record_tool_failure("search");
+        m.record_tool_call("write");
+        // search ratio = 1.0, write ratio = 0.0
+        let above = m.snapshot().tools_above_failure_ratio(0.5);
+        assert_eq!(above, vec!["search"]);
+    }
+
+    #[test]
+    fn test_tools_above_failure_ratio_empty_when_no_calls() {
+        let m = RuntimeMetrics::new();
+        assert!(m.snapshot().tools_above_failure_ratio(0.1).is_empty());
     }
 }
