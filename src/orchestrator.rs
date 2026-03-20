@@ -181,6 +181,14 @@ impl RetryPolicy {
         matches!(self.kind, RetryKind::Constant)
     }
 
+    /// Return the configured base delay in milliseconds.
+    ///
+    /// For constant policies this equals every per-retry delay.  For
+    /// exponential policies this is the delay before the first retry.
+    pub fn base_delay_ms(&self) -> u64 {
+        self.base_delay.as_millis() as u64
+    }
+
     /// Return a copy of this policy with the base delay changed to `ms` milliseconds.
     ///
     /// # Errors
@@ -1007,6 +1015,17 @@ impl Deduplicator {
         Ok(inner.in_flight.is_empty())
     }
 
+    /// Return `true` if `key` is currently in-flight or has a cached result.
+    ///
+    /// Unlike [`check_and_register`] this is a read-only inspection — it does
+    /// not register the key or consume a deduplication slot.
+    ///
+    /// [`check_and_register`]: Deduplicator::check_and_register
+    pub fn contains(&self, key: &str) -> Result<bool, AgentRuntimeError> {
+        let inner = timed_lock(&self.inner, "Deduplicator::contains");
+        Ok(inner.in_flight.contains_key(key) || inner.cache.contains_key(key))
+    }
+
     /// Remove all in-flight entries and cached results.
     ///
     /// Useful for test teardown or hard resets.
@@ -1175,6 +1194,15 @@ impl BackpressureGuard {
     pub fn depth(&self) -> Result<usize, AgentRuntimeError> {
         let depth = timed_lock(&self.inner, "BackpressureGuard::depth");
         Ok(*depth)
+    }
+
+    /// Return the current depth as a percentage of the hard capacity.
+    ///
+    /// Returns a value in `[0.0, 100.0]`.  When `depth > capacity` (which
+    /// cannot happen in normal operation) the result is clamped to `100.0`.
+    pub fn percent_full(&self) -> Result<f64, AgentRuntimeError> {
+        let depth = self.depth()?;
+        Ok((depth as f64 / self.capacity as f64 * 100.0).min(100.0))
     }
 
     /// Return the ratio of current depth to soft capacity as a value in `[0.0, ∞)`.
@@ -1350,6 +1378,16 @@ impl Pipeline {
     /// Returns `None` if no stage with that name exists.
     pub fn stage_index(&self, name: &str) -> Option<usize> {
         self.stages.iter().position(|s| s.name == name)
+    }
+
+    /// Return the name of the first stage in the pipeline, or `None` if empty.
+    pub fn first_stage_name(&self) -> Option<&str> {
+        self.stages.first().map(|s| s.name.as_str())
+    }
+
+    /// Return the name of the last stage in the pipeline, or `None` if empty.
+    pub fn last_stage_name(&self) -> Option<&str> {
+        self.stages.last().map(|s| s.name.as_str())
     }
 
     /// Remove the first stage whose name equals `name`.
@@ -2453,5 +2491,43 @@ mod tests {
             .with_soft_limit(5)
             .unwrap();
         assert!(g.is_soft_limited());
+    }
+
+    // ── Round 12: RetryPolicy::base_delay_ms, BackpressureGuard::percent_full ─
+
+    #[test]
+    fn test_retry_policy_base_delay_ms_exponential() {
+        let p = RetryPolicy::exponential(3, 250).unwrap();
+        assert_eq!(p.base_delay_ms(), 250);
+    }
+
+    #[test]
+    fn test_retry_policy_base_delay_ms_constant() {
+        let p = RetryPolicy::constant(5, 100).unwrap();
+        assert_eq!(p.base_delay_ms(), 100);
+    }
+
+    #[test]
+    fn test_retry_policy_base_delay_ms_none_is_zero() {
+        let p = RetryPolicy::none();
+        assert_eq!(p.base_delay_ms(), 0);
+    }
+
+    #[test]
+    fn test_backpressure_percent_full_zero_when_empty() {
+        let g = BackpressureGuard::new(100).unwrap();
+        let pct = g.percent_full().unwrap();
+        assert!((pct - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_backpressure_percent_full_capped_at_100() {
+        let g = BackpressureGuard::new(10).unwrap();
+        // Fill all slots via try_acquire
+        for _ in 0..10 {
+            g.try_acquire().unwrap();
+        }
+        let pct = g.percent_full().unwrap();
+        assert!((pct - 100.0).abs() < 1e-9);
     }
 }

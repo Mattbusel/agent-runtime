@@ -195,6 +195,14 @@ impl LatencyHistogram {
         None
     }
 
+    /// Return the spread (max − min) of recorded latencies in milliseconds.
+    ///
+    /// Returns `None` if no samples have been recorded.  A narrow range
+    /// indicates consistent latency; a wide range suggests outliers.
+    pub fn range_ms(&self) -> Option<u64> {
+        Some(self.max_ms()?.saturating_sub(self.min_ms()?))
+    }
+
     /// Return the 50th-percentile (median) latency in milliseconds.
     pub fn p50(&self) -> u64 {
         self.percentile(0.50)
@@ -1467,5 +1475,60 @@ mod tests {
         m.total_tool_calls.fetch_add(4, Ordering::Relaxed);
         m.failed_tool_calls.fetch_add(4, Ordering::Relaxed);
         assert!(m.tool_success_rate().abs() < 1e-9);
+    }
+
+    // ── Round 12: step_latency_p50/p99, LatencyHistogram::range_ms ───────────
+
+    #[test]
+    fn test_step_latency_p50_zero_when_empty() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.step_latency_p50(), 0);
+    }
+
+    #[test]
+    fn test_step_latency_p99_zero_when_empty() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.step_latency_p99(), 0);
+    }
+
+    #[test]
+    fn test_step_latency_p50_after_recording() {
+        let m = RuntimeMetrics::new();
+        for _ in 0..10 {
+            m.step_latency.record(100);
+        }
+        assert!(m.step_latency_p50() > 0);
+    }
+
+    #[test]
+    fn test_step_latency_p99_gte_p50() {
+        let m = RuntimeMetrics::new();
+        for v in [10, 20, 30, 40, 500] {
+            m.step_latency.record(v);
+        }
+        assert!(m.step_latency_p99() >= m.step_latency_p50());
+    }
+
+    #[test]
+    fn test_latency_histogram_range_ms_none_when_empty() {
+        let h = LatencyHistogram::default();
+        assert!(h.range_ms().is_none());
+    }
+
+    #[test]
+    fn test_latency_histogram_range_ms_some_for_single_sample() {
+        let h = LatencyHistogram::default();
+        h.record(100);
+        // min/max are both derived from bucket boundaries, range is Some
+        assert!(h.range_ms().is_some());
+    }
+
+    #[test]
+    fn test_latency_histogram_range_ms_positive_for_spread() {
+        let h = LatencyHistogram::default();
+        h.record(10);
+        h.record(1000);
+        let range = h.range_ms().unwrap();
+        assert!(range > 0, "range should be > 0 for spread samples, got {range}");
     }
 }
