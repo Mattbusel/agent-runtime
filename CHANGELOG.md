@@ -11,6 +11,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.62.0] - 2026-03-20
+
+### Added
+
+- **`Pipeline::stages_after`** — stages appearing after a named stage.
+- **`Pipeline::stage_pairs`** — consecutive stage name pairs in pipeline order.
+- **`Pipeline::stage_position_from_end`** — reverse index of a stage (0 = last).
+- **`Pipeline::contains_all_stages`** — check if all given stage names exist.
+- **`AgentSession::count_unique_thoughts`** — distinct thought strings count.
+- **`AgentSession::steps_with_empty_thoughts`** — steps with no thought text.
+- **`GraphStore::entities_without_outgoing`** — nodes with zero out-degree.
+- **`GraphStore::entities_without_incoming`** — nodes with zero in-degree.
+- **`EpisodicStore::most_recalled_episode`** — episode with the highest recall count.
+- **`MetricsSnapshot::tool_call_count_above`** — tools with more than N calls.
+- **`WorkingMemory::value_for_shortest_key`** — value of the shortest-key entry.
+- **`ToolRegistry::tools_with_required_field`** — tools that declare a specific required field.
+- **Fixed**: `WorkingMemory::get_or_insert` — corrected capacity check to use outer field instead of non-existent inner field.
+
+---
+
 ## [1.61.0] - 2026-03-20
 
 ### Added
