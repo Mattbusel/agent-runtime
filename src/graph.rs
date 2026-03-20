@@ -7166,4 +7166,43 @@ mod tests {
         let g = GraphStore::new();
         assert!(g.entities_with_no_relationships().unwrap().is_empty());
     }
+
+    // ── Round 54: entity_ids_sorted, relationship_count_for ───────────────────
+
+    #[test]
+    fn test_entity_ids_sorted_returns_alphabetical_ids() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("zebra", "N")).unwrap();
+        g.add_entity(Entity::new("alpha", "N")).unwrap();
+        g.add_entity(Entity::new("mango", "N")).unwrap();
+        let ids = g.entity_ids_sorted().unwrap();
+        assert_eq!(ids[0].0, "alpha");
+        assert_eq!(ids[1].0, "mango");
+        assert_eq!(ids[2].0, "zebra");
+    }
+
+    #[test]
+    fn test_entity_ids_sorted_empty_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(g.entity_ids_sorted().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_relationship_count_for_returns_out_degree() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "k", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "k", 1.0)).unwrap();
+        let a_id = EntityId("a".to_string());
+        assert_eq!(g.relationship_count_for(&a_id).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_relationship_count_for_zero_for_unknown_entity() {
+        let g = GraphStore::new();
+        let id = EntityId("unknown".to_string());
+        assert_eq!(g.relationship_count_for(&id).unwrap(), 0);
+    }
 }
