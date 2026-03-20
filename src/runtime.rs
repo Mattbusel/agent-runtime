@@ -5715,4 +5715,40 @@ mod tests {
         let session = make_session(steps, 0);
         assert!(session.step_indices_with_tool("search").is_empty());
     }
+
+    // ── Round 49: observations_above_bytes, total_step_chars ──────────────────
+
+    #[test]
+    fn test_observations_above_bytes_returns_matching_steps() {
+        let steps = vec![
+            make_step("t", "a", "hi"),        // obs len=2
+            make_step("t", "a", "hello world"), // obs len=11
+        ];
+        let session = make_session(steps, 0);
+        let result = session.observations_above_bytes(5);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].observation, "hello world");
+    }
+
+    #[test]
+    fn test_observations_above_bytes_empty_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.observations_above_bytes(0).is_empty());
+    }
+
+    #[test]
+    fn test_total_step_chars_sums_all_fields() {
+        let steps = vec![
+            make_step("ab", "cd", "ef"), // 2+2+2=6
+            make_step("x", "y", "z"),    // 1+1+1=3
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_step_chars(), 9);
+    }
+
+    #[test]
+    fn test_total_step_chars_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.total_step_chars(), 0);
+    }
 }
