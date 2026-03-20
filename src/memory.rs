@@ -5611,4 +5611,97 @@ mod tests {
         assert!(mem.set_if_absent("k", "v1").unwrap());
         assert!(!mem.set_if_absent("k", "v2").unwrap());
     }
+
+    // ── Round 24: MemoryItem helpers, DecayPolicy, export/bump ───────────────
+
+    #[test]
+    fn test_memory_item_has_tag_true_when_tag_present() {
+        let item = MemoryItem::new(
+            AgentId::new("a"),
+            "content",
+            0.5,
+            vec!["important".to_string(), "work".to_string()],
+        );
+        assert!(item.has_tag("important"));
+        assert!(item.has_tag("work"));
+    }
+
+    #[test]
+    fn test_memory_item_has_tag_false_when_tag_absent() {
+        let item = MemoryItem::new(AgentId::new("a"), "content", 0.5, vec![]);
+        assert!(!item.has_tag("missing"));
+    }
+
+    #[test]
+    fn test_memory_item_word_count_counts_words() {
+        let item = MemoryItem::new(AgentId::new("a"), "one two three", 0.5, vec![]);
+        assert_eq!(item.word_count(), 3);
+    }
+
+    #[test]
+    fn test_memory_item_word_count_zero_for_empty_content() {
+        let item = MemoryItem::new(AgentId::new("a"), "", 0.5, vec![]);
+        assert_eq!(item.word_count(), 0);
+    }
+
+    #[test]
+    fn test_decay_policy_apply_reduces_importance_after_one_half_life() {
+        let policy = DecayPolicy::exponential(1.0).unwrap(); // half-life 1 hour
+        let decayed = policy.apply(1.0, 1.0); // after 1 hour, should be ~0.5
+        assert!((decayed - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_decay_policy_apply_no_change_for_zero_age() {
+        let policy = DecayPolicy::exponential(10.0).unwrap();
+        let decayed = policy.apply(0.8, 0.0);
+        assert!((decayed - 0.8).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_decay_policy_decay_item_reduces_importance_for_old_item() {
+        let policy = DecayPolicy::exponential(0.0001).unwrap(); // very short half-life
+        let mut item = MemoryItem::new(AgentId::new("a"), "old memory", 1.0, vec![]);
+        item.timestamp = Utc::now() - chrono::Duration::hours(1);
+        policy.decay_item(&mut item);
+        assert!(item.importance < 1.0);
+    }
+
+    #[test]
+    fn test_episodic_export_returns_empty_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("ghost");
+        let exported = store.export_agent_memory(&agent).unwrap();
+        assert!(exported.is_empty());
+    }
+
+    #[test]
+    fn test_episodic_export_returns_all_stored_items() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "memory1", 0.9).unwrap();
+        store.add_episode(agent.clone(), "memory2", 0.5).unwrap();
+        let exported = store.export_agent_memory(&agent).unwrap();
+        assert_eq!(exported.len(), 2);
+    }
+
+    #[test]
+    fn test_bump_recall_count_increases_by_amount() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "the content", 0.7).unwrap();
+        store.bump_recall_count_by_content("the content", 5);
+        let max = store.max_recall_count_for(&agent).unwrap().unwrap();
+        assert_eq!(max, 5);
+    }
+
+    #[test]
+    fn test_bump_recall_count_no_effect_for_absent_content() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "existing", 0.5).unwrap();
+        store.bump_recall_count_by_content("not here", 10);
+        let max = store.max_recall_count_for(&agent).unwrap().unwrap();
+        assert_eq!(max, 0);
+    }
 }
