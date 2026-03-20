@@ -925,6 +925,29 @@ impl EpisodicStore {
         Ok(matched)
     }
 
+    /// Update the importance score of a specific episode in-place.
+    ///
+    /// Returns `Ok(true)` if the episode was found and updated, `Ok(false)` if no
+    /// episode with that `id` exists for `agent_id`.
+    ///
+    /// `new_importance` is clamped to `[0.0, 1.0]`.
+    pub fn update_importance(
+        &self,
+        agent_id: &AgentId,
+        id: &MemoryId,
+        new_importance: f32,
+    ) -> Result<bool, AgentRuntimeError> {
+        let importance = new_importance.clamp(0.0, 1.0);
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::update_importance");
+        if let Some(items) = inner.items.get_mut(agent_id) {
+            if let Some(item) = items.iter_mut().find(|i| &i.id == id) {
+                item.importance = importance;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Return the total number of stored episodes across all agents.
     pub fn len(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "EpisodicStore::len");
@@ -1233,6 +1256,18 @@ impl SemanticStore {
         Ok(())
     }
 
+    /// Return all unique tags present across all stored entries, in sorted order.
+    pub fn list_tags(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::list_tags");
+        let mut tags: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for entry in &inner.entries {
+            for tag in &entry.tags {
+                tags.insert(tag.clone());
+            }
+        }
+        Ok(tags.into_iter().collect())
+    }
+
     /// Return the total number of stored entries.
     pub fn len(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::len");
@@ -1358,6 +1393,12 @@ impl WorkingMemory {
             inner.map.insert(key, value);
         }
         Ok(())
+    }
+
+    /// Return `true` if a value is stored under `key`.
+    pub fn contains(&self, key: &str) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::contains");
+        Ok(inner.map.contains_key(key))
     }
 
     /// Remove a single entry by key.  Returns `true` if the key existed.

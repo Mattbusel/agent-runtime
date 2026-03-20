@@ -530,6 +530,27 @@ impl InMemoryToolCache {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Return `true` if a cached result exists for `(tool_name, args)`.
+    pub fn contains(&self, tool_name: &str, args: &serde_json::Value) -> bool {
+        let key = (tool_name.to_owned(), args.to_string());
+        self.inner
+            .lock()
+            .map(|s| s.map.contains_key(&key))
+            .unwrap_or(false)
+    }
+
+    /// Remove the cached result for `(tool_name, args)`.  Returns `true` if found.
+    pub fn remove(&self, tool_name: &str, args: &serde_json::Value) -> bool {
+        let key = (tool_name.to_owned(), args.to_string());
+        if let Ok(mut inner) = self.inner.lock() {
+            if inner.map.remove(&key).is_some() {
+                inner.order.retain(|k| k != &key);
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl Default for InMemoryToolCache {
@@ -725,6 +746,11 @@ impl ToolRegistry {
         }
 
         Ok(result)
+    }
+
+    /// Look up a registered tool by name.  Returns `None` if not registered.
+    pub fn get(&self, name: &str) -> Option<&ToolSpec> {
+        self.tools.get(name)
     }
 
     /// Return the list of registered tool names.

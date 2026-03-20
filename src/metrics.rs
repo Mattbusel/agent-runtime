@@ -129,6 +129,38 @@ impl LatencyHistogram {
             .collect()
     }
 
+    /// Return the minimum recorded latency in ms, or `None` if no samples.
+    pub fn min_ms(&self) -> Option<u64> {
+        let total = self.total_count.load(Ordering::Relaxed);
+        if total == 0 {
+            return None;
+        }
+        // Walk buckets from the fastest; the first non-empty bucket's lower
+        // bound is 0 (or the previous bound), so return the upper bound as
+        // the conservative minimum estimate.
+        for (i, bucket) in self.buckets.iter().enumerate() {
+            if bucket.load(Ordering::Relaxed) > 0 {
+                return Some(if i == 0 { 0 } else { Self::BOUNDS[i - 1] + 1 });
+            }
+        }
+        None
+    }
+
+    /// Return the maximum recorded latency in ms, or `None` if no samples.
+    pub fn max_ms(&self) -> Option<u64> {
+        let total = self.total_count.load(Ordering::Relaxed);
+        if total == 0 {
+            return None;
+        }
+        // Walk from the slowest bucket; return the upper bound of the last non-empty bucket.
+        for (i, bucket) in self.buckets.iter().enumerate().rev() {
+            if bucket.load(Ordering::Relaxed) > 0 {
+                return Some(Self::BOUNDS[i]);
+            }
+        }
+        None
+    }
+
     /// Reset all histogram counters to zero.
     pub fn reset(&self) {
         self.total_count.store(0, Ordering::Relaxed);
@@ -192,6 +224,25 @@ impl MetricsSnapshot {
             per_agent_tool_calls: after.per_agent_tool_calls.clone(),
             per_agent_tool_failures: after.per_agent_tool_failures.clone(),
         }
+    }
+}
+
+impl std::fmt::Display for MetricsSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "MetricsSnapshot {{ sessions: active={} total={}, steps={}, \
+             tool_calls={} (failed={}), backpressure_shed={}, \
+             memory_recalls={}, latency_mean={:.1}ms }}",
+            self.active_sessions,
+            self.total_sessions,
+            self.total_steps,
+            self.total_tool_calls,
+            self.failed_tool_calls,
+            self.backpressure_shed_count,
+            self.memory_recall_count,
+            self.step_latency_mean_ms,
+        )
     }
 }
 

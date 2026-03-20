@@ -1159,6 +1159,40 @@ impl GraphStore {
         Ok(())
     }
 
+    /// Return the `Entity` objects for all direct out-neighbors of `id`.
+    ///
+    /// Neighbors are the targets of all outgoing relationships from `id`.
+    /// Entities that no longer exist (orphan edge targets) are silently skipped.
+    pub fn neighbor_entities(&self, id: &EntityId) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "neighbor_entities");
+        let neighbors: Vec<Entity> = inner
+            .adjacency
+            .get(id)
+            .iter()
+            .flat_map(|rels| rels.iter())
+            .filter_map(|r| inner.entities.get(&r.to).cloned())
+            .collect();
+        Ok(neighbors)
+    }
+
+    /// Remove **all** relationships where `id` is the source (outgoing edges).
+    ///
+    /// Also updates the adjacency index.  Does **not** remove incoming edges
+    /// from other nodes that point to `id` — use this before [`remove_entity`]
+    /// to ensure consistent graph state.
+    ///
+    /// Returns the number of relationships removed.
+    ///
+    /// [`remove_entity`]: GraphStore::remove_entity
+    pub fn remove_all_relationships_for(&self, id: &EntityId) -> Result<usize, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "remove_all_relationships_for");
+        inner.adjacency.remove(id);
+        let before = inner.relationships.len();
+        inner.relationships.retain(|r| &r.from != id);
+        inner.cycle_cache = None;
+        Ok(before - inner.relationships.len())
+    }
+
     /// Check whether an entity with the given ID exists.
     pub fn entity_exists(&self, id: &EntityId) -> Result<bool, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "entity_exists");

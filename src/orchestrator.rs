@@ -462,6 +462,16 @@ impl CircuitBreaker {
         }
     }
 
+    /// Force the circuit back to `Closed` state, resetting all failure counters.
+    ///
+    /// Useful for tests and manual operator recovery.  Under normal operation
+    /// the circuit closes automatically after a successful `HalfOpen` probe.
+    pub fn reset(&self) {
+        self.backend.reset_failures(&self.service);
+        self.backend.clear_open_at(&self.service);
+        tracing::info!("circuit manually reset to Closed for {}", self.service);
+    }
+
     /// Execute an async fallible operation under the circuit breaker using an
     /// [`AsyncCircuitBreakerBackend`].
     ///
