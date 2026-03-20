@@ -11,6 +11,31 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.27.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::first_thought`** (`runtime.rs`) — thought string from the
+  first step; `None` for empty sessions.
+- **`AgentSession::last_thought`** (`runtime.rs`) — thought string from the
+  last step; complements `first_thought`.
+- **`GraphStore::out_degree_for`** (`graph.rs`) — outgoing edge count for a
+  single entity; symmetric counterpart to `in_degree_for`.
+- **`GraphStore::predecessors`** (`graph.rs`) — return all entities with a
+  directed edge pointing to the given node (incoming neighbors).
+- **`GraphStore::is_source`** (`graph.rs`) — `true` when the entity has no
+  incoming edges; identifies DAG root nodes.
+- **`BackpressureGuard::percent_full`** (`orchestrator.rs`) — current depth as
+  a percentage of hard capacity; clamped to `[0.0, 100.0]`.
+- **`RetryPolicy::base_delay_ms`** (`orchestrator.rs`) — getter for the
+  configured base delay in milliseconds; complements `with_base_delay_ms`.
+- **`LatencyHistogram::range_ms`** (`metrics.rs`) — max − min latency spread;
+  `None` when no samples recorded.
+- **`ToolRegistry::all_tool_names`** (`agent.rs`) — sorted alphabetical list of
+  all registered tool names; deterministic for diagnostics and help text.
+
+---
+
 ## [1.26.0] - 2026-03-20
 
 ### Added

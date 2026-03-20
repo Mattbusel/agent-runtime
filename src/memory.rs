@@ -847,6 +847,19 @@ impl EpisodicStore {
             .and_then(|v| v.last().cloned()))
     }
 
+    /// Return the episode with the highest `recall_count` for `agent_id`.
+    ///
+    /// Returns `None` if the agent has no stored episodes.  When multiple
+    /// episodes tie for the maximum recall count, any one of them may be returned.
+    pub fn most_recalled(&self, agent_id: &AgentId) -> Result<Option<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::most_recalled");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|v| v.iter().max_by_key(|i| i.recall_count))
+            .cloned())
+    }
+
     /// Return the arithmetic mean importance for `agent_id`, or `0.0` if the
     /// agent has no stored episodes.
     pub fn importance_avg(&self, agent_id: &AgentId) -> Result<f32, AgentRuntimeError> {

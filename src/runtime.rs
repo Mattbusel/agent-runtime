@@ -2395,4 +2395,42 @@ mod tests {
         let session = make_session(vec![s1, s2], 0);
         assert_eq!(session.shortest_step().map(|s| s.step_duration_ms), Some(50));
     }
+
+    // ── Round 12: first_thought / last_thought ────────────────────────────────
+
+    #[test]
+    fn test_first_thought_returns_thought_from_first_step() {
+        let session = make_session(
+            vec![
+                ReActStep::new("alpha", "a1", "r1"),
+                ReActStep::new("beta", "a2", "r2"),
+            ],
+            0,
+        );
+        assert_eq!(session.first_thought(), Some("alpha"));
+    }
+
+    #[test]
+    fn test_last_thought_returns_thought_from_last_step() {
+        let session = make_session(
+            vec![
+                ReActStep::new("alpha", "a1", "r1"),
+                ReActStep::new("beta", "a2", "r2"),
+            ],
+            0,
+        );
+        assert_eq!(session.last_thought(), Some("beta"));
+    }
+
+    #[test]
+    fn test_first_thought_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.first_thought().is_none());
+    }
+
+    #[test]
+    fn test_last_thought_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.last_thought().is_none());
+    }
 }

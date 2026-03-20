@@ -192,6 +192,23 @@ impl Relationship {
             weight,
         }
     }
+
+    /// Return `true` if this relationship is a self-loop (`from == to`).
+    pub fn is_self_loop(&self) -> bool {
+        self.from == self.to
+    }
+
+    /// Return a new `Relationship` with `from` and `to` swapped.
+    ///
+    /// The `kind` and `weight` are preserved unchanged.
+    pub fn reversed(&self) -> Self {
+        Self {
+            from: self.to.clone(),
+            to: self.from.clone(),
+            kind: self.kind.clone(),
+            weight: self.weight,
+        }
+    }
 }
 
 // ── MemGraphError (mirrors upstream) ─────────────────────────────────────────
@@ -1506,6 +1523,47 @@ impl GraphStore {
             .filter(|e| e.label == label)
             .cloned()
             .collect())
+    }
+
+    /// Return all entities whose label is contained in `labels`.
+    ///
+    /// Order of results is unspecified.  An empty `labels` slice returns an
+    /// empty result (never all entities).
+    pub fn find_entities_by_labels(&self, labels: &[&str]) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "find_entities_by_labels");
+        let label_set: std::collections::HashSet<&str> = labels.iter().copied().collect();
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| label_set.contains(e.label.as_str()))
+            .cloned()
+            .collect())
+    }
+
+    /// Remove all isolated entities (those with no incoming or outgoing edges).
+    ///
+    /// Returns the number of entities removed.
+    pub fn remove_isolated(&self) -> Result<usize, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "remove_isolated");
+        let isolated: Vec<EntityId> = inner
+            .entities
+            .keys()
+            .filter(|id| {
+                inner.adjacency.get(*id).map_or(true, |v| v.is_empty())
+                    && inner.reverse_adjacency.get(*id).map_or(true, |v| v.is_empty())
+            })
+            .cloned()
+            .collect();
+        let count = isolated.len();
+        for id in &isolated {
+            inner.entities.remove(id);
+            inner.adjacency.remove(id);
+            inner.reverse_adjacency.remove(id);
+        }
+        if count > 0 {
+            inner.cycle_cache = None;
+        }
+        Ok(count)
     }
 
     /// Return all outgoing relationships from `id` (those where `id` is the source).
@@ -3565,5 +3623,62 @@ mod tests {
     fn test_entity_labels_empty_for_empty_graph() {
         let g = make_graph();
         assert!(g.entity_labels().unwrap().is_empty());
+    }
+
+    // ── Round 12: out_degree_for / predecessors / is_source ───────────────────
+
+    #[test]
+    fn test_out_degree_for_returns_outgoing_edge_count() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_entity(Entity::new("c", "C")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "r", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "r", 1.0)).unwrap();
+        assert_eq!(g.out_degree_for(&EntityId::new("a")).unwrap(), 2);
+        assert_eq!(g.out_degree_for(&EntityId::new("b")).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_out_degree_for_returns_zero_for_unknown_entity() {
+        let g = GraphStore::new();
+        assert_eq!(g.out_degree_for(&EntityId::new("ghost")).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_predecessors_returns_nodes_with_incoming_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_entity(Entity::new("c", "C")).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "r", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "r", 1.0)).unwrap();
+        let mut preds: Vec<String> = g
+            .predecessors(&EntityId::new("c"))
+            .unwrap()
+            .iter()
+            .map(|e| e.id.as_str().to_string())
+            .collect();
+        preds.sort();
+        assert_eq!(preds, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_predecessors_empty_for_source_node() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("root", "Root")).unwrap();
+        g.add_entity(Entity::new("child", "Child")).unwrap();
+        g.add_relationship(Relationship::new("root", "child", "r", 1.0)).unwrap();
+        assert!(g.predecessors(&EntityId::new("root")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_is_source_true_for_node_with_no_incoming_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("src", "Src")).unwrap();
+        g.add_entity(Entity::new("dst", "Dst")).unwrap();
+        g.add_relationship(Relationship::new("src", "dst", "r", 1.0)).unwrap();
+        assert!(g.is_source(&EntityId::new("src")).unwrap());
+        assert!(!g.is_source(&EntityId::new("dst")).unwrap());
     }
 }

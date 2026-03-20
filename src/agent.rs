@@ -436,6 +436,14 @@ impl AgentConfig {
     pub fn has_request_timeout(&self) -> bool {
         self.request_timeout.is_some()
     }
+
+    /// Return the number of iterations still available after `n` have been completed.
+    ///
+    /// Uses saturating subtraction so values beyond `max_iterations` return `0`
+    /// rather than wrapping.
+    pub fn remaining_iterations_after(&self, n: usize) -> usize {
+        self.max_iterations.saturating_sub(n)
+    }
 }
 
 // ── ToolSpec ──────────────────────────────────────────────────────────────────
@@ -600,6 +608,21 @@ impl ToolSpec {
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
         self
+    }
+
+    /// Return the number of required fields configured for this tool.
+    pub fn required_field_count(&self) -> usize {
+        self.required_fields.len()
+    }
+
+    /// Return `true` if this tool requires at least one field to be present in its args.
+    pub fn has_required_fields(&self) -> bool {
+        !self.required_fields.is_empty()
+    }
+
+    /// Return `true` if this tool has at least one custom argument validator attached.
+    pub fn has_validators(&self) -> bool {
+        !self.validators.is_empty()
     }
 
     /// Invoke the tool with the given JSON arguments.
@@ -969,6 +992,15 @@ impl ToolRegistry {
     /// [`tool_names`]: ToolRegistry::tool_names
     pub fn tool_names_owned(&self) -> Vec<String> {
         self.tools.keys().cloned().collect()
+    }
+
+    /// Return all registered tool names sorted alphabetically.
+    ///
+    /// Useful for deterministic output in help text, diagnostics, or tests.
+    pub fn all_tool_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.tools.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// Return references to all registered `ToolSpec`s.
@@ -2939,5 +2971,23 @@ mod tests {
     fn test_tool_registry_remove_returns_none_for_absent_tool() {
         let mut reg = ToolRegistry::new();
         assert!(reg.remove("ghost").is_none());
+    }
+
+    // ── Round 12: all_tool_names ──────────────────────────────────────────────
+
+    #[test]
+    fn test_all_tool_names_returns_sorted_names() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("zebra", "d", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("apple", "d", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("mango", "d", |_| serde_json::json!({})));
+        let names = reg.all_tool_names();
+        assert_eq!(names, vec!["apple", "mango", "zebra"]);
+    }
+
+    #[test]
+    fn test_all_tool_names_empty_for_empty_registry() {
+        let reg = ToolRegistry::new();
+        assert!(reg.all_tool_names().is_empty());
     }
 }
