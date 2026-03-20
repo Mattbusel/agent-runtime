@@ -93,6 +93,33 @@ impl LatencyHistogram {
         self.total_count.load(Ordering::Relaxed)
     }
 
+    /// Estimate the p-th percentile latency in milliseconds from the histogram.
+    ///
+    /// `p` must be in `[0.0, 1.0]`.  Returns the **upper bound** of the first
+    /// bucket that contains the p-th percentile.  Returns `0` if no samples
+    /// have been recorded.
+    ///
+    /// # Accuracy
+    ///
+    /// This is a bucket-boundary estimate, not an exact value.  The error is
+    /// bounded by the bucket width at that percentile.
+    pub fn percentile(&self, p: f64) -> u64 {
+        let total = self.total_count.load(Ordering::Relaxed);
+        if total == 0 {
+            return 0;
+        }
+        let target = (p.clamp(0.0, 1.0) * total as f64).ceil() as u64;
+        let mut cumulative = 0u64;
+        for (i, bucket) in self.buckets.iter().enumerate() {
+            cumulative += bucket.load(Ordering::Relaxed);
+            if cumulative >= target {
+                return Self::BOUNDS[i];
+            }
+        }
+        // All samples accounted for — return the last bound.
+        *Self::BOUNDS.last().unwrap_or(&u64::MAX)
+    }
+
     /// Return bucket counts as `(upper_bound_ms, count)` pairs.
     pub fn buckets(&self) -> Vec<(u64, u64)> {
         Self::BOUNDS
@@ -108,6 +135,62 @@ impl LatencyHistogram {
         self.total_sum_ms.store(0, Ordering::Relaxed);
         for bucket in &self.buckets {
             bucket.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+impl MetricsSnapshot {
+    /// Compute the difference between `after` and `before` (i.e., `after - before`).
+    ///
+    /// Useful for per-request instrumentation:
+    /// ```rust,ignore
+    /// let before = metrics.snapshot();
+    /// // ... run one agent invocation ...
+    /// let after = metrics.snapshot();
+    /// let delta = MetricsSnapshot::delta(&after, &before);
+    /// println!("steps this run: {}", delta.total_steps);
+    /// ```
+    ///
+    /// Saturating subtraction is used so callers don't need to guard against
+    /// races where a counter is read before the full increment propagates.
+    pub fn delta(after: &Self, before: &Self) -> Self {
+        Self {
+            active_sessions: after.active_sessions.saturating_sub(before.active_sessions),
+            total_sessions: after.total_sessions.saturating_sub(before.total_sessions),
+            total_steps: after.total_steps.saturating_sub(before.total_steps),
+            total_tool_calls: after.total_tool_calls.saturating_sub(before.total_tool_calls),
+            failed_tool_calls: after.failed_tool_calls.saturating_sub(before.failed_tool_calls),
+            backpressure_shed_count: after
+                .backpressure_shed_count
+                .saturating_sub(before.backpressure_shed_count),
+            memory_recall_count: after
+                .memory_recall_count
+                .saturating_sub(before.memory_recall_count),
+            per_tool_calls: {
+                let mut m = after.per_tool_calls.clone();
+                for (k, v) in &before.per_tool_calls {
+                    let entry = m.entry(k.clone()).or_default();
+                    *entry = entry.saturating_sub(*v);
+                }
+                m
+            },
+            per_tool_failures: {
+                let mut m = after.per_tool_failures.clone();
+                for (k, v) in &before.per_tool_failures {
+                    let entry = m.entry(k.clone()).or_default();
+                    *entry = entry.saturating_sub(*v);
+                }
+                m
+            },
+            step_latency_buckets: after
+                .step_latency_buckets
+                .iter()
+                .zip(before.step_latency_buckets.iter())
+                .map(|((bound, a), (_, b))| (*bound, a.saturating_sub(*b)))
+                .collect(),
+            step_latency_mean_ms: after.step_latency_mean_ms - before.step_latency_mean_ms,
+            per_agent_tool_calls: after.per_agent_tool_calls.clone(),
+            per_agent_tool_failures: after.per_agent_tool_failures.clone(),
         }
     }
 }

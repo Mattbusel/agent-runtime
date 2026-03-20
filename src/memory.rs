@@ -194,7 +194,7 @@ impl MemoryItem {
 // ── DecayPolicy ───────────────────────────────────────────────────────────────
 
 /// Governs how memory importance decays over time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecayPolicy {
     /// The half-life duration in hours. After this many hours, importance is halved.
     half_life_hours: f64,
@@ -265,7 +265,7 @@ impl DecayPolicy {
 /// - Score B = `0.5 + 1.0 × (−10.0) + 0.1 × 10` = `−8.5` (old → ranked lower)
 ///
 /// Note: the recency term uses negative hours-since-creation so older items score lower.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RecallPolicy {
     /// Rank purely by importance score (default).
     Importance,
@@ -976,6 +976,32 @@ impl EpisodicStore {
             }
         }
     }
+
+    /// Search episodes for a given `agent_id` whose content contains `query` as a substring.
+    ///
+    /// The comparison is case-sensitive.  Returns at most `limit` matching items,
+    /// ordered by descending importance (same as [`recall`]).
+    ///
+    /// [`recall`]: EpisodicStore::recall
+    pub fn search_by_content(
+        &self,
+        agent_id: &AgentId,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::search_by_content");
+        let items = inner.items.get(agent_id).cloned().unwrap_or_default();
+        drop(inner);
+        let mut matched: Vec<MemoryItem> = items
+            .into_iter()
+            .filter(|item| item.content.contains(query))
+            .collect();
+        matched.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
+        if limit > 0 {
+            matched.truncate(limit);
+        }
+        Ok(matched)
+    }
 }
 
 impl Default for EpisodicStore {
@@ -1247,6 +1273,35 @@ impl WorkingMemory {
     pub fn get(&self, key: &str) -> Result<Option<String>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::get");
         Ok(inner.map.get(key).cloned())
+    }
+
+    /// Insert multiple key-value pairs with a single lock acquisition.
+    ///
+    /// Each entry follows the same eviction semantics as [`set`]: if the key
+    /// already exists it is updated in-place; if inserting a new key would
+    /// exceed capacity, the oldest key is evicted first.
+    ///
+    /// [`set`]: WorkingMemory::set
+    pub fn set_many(
+        &self,
+        pairs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Result<(), AgentRuntimeError> {
+        let capacity = self.capacity;
+        let mut inner = recover_lock(self.inner.lock(), "WorkingMemory::set_many");
+        for (key, value) in pairs {
+            let key: String = key.into();
+            let value: String = value.into();
+            if inner.map.contains_key(&key) {
+                inner.order.retain(|k| k != &key);
+            } else if inner.map.len() >= capacity {
+                if let Some(oldest) = inner.order.pop_front() {
+                    inner.map.remove(&oldest);
+                }
+            }
+            inner.order.push_back(key.clone());
+            inner.map.insert(key, value);
+        }
+        Ok(())
     }
 
     /// Remove all entries from working memory.

@@ -21,6 +21,7 @@ use crate::error::AgentRuntimeError;
 use crate::memory::{AgentId, EpisodicStore, WorkingMemory};
 use crate::metrics::RuntimeMetrics;
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as FmtWrite;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -608,14 +609,16 @@ impl AgentRuntime {
             if memories.is_empty() {
                 prompt.to_owned()
             } else {
-                let mem_context: Vec<String> = memories
-                    .iter()
-                    .map(|m| format!("- {}", m.content))
-                    .collect();
-                format!(
-                    "Relevant memories:\n{}\n\nCurrent prompt: {prompt}",
-                    mem_context.join("\n")
-                )
+                // Build the enriched prompt directly into a String without an
+                // intermediate Vec<String> allocation.
+                let mut enriched =
+                    String::with_capacity(prompt.len() + memories.len() * 64 + 32);
+                enriched.push_str("Relevant memories:\n");
+                for m in &memories {
+                    let _ = writeln!(enriched, "- {}", m.content);
+                }
+                let _ = write!(enriched, "\nCurrent prompt: {prompt}");
+                enriched
             }
         } else {
             prompt.to_owned()
@@ -627,12 +630,20 @@ impl AgentRuntime {
             if entries.is_empty() {
                 enriched_prompt
             } else {
-                let wm_context: Vec<String> =
-                    entries.iter().map(|(k, v)| format!("  {k}: {v}")).collect();
-                format!(
-                    "{enriched_prompt}\n\nCurrent working state:\n{}",
-                    wm_context.join("\n")
-                )
+                // Build working-memory section without an intermediate Vec<String>.
+                let mut out = String::with_capacity(
+                    enriched_prompt.len() + entries.len() * 32 + 32,
+                );
+                out.push_str(&enriched_prompt);
+                out.push_str("\n\nCurrent working state:\n");
+                for (k, v) in &entries {
+                    let _ = writeln!(out, "  {k}: {v}");
+                }
+                // Remove trailing newline added by writeln for the last entry.
+                if out.ends_with('\n') {
+                    out.pop();
+                }
+                out
             }
         } else {
             enriched_prompt

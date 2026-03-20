@@ -23,7 +23,7 @@ pub use crate::graph::{Entity, EntityId, GraphStore, MemGraphError, Relationship
 #[cfg(feature = "orchestrator")]
 pub use crate::orchestrator::{
     BackpressureGuard, CircuitBreaker, CircuitState, DeduplicationResult, Deduplicator, Pipeline,
-    RetryPolicy,
+    RetryKind, RetryPolicy,
 };
 
 pub use crate::agent::{

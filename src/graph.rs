@@ -1118,6 +1118,9 @@ impl GraphStore {
     }
 
     /// Check whether a relationship `(from, to, kind)` exists.
+    ///
+    /// Uses the adjacency index (O(out-degree of `from`)) rather than a full
+    /// O(|E|) scan over all relationships.
     pub fn relationship_exists(
         &self,
         from: &EntityId,
@@ -1126,9 +1129,9 @@ impl GraphStore {
     ) -> Result<bool, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "relationship_exists");
         Ok(inner
-            .relationships
-            .iter()
-            .any(|r| r.from == *from && r.to == *to && r.kind == kind))
+            .adjacency
+            .get(from)
+            .map_or(false, |rels| rels.iter().any(|r| r.to == *to && r.kind == kind)))
     }
 
     /// Extract a subgraph containing only the specified entities and the
@@ -1139,15 +1142,29 @@ impl GraphStore {
 
         let new_store = GraphStore::new();
 
-        for id in node_ids {
-            let entity = inner
-                .entities
-                .get(id)
-                .ok_or_else(|| AgentRuntimeError::Graph(format!("entity '{}' not found", id.0)))?
-                .clone();
-            // We hold inner lock; call directly on the new store's inner.
-            let mut new_inner = recover_lock(new_store.inner.lock(), "subgraph:add_entity");
-            new_inner.entities.insert(entity.id.clone(), entity);
+        // Validate all entities exist before mutating the new store, so we
+        // don't end up with a partially-populated subgraph on error.
+        let entities_to_copy: Vec<Entity> = node_ids
+            .iter()
+            .map(|id| {
+                inner
+                    .entities
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        AgentRuntimeError::Graph(format!("entity '{}' not found", id.0))
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+
+        // Acquire the new store's lock once for all entity insertions.
+        {
+            let mut new_inner = recover_lock(new_store.inner.lock(), "subgraph:add_entities");
+            for entity in entities_to_copy {
+                // Ensure an adjacency entry exists for this entity.
+                new_inner.adjacency.entry(entity.id.clone()).or_default();
+                new_inner.entities.insert(entity.id.clone(), entity);
+            }
         }
 
         // Acquire the new store's lock once for the entire relationship batch

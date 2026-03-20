@@ -51,13 +51,24 @@ pub const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 // ── RetryPolicy ───────────────────────────────────────────────────────────────
 
-/// Exponential backoff retry policy.
+/// Retry mode: exponential backoff or constant interval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryKind {
+    /// Delay doubles each attempt: `base_delay * 2^(attempt-1)`.
+    Exponential,
+    /// Delay is fixed at `base_delay` for every attempt.
+    Constant,
+}
+
+/// Configurable retry policy with exponential backoff or constant interval.
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
     /// Maximum number of attempts (including the first).
     pub max_attempts: u32,
     /// Base delay for the first retry.
     pub base_delay: Duration,
+    /// Whether to use exponential or constant delay.
+    pub kind: RetryKind,
 }
 
 impl RetryPolicy {
@@ -84,21 +95,56 @@ impl RetryPolicy {
         Ok(Self {
             max_attempts,
             base_delay: Duration::from_millis(base_ms),
+            kind: RetryKind::Exponential,
+        })
+    }
+
+    /// Create a constant (fixed-interval) retry policy.
+    ///
+    /// Every retry waits exactly `delay_ms` milliseconds regardless of attempt
+    /// number, unlike [`exponential`] which doubles the delay each time.
+    ///
+    /// [`exponential`]: RetryPolicy::exponential
+    ///
+    /// # Returns
+    /// - `Ok(RetryPolicy)` — on success
+    /// - `Err(AgentRuntimeError::Orchestration)` — if `max_attempts == 0` or `delay_ms == 0`
+    pub fn constant(max_attempts: u32, delay_ms: u64) -> Result<Self, AgentRuntimeError> {
+        if max_attempts == 0 {
+            return Err(AgentRuntimeError::Orchestration(
+                "max_attempts must be >= 1".into(),
+            ));
+        }
+        if delay_ms == 0 {
+            return Err(AgentRuntimeError::Orchestration(
+                "delay_ms must be >= 1 to avoid busy-loop retries".into(),
+            ));
+        }
+        Ok(Self {
+            max_attempts,
+            base_delay: Duration::from_millis(delay_ms),
+            kind: RetryKind::Constant,
         })
     }
 
     /// Compute the delay before the given attempt number (1-based).
     ///
-    /// Delay = `base_delay * 2^(attempt-1)`, capped at `MAX_RETRY_DELAY`.
+    /// - [`RetryKind::Exponential`]: `base_delay * 2^(attempt-1)`, capped at `MAX_RETRY_DELAY`.
+    /// - [`RetryKind::Constant`]: always returns `base_delay`.
     pub fn delay_for(&self, attempt: u32) -> Duration {
-        let exp = attempt.saturating_sub(1);
-        let multiplier = 1u64.checked_shl(exp.min(63)).unwrap_or(u64::MAX);
-        let millis = self
-            .base_delay
-            .as_millis()
-            .saturating_mul(multiplier as u128);
-        let raw = Duration::from_millis(millis.min(u64::MAX as u128) as u64);
-        raw.min(MAX_RETRY_DELAY)
+        match self.kind {
+            RetryKind::Constant => self.base_delay.min(MAX_RETRY_DELAY),
+            RetryKind::Exponential => {
+                let exp = attempt.saturating_sub(1);
+                let multiplier = 1u64.checked_shl(exp.min(63)).unwrap_or(u64::MAX);
+                let millis = self
+                    .base_delay
+                    .as_millis()
+                    .saturating_mul(multiplier as u128);
+                let raw = Duration::from_millis(millis.min(u64::MAX as u128) as u64);
+                raw.min(MAX_RETRY_DELAY)
+            }
+        }
     }
 }
 
@@ -565,6 +611,8 @@ pub struct Deduplicator {
 struct DeduplicatorInner {
     cache: HashMap<String, (String, Instant)>, // key → (result, inserted_at)
     in_flight: HashMap<String, Instant>,       // key → started_at
+    /// Insertion-ordered keys for O(1) FIFO eviction when `max_entries` is set.
+    cache_order: std::collections::VecDeque<String>,
 }
 
 impl Deduplicator {
@@ -576,6 +624,7 @@ impl Deduplicator {
             inner: Arc::new(Mutex::new(DeduplicatorInner {
                 cache: HashMap::new(),
                 in_flight: HashMap::new(),
+                cache_order: std::collections::VecDeque::new(),
             })),
         }
     }

@@ -107,7 +107,7 @@ pub use memory::{AgentId, MemoryId, MemoryItem};
 pub use graph::{Entity, EntityId, GraphStore, Relationship};
 
 #[cfg(feature = "orchestrator")]
-pub use orchestrator::{CircuitBreaker, Pipeline, RetryPolicy};
+pub use orchestrator::{CircuitBreaker, Pipeline, RetryKind, RetryPolicy};
 
 pub use agent::{Action, AgentConfig, ReActLoop, ReActStep, ToolSpec, ToolValidator};
 pub use metrics::MetricsSnapshot;

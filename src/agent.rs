@@ -1010,12 +1010,12 @@ impl ReActLoop {
                         .loop_timeout
                         .map(|d| d.as_millis())
                         .unwrap_or(0);
+                    let err = AgentRuntimeError::AgentLoop(format!("loop timeout after {ms} ms"));
                     if let Some(ref obs) = self.observer {
+                        obs.on_error(&err);
                         obs.on_loop_end(steps.len());
                     }
-                    return Err(AgentRuntimeError::AgentLoop(format!(
-                        "loop timeout after {ms} ms"
-                    )));
+                    return Err(err);
                 }
             }
 
@@ -1164,6 +1164,7 @@ impl ReActLoop {
             "ReAct loop exhausted max iterations without FINAL_ANSWER"
         );
         if let Some(ref obs) = self.observer {
+            obs.on_error(&err);
             obs.on_loop_end(steps.len());
         }
         Err(err)
@@ -1382,6 +1383,13 @@ pub trait Observer: Send + Sync {
     /// Called when the loop finishes (success or error).
     fn on_loop_end(&self, step_count: usize) {
         let _ = step_count;
+    }
+    /// Called when the loop terminates with an error.
+    ///
+    /// Invoked for timeout, max-iterations, and parse failures.
+    /// `on_loop_end` is also called immediately after `on_error`.
+    fn on_error(&self, error: &crate::error::AgentRuntimeError) {
+        let _ = error;
     }
 }
 
