@@ -3442,6 +3442,7 @@ impl GraphStore {
             .count())
     }
 
+    /// Returns all relationships that point **to** the entity with the given `id`.
     pub fn edges_to(&self, id: &EntityId) -> Result<Vec<Relationship>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "GraphStore::edges_to");
         Ok(inner
@@ -3453,6 +3454,7 @@ impl GraphStore {
             .collect())
     }
 
+    /// Returns `true` if the entity's property `key` equals `value` (string comparison).
     pub fn entity_has_property_value(
         &self,
         id: &EntityId,
@@ -8405,5 +8407,39 @@ mod tests {
     fn test_all_entities_have_properties_true_for_empty_graph() {
         let g = GraphStore::new();
         assert!(g.all_entities_have_properties().unwrap());
+    }
+
+    // ── Round 64: edges_to, entity_has_property_value ────────────────────────
+
+    #[test]
+    fn test_edges_to_returns_incoming_relationships() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "EDGE", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "EDGE", 1.0)).unwrap();
+        let incoming = g.edges_to(&EntityId("c".into())).unwrap();
+        assert_eq!(incoming.len(), 2);
+    }
+
+    #[test]
+    fn test_edges_to_empty_for_no_incoming() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("x", "N")).unwrap();
+        assert!(g.edges_to(&EntityId("x".into())).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_entity_has_property_value_true_when_matches() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("e1", "N").with_property("color", serde_json::json!("blue"))).unwrap();
+        assert!(g.entity_has_property_value(&EntityId("e1".into()), "color", "blue").unwrap());
+    }
+
+    #[test]
+    fn test_entity_has_property_value_false_for_unknown_entity() {
+        let g = GraphStore::new();
+        assert!(!g.entity_has_property_value(&EntityId("nope".into()), "color", "blue").unwrap());
     }
 }

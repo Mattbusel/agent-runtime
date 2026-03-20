@@ -1790,6 +1790,36 @@ impl RuntimeMetrics {
             .sum()
     }
 
+    /// Return the average number of tool calls per recorded step, or `0.0`
+    /// when no steps have been recorded.
+    pub fn per_step_tool_call_rate(&self) -> f64 {
+        let steps = self.total_steps();
+        if steps == 0 {
+            return 0.0;
+        }
+        let calls: u64 = self.per_tool_calls_snapshot().values().sum();
+        calls as f64 / steps as f64
+    }
+
+    /// Return agent IDs that have recorded tool calls but zero failures.
+    pub fn agents_with_no_failures(&self) -> Vec<String> {
+        let calls = self.per_agent_tool_calls_snapshot();
+        let failures = self.per_agent_tool_failures_snapshot();
+        let mut result: Vec<String> = calls
+            .keys()
+            .filter(|agent| {
+                let total_failures: u64 = failures
+                    .get(*agent)
+                    .map(|m| m.values().sum())
+                    .unwrap_or(0);
+                total_failures == 0
+            })
+            .cloned()
+            .collect();
+        result.sort_unstable();
+        result
+    }
+
     /// Return a sorted list of tool names whose total call count exceeds
     /// `threshold`.
     ///
@@ -4972,5 +5002,41 @@ mod tests {
     fn test_total_agent_failures_zero_for_new_metrics() {
         let m = RuntimeMetrics::new();
         assert_eq!(m.total_agent_failures(), 0);
+    }
+
+    // ── Round 64: per_step_tool_call_rate, agents_with_no_failures ───────────
+
+    #[test]
+    fn test_per_step_tool_call_rate_zero_when_no_steps() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.per_step_tool_call_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_per_step_tool_call_rate_computed_correctly() {
+        let m = RuntimeMetrics::new();
+        m.total_steps.store(2, Ordering::Relaxed);
+        m.record_tool_call("search");
+        m.record_tool_call("browse");
+        m.record_tool_call("search");
+        // 3 calls / 2 steps = 1.5
+        assert!((m.per_step_tool_call_rate() - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_agents_with_no_failures_returns_clean_agents() {
+        let m = RuntimeMetrics::new();
+        m.record_agent_tool_call("agent-clean", "search");
+        m.record_agent_tool_call("agent-fail", "search");
+        m.record_agent_tool_failure("agent-fail", "search");
+        let clean = m.agents_with_no_failures();
+        assert!(clean.contains(&"agent-clean".to_string()));
+        assert!(!clean.contains(&"agent-fail".to_string()));
+    }
+
+    #[test]
+    fn test_agents_with_no_failures_empty_for_new_metrics() {
+        let m = RuntimeMetrics::new();
+        assert!(m.agents_with_no_failures().is_empty());
     }
 }

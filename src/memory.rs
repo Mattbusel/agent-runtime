@@ -4738,6 +4738,7 @@ impl WorkingMemory {
             .collect())
     }
 
+    /// Return all values whose string representation ends with `suffix`.
     pub fn values_with_suffix(&self, suffix: &str) -> Result<Vec<String>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::values_with_suffix");
         Ok(inner
@@ -11540,10 +11541,10 @@ mod tests {
 
     #[test]
     fn test_values_with_suffix_returns_matching() {
-        let wm = WorkingMemory::new();
-        wm.set("k1".into(), "hello world".into()).unwrap();
-        wm.set("k2".into(), "foo world".into()).unwrap();
-        wm.set("k3".into(), "bar xyz".into()).unwrap();
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "hello world").unwrap();
+        wm.set("k2", "foo world").unwrap();
+        wm.set("k3", "bar xyz").unwrap();
         let mut vals = wm.values_with_suffix("world").unwrap();
         vals.sort();
         assert_eq!(vals, vec!["foo world", "hello world"]);
@@ -11551,8 +11552,8 @@ mod tests {
 
     #[test]
     fn test_values_with_suffix_empty_when_none_match() {
-        let wm = WorkingMemory::new();
-        wm.set("k1".into(), "hello".into()).unwrap();
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "hello").unwrap();
         assert!(wm.values_with_suffix("xyz").unwrap().is_empty());
     }
 }
