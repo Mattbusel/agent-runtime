@@ -4752,4 +4752,26 @@ mod tests {
         let cfg = AgentConfig::new(10, "m").with_system_prompt("");
         assert_eq!(cfg.system_prompt_word_count(), 0);
     }
+
+    // ── Round 51: description_starts_with_any ─────────────────────────────────
+
+    #[test]
+    fn test_description_starts_with_any_true_when_prefix_matches() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "Search the web", |_| serde_json::json!({})));
+        assert!(reg.description_starts_with_any(&["Search", "Write"]));
+    }
+
+    #[test]
+    fn test_description_starts_with_any_false_when_no_prefix_matches() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("t1", "Read a file", |_| serde_json::json!({})));
+        assert!(!reg.description_starts_with_any(&["Search", "Write"]));
+    }
+
+    #[test]
+    fn test_description_starts_with_any_false_for_empty_registry() {
+        let reg = ToolRegistry::new();
+        assert!(!reg.description_starts_with_any(&["Search"]));
+    }
 }

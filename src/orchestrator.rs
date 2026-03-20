@@ -4384,4 +4384,22 @@ mod tests {
         // After 1 attempt: delay_sum_ms(1) = 100, remaining = 300 - 100 = 200
         assert_eq!(p.remaining_wait_budget_ms(1), 200);
     }
+
+    // ── Round 51: stage_names_containing ──────────────────────────────────────
+
+    #[test]
+    fn test_stage_names_containing_returns_all_matching_stages() {
+        let p = Pipeline::new()
+            .add_stage("pre_process", |s: String| Ok(s))
+            .add_stage("post_process", |s: String| Ok(s))
+            .add_stage("transform", |s: String| Ok(s));
+        let names = p.stage_names_containing("process");
+        assert_eq!(names, vec!["pre_process", "post_process"]);
+    }
+
+    #[test]
+    fn test_stage_names_containing_empty_when_no_match() {
+        let p = Pipeline::new().add_stage("transform", |s: String| Ok(s));
+        assert!(p.stage_names_containing("process").is_empty());
+    }
 }
