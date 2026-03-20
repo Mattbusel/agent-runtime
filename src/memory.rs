@@ -98,6 +98,50 @@ impl MemoryItem {
     pub fn word_count(&self) -> usize {
         self.content.split_whitespace().count()
     }
+
+    /// Return the byte length of the content string.
+    pub fn content_len(&self) -> usize {
+        self.content.len()
+    }
+
+    /// Return the number of tags attached to this memory item.
+    pub fn tag_count(&self) -> usize {
+        self.tags.len()
+    }
+
+    /// Add `tag` to this memory item if it is not already present.
+    ///
+    /// Returns `true` if the tag was newly added, `false` if it was already present.
+    pub fn add_tag(&mut self, tag: impl Into<String>) -> bool {
+        let tag = tag.into();
+        if self.tags.iter().any(|t| t == &tag) {
+            return false;
+        }
+        self.tags.push(tag);
+        true
+    }
+
+    /// Remove `tag` from this memory item.
+    ///
+    /// Returns `true` if the tag was found and removed, `false` if it was not present.
+    pub fn remove_tag(&mut self, tag: &str) -> bool {
+        if let Some(pos) = self.tags.iter().position(|t| t == tag) {
+            self.tags.swap_remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Return `true` if this item's importance score is strictly above `threshold`.
+    ///
+    /// Useful for filtering a collection to retain only high-value memories:
+    /// ```rust,ignore
+    /// let important: Vec<_> = items.iter().filter(|m| m.is_high_importance(0.7)).collect();
+    /// ```
+    pub fn is_high_importance(&self, threshold: f32) -> bool {
+        self.importance > threshold
+    }
 }
 
 impl std::fmt::Display for MemoryItem {
@@ -1997,6 +2041,26 @@ impl EpisodicStore {
         });
         Ok(items)
     }
+
+    /// Return all episodes for `agent_id` sorted by timestamp ascending
+    /// (oldest first).
+    ///
+    /// Returns an empty `Vec` for unknown agents.
+    pub fn episodes_sorted_by_timestamp(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(
+            self.inner.lock(),
+            "EpisodicStore::episodes_sorted_by_timestamp",
+        );
+        let mut items: Vec<MemoryItem> = inner
+            .items
+            .get(agent_id)
+            .map_or_else(Vec::new, |v| v.clone());
+        items.sort_unstable_by_key(|m| m.timestamp);
+        Ok(items)
+    }
 }
 
 impl Default for EpisodicStore {
@@ -3353,6 +3417,19 @@ impl WorkingMemory {
             })
             .collect();
         Ok(result)
+    }
+
+    /// Return all keys in ascending sorted (lexicographic) order.
+    ///
+    /// Unlike [`get_all_keys`] which returns keys in insertion order, this
+    /// method always returns them in a deterministic alphabetical order.
+    ///
+    /// [`get_all_keys`]: WorkingMemory::get_all_keys
+    pub fn keys_sorted(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::keys_sorted");
+        let mut keys: Vec<String> = inner.map.keys().cloned().collect();
+        keys.sort_unstable();
+        Ok(keys)
     }
 }
 
@@ -7275,5 +7352,33 @@ mod tests {
         let wm = WorkingMemory::new(10).unwrap();
         wm.set("k1", "hello").unwrap();
         assert!(wm.values_containing("xyz").unwrap().is_empty());
+    }
+
+    // ── Round 40 (continued): SemanticStore::keys_with_prefix ─────────────────
+
+    #[test]
+    fn test_semantic_store_keys_with_prefix_returns_matching_keys_sorted() {
+        let store = SemanticStore::new();
+        store.store("user:alice", "data-a", vec![]).unwrap();
+        store.store("user:bob", "data-b", vec![]).unwrap();
+        store.store("session:123", "sess", vec![]).unwrap();
+        let keys = store.keys_with_prefix("user:").unwrap();
+        assert_eq!(keys, vec!["user:alice", "user:bob"]);
+    }
+
+    #[test]
+    fn test_semantic_store_keys_with_prefix_returns_empty_when_no_match() {
+        let store = SemanticStore::new();
+        store.store("abc", "v", vec![]).unwrap();
+        assert!(store.keys_with_prefix("xyz").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_semantic_store_keys_with_prefix_empty_prefix_returns_all_keys() {
+        let store = SemanticStore::new();
+        store.store("b", "v2", vec![]).unwrap();
+        store.store("a", "v1", vec![]).unwrap();
+        let keys = store.keys_with_prefix("").unwrap();
+        assert_eq!(keys, vec!["a", "b"]);
     }
 }

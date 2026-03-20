@@ -137,6 +137,29 @@ impl std::fmt::Display for Role {
     }
 }
 
+impl std::fmt::Display for Message {
+    /// Render as `"{role}: {content}"`.
+    ///
+    /// Useful for logging and quick inspection of conversation history.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.role, self.content)
+    }
+}
+
+impl From<(Role, String)> for Message {
+    /// Construct a `Message` from a `(Role, String)` tuple.
+    fn from((role, content): (Role, String)) -> Self {
+        Self::new(role, content)
+    }
+}
+
+impl From<(Role, &str)> for Message {
+    /// Construct a `Message` from a `(Role, &str)` tuple.
+    fn from((role, content): (Role, &str)) -> Self {
+        Self::new(role, content)
+    }
+}
+
 /// A single ReAct step: Thought → Action → Observation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReActStep {
@@ -3936,5 +3959,50 @@ mod tests {
     fn test_tool_registry_total_description_bytes_empty_returns_zero() {
         let reg = ToolRegistry::new();
         assert_eq!(reg.total_description_bytes(), 0);
+    }
+
+    // ── Round 40 (continued): thought_word_count, clone_with_system_prompt, clone_with_max_iterations ──
+
+    #[test]
+    fn test_react_step_thought_word_count_counts_words() {
+        let step = ReActStep::new("hello world foo", "act", "obs");
+        assert_eq!(step.thought_word_count(), 3);
+    }
+
+    #[test]
+    fn test_react_step_thought_word_count_empty_thought_returns_zero() {
+        let step = ReActStep::new("", "act", "obs");
+        assert_eq!(step.thought_word_count(), 0);
+    }
+
+    #[test]
+    fn test_agent_config_clone_with_system_prompt_changes_only_prompt() {
+        let original = AgentConfig::new(5, "gpt-4");
+        let cloned = original.clone_with_system_prompt("Custom prompt.");
+        assert_eq!(cloned.system_prompt, "Custom prompt.");
+        assert_eq!(cloned.model, "gpt-4");
+        assert_eq!(cloned.max_iterations, 5);
+    }
+
+    #[test]
+    fn test_agent_config_clone_with_system_prompt_leaves_original_unchanged() {
+        let original = AgentConfig::new(3, "claude").with_system_prompt("Original.");
+        let _cloned = original.clone_with_system_prompt("New.");
+        assert_eq!(original.system_prompt, "Original.");
+    }
+
+    #[test]
+    fn test_agent_config_clone_with_max_iterations_changes_only_iterations() {
+        let original = AgentConfig::new(5, "claude-3");
+        let cloned = original.clone_with_max_iterations(20);
+        assert_eq!(cloned.max_iterations, 20);
+        assert_eq!(cloned.model, "claude-3");
+    }
+
+    #[test]
+    fn test_agent_config_clone_with_max_iterations_leaves_original_unchanged() {
+        let original = AgentConfig::new(5, "claude-3");
+        let _cloned = original.clone_with_max_iterations(10);
+        assert_eq!(original.max_iterations, 5);
     }
 }

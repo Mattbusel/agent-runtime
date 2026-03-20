@@ -2678,6 +2678,36 @@ impl GraphStore {
             .cloned()
             .collect())
     }
+
+    /// Return a sorted, deduplicated list of all relationship type labels
+    /// present in the graph.
+    ///
+    /// Returns an empty `Vec` when the graph has no relationships.
+    pub fn unique_relationship_types(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::unique_relationship_types");
+        let mut kinds: Vec<String> = inner
+            .relationships
+            .iter()
+            .map(|r| r.kind.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        kinds.sort_unstable();
+        Ok(kinds)
+    }
+
+    /// Return the average number of properties per entity.
+    ///
+    /// Returns `0.0` when the graph is empty.
+    pub fn avg_property_count(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::avg_property_count");
+        let n = inner.entities.len();
+        if n == 0 {
+            return Ok(0.0);
+        }
+        let total: usize = inner.entities.values().map(|e| e.properties.len()).sum();
+        Ok(total as f64 / n as f64)
+    }
 }
 
 impl Default for GraphStore {
@@ -5319,5 +5349,65 @@ mod tests {
         let g = GraphStore::new();
         g.add_entity(Entity::new("a", "N").with_property("role", serde_json::json!("admin"))).unwrap();
         assert!(g.entities_without_property("role").unwrap().is_empty());
+    }
+
+    // ── Round 40 (continued): min_out_degree, min_in_degree, relationship_kinds_from ──
+
+    #[test]
+    fn test_min_out_degree_returns_zero_when_sink_present() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "link", 1.0)).unwrap();
+        // b and c have out-degree 0; a has out-degree 2
+        assert_eq!(g.min_out_degree().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_min_out_degree_returns_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.min_out_degree().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_min_in_degree_returns_zero_when_source_present() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b");
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        // a has in-degree 0; b has in-degree 1
+        assert_eq!(g.min_in_degree().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_min_in_degree_returns_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.min_in_degree().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_relationship_kinds_from_returns_sorted_distinct_kinds() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "LIKES", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "TRUSTS", 1.0)).unwrap();
+        let kinds = g.relationship_kinds_from(&EntityId::new("a")).unwrap();
+        assert_eq!(kinds, vec!["KNOWS", "LIKES", "TRUSTS"]);
+    }
+
+    #[test]
+    fn test_relationship_kinds_from_returns_empty_for_unknown_entity() {
+        let g = GraphStore::new();
+        assert!(g.relationship_kinds_from(&EntityId::new("missing")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_relationship_kinds_from_deduplicates_kinds() {
+        let g = GraphStore::new();
+        add(&g, "x"); add(&g, "y"); add(&g, "z");
+        g.add_relationship(Relationship::new("x", "y", "SAME", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("x", "z", "SAME", 0.5)).unwrap();
+        let kinds = g.relationship_kinds_from(&EntityId::new("x")).unwrap();
+        assert_eq!(kinds, vec!["SAME"]);
     }
 }

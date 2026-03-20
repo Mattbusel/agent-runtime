@@ -956,6 +956,50 @@ impl AgentSession {
             .count()
     }
 
+    /// Return the sum of byte lengths of all action strings in the session.
+    ///
+    /// Useful alongside [`total_thought_bytes`] and [`total_observation_bytes`]
+    /// to estimate the full token budget consumed by a session.
+    ///
+    /// [`total_thought_bytes`]: AgentSession::total_thought_bytes
+    /// [`total_observation_bytes`]: AgentSession::total_observation_bytes
+    pub fn total_action_bytes(&self) -> usize {
+        self.steps.iter().map(|s| s.action.len()).sum()
+    }
+
+    /// Return the population variance of step durations in milliseconds squared.
+    ///
+    /// Returns `0.0` for sessions with fewer than two steps.
+    pub fn step_duration_variance_ms(&self) -> f64 {
+        let n = self.steps.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let mean = self.average_step_duration_ms() as f64;
+        let sum_sq: f64 = self
+            .steps
+            .iter()
+            .map(|s| {
+                let diff = s.step_duration_ms as f64 - mean;
+                diff * diff
+            })
+            .sum();
+        sum_sq / n as f64
+    }
+
+    /// Return references to steps whose observation contains `"error"` (case-insensitive).
+    ///
+    /// A quick filter for identifying tool-call failures without inspecting the
+    /// full observation string.  For more control use [`observations_matching`].
+    ///
+    /// [`observations_matching`]: AgentSession::observations_matching
+    pub fn steps_with_errors(&self) -> Vec<&ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.observation.to_ascii_lowercase().contains("error"))
+            .collect()
+    }
+
     /// Persist this session as a checkpoint under `"session:<session_id>"`.
     #[cfg(feature = "persistence")]
     pub async fn save_checkpoint(
@@ -4398,5 +4442,60 @@ mod tests {
     fn test_has_at_least_steps_zero_always_true() {
         let session = make_session(vec![], 0);
         assert!(session.has_at_least_steps(0));
+    }
+
+    // ── Round 40 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_p95_step_duration_ms_returns_high_percentile() {
+        // 20 steps with durations 1..=20 ms; p95 = ⌈20 * 0.95⌉ = 19th value = 19 ms
+        let mut steps: Vec<ReActStep> = (1u64..=20)
+            .map(|ms| ReActStep::new("t", "a", "o").with_duration(ms))
+            .collect();
+        // shuffle so order doesn't matter
+        steps.reverse();
+        let session = make_session(steps, 0);
+        assert_eq!(session.p95_step_duration_ms(), 19);
+    }
+
+    #[test]
+    fn test_p95_step_duration_ms_returns_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.p95_step_duration_ms(), 0);
+    }
+
+    #[test]
+    fn test_p99_step_duration_ms_returns_highest_for_small_set() {
+        // 10 steps 1..=10; p99 = ⌈10 * 0.99⌉ = 10th value = 10 ms
+        let steps: Vec<ReActStep> = (1u64..=10)
+            .map(|ms| ReActStep::new("t", "a", "o").with_duration(ms))
+            .collect();
+        let session = make_session(steps, 0);
+        assert_eq!(session.p99_step_duration_ms(), 10);
+    }
+
+    #[test]
+    fn test_p99_step_duration_ms_returns_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.p99_step_duration_ms(), 0);
+    }
+
+    #[test]
+    fn test_step_count_above_duration_ms_counts_slow_steps() {
+        let steps = vec![
+            ReActStep::new("t", "a", "o").with_duration(10),
+            ReActStep::new("t", "b", "o").with_duration(200),
+            ReActStep::new("t", "c", "o").with_duration(50),
+            ReActStep::new("t", "d", "o").with_duration(300),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.step_count_above_duration_ms(100), 2);
+        assert_eq!(session.step_count_above_duration_ms(500), 0);
+    }
+
+    #[test]
+    fn test_step_count_above_duration_ms_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.step_count_above_duration_ms(0), 0);
     }
 }

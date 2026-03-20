@@ -11,6 +11,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.59.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::p95_step_duration_ms`** — 95th-percentile step duration (nearest-rank method).
+- **`AgentSession::p99_step_duration_ms`** — 99th-percentile step duration (nearest-rank method).
+- **`AgentSession::step_count_above_duration_ms`** — count of steps slower than a given threshold.
+- **`AgentConfig::clone_with_system_prompt`** — clone a config changing only the system prompt.
+- **`AgentConfig::clone_with_max_iterations`** — clone a config changing only the iteration budget.
+- **`ReActStep::thought_word_count`** — whitespace-separated word count of the thought string.
+- **`GraphStore::min_out_degree`** — minimum out-degree across all entities.
+- **`GraphStore::min_in_degree`** — minimum in-degree across all entities.
+- **`GraphStore::relationship_kinds_from`** — distinct relationship kinds originating from an entity.
+- **`SemanticStore::keys_with_prefix`** — sorted list of keys starting with a given prefix.
+
+---
+
 ## [1.58.0] - 2026-03-20
 
 ### Added
