@@ -11,6 +11,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.60.0] - 2026-03-20
+
+### Added
+
+- **`Pipeline::stage_names_sorted`** — sorted slice of stage names (alphabetical).
+- **`Pipeline::longest_stage_name`** — name of the stage with the most bytes.
+- **`Pipeline::shortest_stage_name`** — name of the stage with the fewest bytes.
+- **`ToolRegistry::tool_count_with_validators`** — count of registered tools that have at least one custom validator.
+- **`MetricsSnapshot::total_tool_failures`** — sum of all per-tool failure counts.
+- **`MetricsSnapshot::least_called_tool`** — name of the tool with the lowest call count.
+- **`GraphStore::has_edge`** — directional check for an edge between two entities.
+- **`EpisodicStore::recall_count_for`** — `recall_count` of a specific episode by agent and memory id.
+- **`AgentSession::min_step_duration_ms`** — minimum step duration across all steps.
+- **`AgentSession::max_step_duration_ms`** — maximum step duration across all steps.
+
+---
+
 ## [1.59.0] - 2026-03-20
 
 ### Added

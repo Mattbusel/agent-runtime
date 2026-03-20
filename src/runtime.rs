@@ -1034,6 +1034,34 @@ impl AgentSession {
         unique.len()
     }
 
+    /// Return the maximum byte length of any thought string in the session.
+    ///
+    /// Returns `0` for empty sessions or sessions where every thought is empty.
+    pub fn thought_max_bytes(&self) -> usize {
+        self.steps.iter().map(|s| s.thought.len()).max().unwrap_or(0)
+    }
+
+    /// Return the maximum byte length of any observation string in the session.
+    ///
+    /// Returns `0` for empty sessions or sessions where every observation is empty.
+    pub fn observation_max_bytes(&self) -> usize {
+        self.steps.iter().map(|s| s.observation.len()).max().unwrap_or(0)
+    }
+
+    /// Return the count of steps whose `step_duration_ms` is strictly less
+    /// than `threshold_ms`.
+    ///
+    /// Complements [`step_count_above_duration_ms`].  Returns `0` for empty
+    /// sessions.
+    ///
+    /// [`step_count_above_duration_ms`]: AgentSession::step_count_above_duration_ms
+    pub fn step_count_below_duration_ms(&self, threshold_ms: u64) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| s.step_duration_ms < threshold_ms)
+            .count()
+    }
+
     /// Persist this session as a checkpoint under `"session:<session_id>"`.
     #[cfg(feature = "persistence")]
     pub async fn save_checkpoint(

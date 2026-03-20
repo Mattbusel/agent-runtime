@@ -3509,6 +3509,17 @@ impl WorkingMemory {
             .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| b.cmp(a)));
         Ok(best_key.and_then(|k| inner.map.get(k).cloned()))
     }
+
+    /// Return `true` if any entry in this store has a value equal to `value`.
+    ///
+    /// Performs a linear scan over all stored values.  For exact-match
+    /// semantics use [`get`] instead.
+    ///
+    /// [`get`]: WorkingMemory::get
+    pub fn contains_value(&self, value: &str) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::contains_value");
+        Ok(inner.map.values().any(|v| v == value))
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
