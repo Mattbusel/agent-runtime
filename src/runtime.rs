@@ -1694,6 +1694,28 @@ impl AgentSession {
         thought_bytes as f64 / action_bytes as f64
     }
 
+    /// Return the number of steps whose `observation` byte length exceeds
+    /// `min_bytes`.
+    ///
+    /// Returns `0` when the session is empty or no step qualifies.
+    pub fn observation_above_bytes_count(&self, min_bytes: usize) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| s.observation.len() > min_bytes)
+            .count()
+    }
+
+    /// Return the number of steps where both the `thought` and `action`
+    /// fields are non-empty.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn steps_with_both_thought_and_action(&self) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| !s.thought.is_empty() && !s.action.is_empty())
+            .count()
+    }
+
     /// Return the statistical variance of thought byte lengths across all steps.
     ///
     /// Returns `0.0` for a session with fewer than two steps.
@@ -2095,6 +2117,17 @@ impl AgentSession {
     /// When multiple steps tie, the first is returned.
     pub fn step_with_longest_action(&self) -> Option<&ReActStep> {
         self.steps.iter().max_by_key(|s| s.action.chars().count())
+    }
+
+    /// Return the number of steps whose `observation` byte length strictly
+    /// exceeds `min_bytes`.
+    ///
+    /// Returns `0` for an empty session.
+    pub fn step_count_with_observation_longer_than(&self, min_bytes: usize) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| s.observation.len() > min_bytes)
+            .count()
     }
 }
 
@@ -7278,6 +7311,42 @@ mod tests {
         assert_eq!(session.thought_to_action_byte_ratio(), 0.0);
     }
 
+    // ── Round 60: observation_above_bytes_count, steps_with_both_thought_and_action ──
+
+    #[test]
+    fn test_observation_above_bytes_count_correct() {
+        let steps = vec![
+            make_step("t", "a", "short"),
+            make_step("t", "a", "this is quite long"),
+            make_step("t", "a", "x"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.observation_above_bytes_count(5), 1);
+    }
+
+    #[test]
+    fn test_observation_above_bytes_count_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.observation_above_bytes_count(0), 0);
+    }
+
+    #[test]
+    fn test_steps_with_both_thought_and_action_correct() {
+        let steps = vec![
+            make_step("think", "act", "obs"),
+            make_step("", "act", "obs"),
+            make_step("think", "", "obs"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_with_both_thought_and_action(), 1);
+    }
+
+    #[test]
+    fn test_steps_with_both_thought_and_action_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.steps_with_both_thought_and_action(), 0);
+    }
+
     // ── Round 58: steps_matching_thought, median_observation_chars, cumulative_thought_chars, count_steps_with_thought_containing ──
 
     #[test]
@@ -7491,5 +7560,73 @@ mod tests {
     fn test_registered_tool_names_empty_when_no_tools() {
         let rt = AgentRuntime::quick(3, "test-model");
         assert!(rt.registered_tool_names().is_empty());
+    }
+
+    // ── Round 60: avg_action_chars, avg_observation_chars, step_with_longest_action ──
+
+    #[test]
+    fn test_avg_action_chars_correct() {
+        let steps = vec![
+            make_step("t", "ab", "o"),
+            make_step("t", "abcd", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.avg_action_chars() - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_action_chars_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.avg_action_chars(), 0.0);
+    }
+
+    #[test]
+    fn test_avg_observation_chars_correct() {
+        let steps = vec![
+            make_step("t", "a", "hello"),
+            make_step("t", "a", "hi"),
+        ];
+        let session = make_session(steps, 0);
+        // (5 + 2) / 2 = 3.5
+        assert!((session.avg_observation_chars() - 3.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_step_with_longest_action_returns_correct_step() {
+        let steps = vec![
+            make_step("t", "short", "o"),
+            make_step("t", "much longer action string", "o"),
+            make_step("t", "medium act", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(
+            session.step_with_longest_action().map(|s| s.action.as_str()),
+            Some("much longer action string")
+        );
+    }
+
+    #[test]
+    fn test_step_with_longest_action_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.step_with_longest_action().is_none());
+    }
+
+    // ── Round 59: step_count_with_observation_longer_than ─────────────────────
+
+    #[test]
+    fn test_step_count_with_observation_longer_than_counts_correctly() {
+        let steps = vec![
+            make_step("t", "a", "short"),           // 5 bytes
+            make_step("t", "a", "a longer string"), // 14 bytes
+            make_step("t", "a", "x"),               // 1 byte
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.step_count_with_observation_longer_than(5), 1);
+    }
+
+    #[test]
+    fn test_step_count_with_observation_longer_than_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.step_count_with_observation_longer_than(0), 0);
     }
 }

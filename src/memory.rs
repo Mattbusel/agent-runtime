@@ -2483,6 +2483,26 @@ impl EpisodicStore {
         }))
     }
 
+    /// Return the number of episodes for `agent_id` whose timestamp falls
+    /// within `[start, end]` (inclusive on both ends).
+    ///
+    /// Returns `0` for unknown agents or when no episode falls in the window.
+    pub fn count_episodes_in_window(
+        &self,
+        agent_id: &AgentId,
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "EpisodicStore::count_episodes_in_window");
+        Ok(inner.items.get(agent_id).map_or(0, |items| {
+            items
+                .iter()
+                .filter(|m| m.timestamp >= start && m.timestamp <= end)
+                .count()
+        }))
+    }
+
     /// Return all episodes for `agent_id` whose importance is strictly below
     /// `threshold`, sorted by importance ascending (least important first).
     ///
@@ -2918,6 +2938,31 @@ impl EpisodicStore {
             .items
             .get(agent_id)
             .map_or(false, |items| !items.is_empty()))
+    }
+
+    /// Return all episodes for `agent_id` whose content contains `substr`
+    /// (case-sensitive substring match).
+    ///
+    /// Returns an empty `Vec` for unknown agents or when no episode matches.
+    pub fn episodes_with_content_containing(
+        &self,
+        agent_id: &AgentId,
+        substr: &str,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(
+            self.inner.lock(),
+            "EpisodicStore::episodes_with_content_containing",
+        );
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or_else(Vec::new, |items| {
+                items
+                    .iter()
+                    .filter(|m| m.content.contains(substr))
+                    .cloned()
+                    .collect()
+            }))
     }
 
 }
@@ -4224,6 +4269,18 @@ impl WorkingMemory {
         Ok(inner.map.keys().any(|k| k.starts_with(prefix)))
     }
 
+    /// Return the count of values that start with `prefix`.
+    ///
+    /// Returns `0` for an empty store or when no value matches.
+    pub fn value_count_matching_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "WorkingMemory::value_count_matching_prefix");
+        Ok(inner.map.values().filter(|v| v.starts_with(prefix)).count())
+    }
+
     /// Return the sum of byte lengths of all values currently stored.
     ///
     /// Returns `0` for an empty store.
@@ -4846,6 +4903,20 @@ impl WorkingMemory {
         let inner =
             recover_lock(self.inner.lock(), "WorkingMemory::all_values_non_empty");
         Ok(inner.map.values().all(|v| !v.is_empty()))
+    }
+
+    /// Return the average byte length of all stored values.
+    ///
+    /// Returns `0.0` when the store is empty to avoid division-by-zero.
+    pub fn average_value_length(&self) -> Result<f64, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "WorkingMemory::average_value_length");
+        let count = inner.map.len();
+        if count == 0 {
+            return Ok(0.0);
+        }
+        let total: usize = inner.map.values().map(|v| v.len()).sum();
+        Ok(total as f64 / count as f64)
     }
 
 }
@@ -10524,6 +10595,50 @@ mod tests {
         assert!(store.min_episode_importance(&agent).unwrap().is_none());
     }
 
+    // ── Round 60: value_count_matching_prefix, count_episodes_in_window ───────
+
+    #[test]
+    fn test_value_count_matching_prefix_correct() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "hello world").unwrap();
+        wm.set("k2", "hello there").unwrap();
+        wm.set("k3", "goodbye").unwrap();
+        assert_eq!(wm.value_count_matching_prefix("hello").unwrap(), 2);
+    }
+
+    #[test]
+    fn test_value_count_matching_prefix_zero_when_none_match() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "nope").unwrap();
+        assert_eq!(wm.value_count_matching_prefix("yes").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_count_episodes_in_window_correct() {
+        use chrono::Utc;
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r60-window");
+        store.add_episode(agent.clone(), "ep1", 0.5).unwrap();
+        store.add_episode(agent.clone(), "ep2", 0.5).unwrap();
+        // All episodes are created "now", so a wide window should include them
+        let start = Utc::now() - chrono::Duration::hours(1);
+        let end = Utc::now() + chrono::Duration::hours(1);
+        let count = store.count_episodes_in_window(&agent, start, end).unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_count_episodes_in_window_zero_for_future_window() {
+        use chrono::Utc;
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r60-future");
+        store.add_episode(agent.clone(), "ep", 0.5).unwrap();
+        let start = Utc::now() + chrono::Duration::hours(1);
+        let end = Utc::now() + chrono::Duration::hours(2);
+        let count = store.count_episodes_in_window(&agent, start, end).unwrap();
+        assert_eq!(count, 0);
+    }
+
     #[test]
     fn test_total_content_words_returns_total_word_count() {
         let store = EpisodicStore::new();
@@ -10605,5 +10720,80 @@ mod tests {
     fn test_value_char_count_zero_for_missing_key() {
         let wm = WorkingMemory::new(10).unwrap();
         assert_eq!(wm.value_char_count("missing").unwrap(), 0);
+    }
+
+    // ── Round 60: agent_episode_importance_sum, keys_longer_than ──────────────
+
+    #[test]
+    fn test_agent_episode_importance_sum_correct() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r60-importance-sum");
+        store.add_episode_with_tags(agent.clone(), "a", 0.4, vec![]).unwrap();
+        store.add_episode_with_tags(agent.clone(), "b", 0.6, vec![]).unwrap();
+        let sum = store.agent_episode_importance_sum(&agent).unwrap();
+        assert!((sum - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_agent_episode_importance_sum_zero_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r60-importance-sum-unknown");
+        assert_eq!(store.agent_episode_importance_sum(&agent).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_keys_longer_than_filters_correctly() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("ab", "v").unwrap();
+        wm.set("abcdef", "v").unwrap();
+        wm.set("xyz", "v").unwrap();
+        let mut keys = wm.keys_longer_than(3).unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["abcdef".to_string()]);
+    }
+
+    #[test]
+    fn test_keys_longer_than_empty_when_none_qualify() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("hi", "v").unwrap();
+        assert!(wm.keys_longer_than(10).unwrap().is_empty());
+    }
+
+    // ── Round 59: episodes_with_content_containing, average_value_length ──────
+
+    #[test]
+    fn test_episodes_with_content_containing_returns_matches() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r59-content");
+        store.add_episode_with_tags(agent.clone(), "hello world", 0.5, vec![]).unwrap();
+        store.add_episode_with_tags(agent.clone(), "goodbye", 0.5, vec![]).unwrap();
+        let result = store.episodes_with_content_containing(&agent, "hello").unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result[0].content.contains("hello"));
+    }
+
+    #[test]
+    fn test_episodes_with_content_containing_empty_for_no_match() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r59-content-miss");
+        store.add_episode_with_tags(agent.clone(), "hello", 0.5, vec![]).unwrap();
+        let result = store.episodes_with_content_containing(&agent, "xyz").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_average_value_length_computes_mean() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("a", "hi").unwrap();      // 2 bytes
+        wm.set("b", "hello").unwrap();   // 5 bytes
+        // mean = 3.5
+        let avg = wm.average_value_length().unwrap();
+        assert!((avg - 3.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_average_value_length_zero_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.average_value_length().unwrap(), 0.0);
     }
 }

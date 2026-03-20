@@ -2193,6 +2193,17 @@ impl Pipeline {
         self.stages.iter().map(|s| s.name.len()).max().unwrap_or(0)
     }
 
+    /// Join all stage names with `sep` and return the resulting string.
+    ///
+    /// Returns an empty string for an empty pipeline.
+    pub fn stage_names_joined(&self, sep: &str) -> String {
+        self.stages
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join(sep)
+    }
+
     /// Return `true` if **all** stage names start with `prefix`.
     ///
     /// Returns `true` for an empty pipeline (vacuously true) and for an empty
@@ -4686,6 +4697,22 @@ mod tests {
         assert_eq!(p.longest_stage_name_len(), 0);
     }
 
+    // ── Round 60: stage_names_joined ─────────────────────────────────────────
+
+    #[test]
+    fn test_stage_names_joined_correct() {
+        let p = Pipeline::new()
+            .add_stage("alpha", |s: String| Ok(s))
+            .add_stage("beta", |s: String| Ok(s));
+        assert_eq!(p.stage_names_joined(", "), "alpha, beta");
+    }
+
+    #[test]
+    fn test_stage_names_joined_empty_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert_eq!(p.stage_names_joined("|"), "");
+    }
+
     // ── Round 57: any_stage_has_name ─────────────────────────────────────────
 
     #[test]
@@ -4729,5 +4756,21 @@ mod tests {
         let policy = RetryPolicy::none();
         // none() has max_attempts == 1, so covers_n_failures(1) is false
         assert!(!policy.covers_n_failures(1));
+    }
+
+    // ── Round 59: last_stage_name ─────────────────────────────────────────────
+
+    #[test]
+    fn test_last_stage_name_returns_last_added() {
+        let p = Pipeline::new()
+            .add_stage("first", |s: String| Ok(s))
+            .add_stage("last", |s: String| Ok(s));
+        assert_eq!(p.last_stage_name(), Some("last"));
+    }
+
+    #[test]
+    fn test_last_stage_name_none_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.last_stage_name().is_none());
     }
 }

@@ -3380,6 +3380,35 @@ impl GraphStore {
         Ok(count)
     }
 
+    /// Return the sum of weights of all relationships whose `kind` equals the
+    /// given string.
+    ///
+    /// Returns `0.0` when no relationships of that kind exist.
+    pub fn total_weight_for_kind(&self, kind: &str) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::total_weight_for_kind");
+        let sum: f64 = inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter())
+            .filter(|r| r.kind == kind)
+            .map(|r| r.weight as f64)
+            .sum();
+        Ok(sum)
+    }
+
+    /// Return the `EntityId`s of all entities with the given `label`.
+    ///
+    /// Returns an empty `Vec` when no matching entities exist.
+    pub fn entity_ids_with_label(&self, label: &str) -> Result<Vec<EntityId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entity_ids_with_label");
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| e.label == label)
+            .map(|e| e.id.clone())
+            .collect())
+    }
+
     ///
     /// Entities with no outgoing edges have an out-degree of 0 and are
     /// excluded unless `min_degree` is 0.  Returns an empty `Vec` for an
@@ -3612,6 +3641,23 @@ impl GraphStore {
             .map_or(0, |rels| rels.iter().filter(|r| &r.to == to_id).count()))
     }
 
+    /// Return `true` if there is at least one direct edge from `from_id` to
+    /// `to_id`.
+    ///
+    /// Returns `false` when either entity does not exist or no direct edge is
+    /// found.
+    pub fn is_connected(
+        &self,
+        from_id: &EntityId,
+        to_id: &EntityId,
+    ) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::is_connected");
+        Ok(inner
+            .adjacency
+            .get(from_id)
+            .map_or(false, |rels| rels.iter().any(|r| &r.to == to_id)))
+    }
+
     /// Return all entities that have at least one **incoming** relationship
     /// (in-degree ≥ 1).
     ///
@@ -3761,6 +3807,34 @@ impl GraphStore {
             .filter(|(from, rels)| rels.iter().any(|r| &r.to == *from))
             .count();
         Ok(count)
+    }
+
+    /// Return the out-degree (number of outgoing edges) for a specific entity.
+    ///
+    /// Returns `0` for unknown entity IDs.  Complements
+    /// [`GraphStore::in_degree_of`] which counts incoming edges.
+    pub fn out_degree_of(&self, id: &EntityId) -> Result<usize, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "GraphStore::out_degree_of");
+        Ok(inner.adjacency.get(id).map_or(0, |rels| rels.len()))
+    }
+
+    /// Return `true` if the graph contains at least one relationship with the
+    /// given `kind`.
+    ///
+    /// A cheaper alternative to [`GraphStore::relationships_of_kind_count`]
+    /// when a boolean answer is sufficient.
+    pub fn has_relationship_with_kind(
+        &self,
+        kind: &str,
+    ) -> Result<bool, AgentRuntimeError> {
+        let inner =
+            recover_lock(self.inner.lock(), "GraphStore::has_relationship_with_kind");
+        Ok(inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter())
+            .any(|r| r.kind == kind))
     }
 
 }
@@ -7828,6 +7902,29 @@ mod tests {
         assert_eq!(g.edge_count_between(&from, &to).unwrap(), 0);
     }
 
+    // ── Round 60: is_connected ────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_connected_true_when_edge_exists() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("p", "N")).unwrap();
+        g.add_entity(Entity::new("q", "N")).unwrap();
+        g.add_relationship(Relationship::new("p", "q", "LINKS", 1.0)).unwrap();
+        let p = EntityId::new("p");
+        let q = EntityId::new("q");
+        assert!(g.is_connected(&p, &q).unwrap());
+    }
+
+    #[test]
+    fn test_is_connected_false_when_no_edge() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("p2", "N")).unwrap();
+        g.add_entity(Entity::new("q2", "N")).unwrap();
+        let p2 = EntityId::new("p2");
+        let q2 = EntityId::new("q2");
+        assert!(!g.is_connected(&p2, &q2).unwrap());
+    }
+
     // ── Round 58: nodes_with_no_outgoing ──────────────────────────────────────
 
     #[test]
@@ -7905,5 +8002,84 @@ mod tests {
         g.add_entity(Entity::new("alone", "N")).unwrap();
         let id = EntityId("alone".to_string());
         assert_eq!(g.in_degree_of(&id).unwrap(), 0);
+    }
+
+    // ── Round 60: total_weight_for_kind, entity_ids_with_label ────────────────
+
+    #[test]
+    fn test_total_weight_for_kind_sums_correctly() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 2.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "link", 4.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "other", 1.0)).unwrap();
+        let sum = g.total_weight_for_kind("link").unwrap();
+        assert!((sum - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_total_weight_for_kind_zero_for_unknown_kind() {
+        let g = GraphStore::new();
+        assert_eq!(g.total_weight_for_kind("nope").unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_entity_ids_with_label_returns_matching_ids() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("e1", "Person")).unwrap();
+        g.add_entity(Entity::new("e2", "Person")).unwrap();
+        g.add_entity(Entity::new("e3", "Place")).unwrap();
+        let mut ids = g.entity_ids_with_label("Person").unwrap();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        let strs: Vec<&str> = ids.iter().map(|id| id.0.as_str()).collect();
+        assert_eq!(strs, vec!["e1", "e2"]);
+    }
+
+    #[test]
+    fn test_entity_ids_with_label_empty_for_unknown_label() {
+        let g = GraphStore::new();
+        assert!(g.entity_ids_with_label("Unknown").unwrap().is_empty());
+    }
+
+    // ── Round 59: out_degree_of, has_relationship_with_kind ───────────────────
+
+    #[test]
+    fn test_out_degree_of_returns_edge_count() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "k", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "k", 1.0)).unwrap();
+        let id = EntityId("a".to_string());
+        assert_eq!(g.out_degree_of(&id).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_out_degree_of_zero_for_sink_node() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("sink", "N")).unwrap();
+        let id = EntityId("sink".to_string());
+        assert_eq!(g.out_degree_of(&id).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_has_relationship_with_kind_true_when_kind_present() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "follows", 1.0)).unwrap();
+        assert!(g.has_relationship_with_kind("follows").unwrap());
+    }
+
+    #[test]
+    fn test_has_relationship_with_kind_false_for_absent_kind() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "likes", 1.0)).unwrap();
+        assert!(!g.has_relationship_with_kind("follows").unwrap());
     }
 }
