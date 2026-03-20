@@ -232,6 +232,10 @@ struct GraphInner {
     /// Kept in sync with `relationships` to give O(degree) neighbour lookup
     /// in BFS/DFS/shortest-path without a full linear scan.
     adjacency: HashMap<EntityId, Vec<Relationship>>,
+    /// Reverse adjacency index: entity → set of entities with edges pointing TO it.
+    /// Enables O(in-degree) `in_degree`, `source_nodes`, and `isolates` without a
+    /// full O(|E|) scan.
+    reverse_adjacency: HashMap<EntityId, Vec<EntityId>>,
     /// Cached result of cycle detection. Invalidated on any mutation.
     cycle_cache: Option<bool>,
 }
@@ -244,6 +248,7 @@ impl GraphStore {
                 entities: HashMap::new(),
                 relationships: Vec::new(),
                 adjacency: HashMap::new(),
+                reverse_adjacency: HashMap::new(),
                 cycle_cache: None,
             })),
         }
@@ -673,6 +678,33 @@ impl GraphStore {
     /// [`relationship_count`]: GraphStore::relationship_count
     pub fn edge_count(&self) -> Result<usize, AgentRuntimeError> {
         self.relationship_count()
+    }
+
+    /// Return all entity IDs in the graph without allocating full `Entity` objects.
+    ///
+    /// Cheaper than [`all_entities`] when only IDs are needed.
+    ///
+    /// [`all_entities`]: GraphStore::all_entities
+    pub fn entity_ids(&self) -> Result<Vec<EntityId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "entity_ids");
+        Ok(inner.entities.keys().cloned().collect())
+    }
+
+    /// Return `true` if the graph contains no entities.
+    pub fn is_empty(&self) -> Result<bool, AgentRuntimeError> {
+        Ok(self.entity_count()? == 0)
+    }
+
+    /// Remove all entities and relationships from the graph.
+    ///
+    /// After this call `entity_count()` and `relationship_count()` both return `0`.
+    pub fn clear(&self) -> Result<(), AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "GraphStore::clear");
+        inner.entities.clear();
+        inner.relationships.clear();
+        inner.adjacency.clear();
+        inner.cycle_cache = None;
+        Ok(())
     }
 
     /// Count entities whose label equals `label` (case-sensitive).
@@ -1111,6 +1143,38 @@ impl GraphStore {
             .filter(|(i, _)| find(&mut parent, *i) == *i)
             .count();
         Ok(components)
+    }
+
+    /// Return all entities that have no outgoing edges (out-degree == 0).
+    ///
+    /// In a DAG these are the leaf nodes. Useful for identifying terminal
+    /// states in a workflow or dependency graph.
+    pub fn sink_nodes(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "sink_nodes");
+        let has_outgoing: std::collections::HashSet<&EntityId> =
+            inner.relationships.iter().map(|r| &r.from).collect();
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| !has_outgoing.contains(&e.id))
+            .cloned()
+            .collect())
+    }
+
+    /// Return all entities that have no incoming edges (in-degree == 0).
+    ///
+    /// In a DAG these are the root nodes. Useful for finding entry points in
+    /// a workflow or dependency graph.
+    pub fn source_nodes(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "source_nodes");
+        let has_incoming: std::collections::HashSet<&EntityId> =
+            inner.relationships.iter().map(|r| &r.to).collect();
+        Ok(inner
+            .entities
+            .values()
+            .filter(|e| !has_incoming.contains(&e.id))
+            .cloned()
+            .collect())
     }
 
     /// Return all entities that have no edges (neither incoming nor outgoing).
@@ -2383,5 +2447,40 @@ mod tests {
         g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
         assert_eq!(g.edge_count().unwrap(), g.relationship_count().unwrap());
         assert_eq!(g.edge_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_source_nodes_returns_nodes_with_no_incoming_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("root", "Root")).unwrap();
+        g.add_entity(Entity::new("child", "Child")).unwrap();
+        g.add_entity(Entity::new("leaf", "Leaf")).unwrap();
+        g.add_relationship(Relationship::new("root", "child", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("child", "leaf", "e", 1.0)).unwrap();
+        let sources = g.source_nodes().unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].id.as_str(), "root");
+    }
+
+    #[test]
+    fn test_sink_nodes_returns_nodes_with_no_outgoing_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("root", "Root")).unwrap();
+        g.add_entity(Entity::new("child", "Child")).unwrap();
+        g.add_entity(Entity::new("leaf", "Leaf")).unwrap();
+        g.add_relationship(Relationship::new("root", "child", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("child", "leaf", "e", 1.0)).unwrap();
+        let sinks = g.sink_nodes().unwrap();
+        assert_eq!(sinks.len(), 1);
+        assert_eq!(sinks[0].id.as_str(), "leaf");
+    }
+
+    #[test]
+    fn test_source_and_sink_empty_on_isolated_node() {
+        // An isolated node has no in or out edges, so it's both source and sink
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("solo", "Solo")).unwrap();
+        assert_eq!(g.source_nodes().unwrap().len(), 1);
+        assert_eq!(g.sink_nodes().unwrap().len(), 1);
     }
 }

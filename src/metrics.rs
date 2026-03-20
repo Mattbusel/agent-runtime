@@ -260,6 +260,20 @@ impl MetricsSnapshot {
         })
     }
 
+    /// Return the number of calls recorded for the named tool.
+    ///
+    /// Returns `0` if no calls have been recorded for that tool name.
+    pub fn tool_call_count(&self, name: &str) -> u64 {
+        self.per_tool_calls.get(name).copied().unwrap_or(0)
+    }
+
+    /// Return the number of failures recorded for the named tool.
+    ///
+    /// Returns `0` if no failures have been recorded for that tool name.
+    pub fn tool_failure_count(&self, name: &str) -> u64 {
+        self.per_tool_failures.get(name).copied().unwrap_or(0)
+    }
+
     /// Return `true` if all counters are zero (no activity has been recorded).
     pub fn is_zero(&self) -> bool {
         self.active_sessions == 0
@@ -608,7 +622,7 @@ impl RuntimeMetrics {
     pub fn top_tools_by_calls(&self, n: usize) -> Vec<(String, u64)> {
         let snap = self.per_tool_calls_snapshot();
         let mut pairs: Vec<(String, u64)> = snap.into_iter().collect();
-        pairs.sort_by(|a, b| b.1.cmp(&a.1));
+        pairs.sort_unstable_by(|a, b| b.1.cmp(&a.1));
         pairs.truncate(n);
         pairs
     }
@@ -1041,5 +1055,27 @@ mod tests {
         let m = RuntimeMetrics::new();
         m.record_tool_call("t");
         assert!(!m.snapshot().is_zero());
+    }
+
+    #[test]
+    fn test_tool_call_count_returns_per_tool_count() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("search");
+        m.record_tool_call("search");
+        m.record_tool_call("fetch");
+        let snap = m.snapshot();
+        assert_eq!(snap.tool_call_count("search"), 2);
+        assert_eq!(snap.tool_call_count("fetch"), 1);
+        assert_eq!(snap.tool_call_count("absent"), 0);
+    }
+
+    #[test]
+    fn test_tool_failure_count_returns_per_tool_failures() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("t");
+        m.record_tool_failure("t");
+        let snap = m.snapshot();
+        assert_eq!(snap.tool_failure_count("t"), 1);
+        assert_eq!(snap.tool_failure_count("other"), 0);
     }
 }

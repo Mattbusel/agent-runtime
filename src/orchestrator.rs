@@ -138,6 +138,13 @@ impl RetryPolicy {
         }
     }
 
+    /// Return `true` if this policy makes at most one attempt with no delay.
+    ///
+    /// Equivalent to `max_attempts == 1 && base_delay == Duration::ZERO`.
+    pub fn is_none(&self) -> bool {
+        self.max_attempts == 1 && self.base_delay == Duration::ZERO
+    }
+
     /// Return a copy of this policy with `max_attempts` changed.
     ///
     /// # Errors
@@ -149,6 +156,20 @@ impl RetryPolicy {
             ));
         }
         self.max_attempts = n;
+        Ok(self)
+    }
+
+    /// Return a copy of this policy with the base delay changed to `ms` milliseconds.
+    ///
+    /// # Errors
+    /// Returns `Err` if `ms == 0`.
+    pub fn with_base_delay_ms(mut self, ms: u64) -> Result<Self, AgentRuntimeError> {
+        if ms == 0 {
+            return Err(AgentRuntimeError::Orchestration(
+                "base_delay_ms must be >= 1 to avoid busy-loop retries".into(),
+            ));
+        }
+        self.base_delay = Duration::from_millis(ms);
         Ok(self)
     }
 
@@ -1065,6 +1086,16 @@ impl BackpressureGuard {
         let depth = self.depth()?;
         Ok(self.capacity.saturating_sub(depth))
     }
+
+    /// Force the in-flight depth counter to zero.
+    ///
+    /// Useful for test teardown or hard resets where acquired slots will never
+    /// be released normally (e.g., after a test panics before calling `release`).
+    pub fn reset_depth(&self) -> Result<(), AgentRuntimeError> {
+        let mut depth = timed_lock(&self.inner, "BackpressureGuard::reset_depth");
+        *depth = 0;
+        Ok(())
+    }
 }
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -1152,6 +1183,14 @@ impl Pipeline {
         self.stages.is_empty()
     }
 
+    /// Return `true` if a stage error handler has been configured via
+    /// [`with_error_handler`].
+    ///
+    /// [`with_error_handler`]: Pipeline::with_error_handler
+    pub fn has_error_handler(&self) -> bool {
+        self.error_handler.is_some()
+    }
+
     /// Return the number of stages in the pipeline.
     pub fn stage_count(&self) -> usize {
         self.stages.len()
@@ -1160,6 +1199,26 @@ impl Pipeline {
     /// Return the names of all stages in execution order.
     pub fn stage_names(&self) -> Vec<&str> {
         self.stages.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    /// Remove the first stage whose name equals `name`.
+    ///
+    /// Returns `true` if a stage was found and removed, `false` if no stage
+    /// with that name was registered.
+    pub fn remove_stage(&mut self, name: &str) -> bool {
+        if let Some(pos) = self.stages.iter().position(|s| s.name == name) {
+            self.stages.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove all stages from the pipeline.
+    ///
+    /// The error handler (if any) is preserved; only the stage list is cleared.
+    pub fn clear(&mut self) {
+        self.stages.clear();
     }
 
     /// Execute the pipeline, passing `input` through each stage in order.
@@ -1836,5 +1895,30 @@ mod tests {
     fn test_retry_policy_total_max_delay_none_is_zero() {
         let p = RetryPolicy::none();
         assert_eq!(p.total_max_delay_ms(), 0);
+    }
+
+    #[test]
+    fn test_retry_policy_is_none_true_for_none() {
+        let p = RetryPolicy::none();
+        assert!(p.is_none());
+    }
+
+    #[test]
+    fn test_retry_policy_is_none_false_for_exponential() {
+        let p = RetryPolicy::exponential(3, 10).unwrap();
+        assert!(!p.is_none());
+    }
+
+    #[test]
+    fn test_pipeline_has_error_handler_false_by_default() {
+        let p = Pipeline::new().add_stage("s", |s: String| Ok(s));
+        assert!(!p.has_error_handler());
+    }
+
+    #[test]
+    fn test_pipeline_has_error_handler_true_after_set() {
+        let p = Pipeline::new()
+            .with_error_handler(|_stage, _err| "recovered".to_string());
+        assert!(p.has_error_handler());
     }
 }

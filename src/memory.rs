@@ -90,6 +90,19 @@ impl MemoryItem {
     }
 }
 
+impl std::fmt::Display for MemoryItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[{}] importance={:.2} recalls={} content=\"{}\"",
+            self.id,
+            self.importance,
+            self.recall_count,
+            self.content
+        )
+    }
+}
+
 // ── DecayPolicy ───────────────────────────────────────────────────────────────
 
 /// Governs how memory importance decays over time.
@@ -128,6 +141,11 @@ impl DecayPolicy {
     pub fn apply(&self, importance: f32, age_hours: f64) -> f32 {
         let decay = (-age_hours * std::f64::consts::LN_2 / self.half_life_hours).exp();
         (importance as f64 * decay).clamp(0.0, 1.0) as f32
+    }
+
+    /// Return the configured half-life in hours.
+    pub fn half_life_hours(&self) -> f64 {
+        self.half_life_hours
     }
 
     /// Apply decay in-place to a mutable `MemoryItem`.
@@ -894,6 +912,60 @@ impl EpisodicStore {
         Ok(false)
     }
 
+    /// Recall episodes for `agent_id` inserted at or after `cutoff`.
+    ///
+    /// Returns items ordered by descending importance (same as [`recall`]).
+    /// Pass `limit = 0` to return all matching items.
+    ///
+    /// [`recall`]: EpisodicStore::recall
+    pub fn recall_since(
+        &self,
+        agent_id: &AgentId,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        limit: usize,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::recall_since");
+        let mut items: Vec<MemoryItem> = inner
+            .items
+            .get(agent_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|i| i.timestamp >= cutoff)
+            .collect();
+        drop(inner);
+        items.sort_unstable_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if limit > 0 {
+            items.truncate(limit);
+        }
+        Ok(items)
+    }
+
+    /// Update the `content` of an episode identified by its `MemoryId`.
+    ///
+    /// Returns `Ok(true)` if found and updated, `Ok(false)` if no episode with that
+    /// `id` exists for `agent_id`.
+    pub fn update_content(
+        &self,
+        agent_id: &AgentId,
+        id: &MemoryId,
+        new_content: impl Into<String>,
+    ) -> Result<bool, AgentRuntimeError> {
+        let new_content = new_content.into();
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::update_content");
+        if let Some(items) = inner.items.get_mut(agent_id) {
+            if let Some(item) = items.iter_mut().find(|i| &i.id == id) {
+                item.content = new_content;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Recall the most recently added episodes for `agent_id` in reverse insertion order.
     ///
     /// Unlike [`recall`] (which ranks by importance), this returns the `limit` most
@@ -925,6 +997,42 @@ impl EpisodicStore {
     /// [`recall`]: EpisodicStore::recall
     pub fn recall_all(&self, agent_id: &AgentId) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
         self.recall(agent_id, usize::MAX)
+    }
+
+    /// Return the top `n` episodes for `agent_id` ordered by descending importance.
+    ///
+    /// When `n == 0` all episodes are returned. Does not increment `recall_count`.
+    pub fn top_n(&self, agent_id: &AgentId, n: usize) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::top_n");
+        let mut items = inner.items.get(agent_id).cloned().unwrap_or_default();
+        items.sort_unstable_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
+        if n > 0 {
+            items.truncate(n);
+        }
+        Ok(items)
+    }
+
+    /// Return episodes for `agent_id` whose importance is in `[min, max]`, most
+    /// important first. Passing `limit == 0` returns all matching episodes.
+    pub fn search_by_importance_range(
+        &self,
+        agent_id: &AgentId,
+        min: f32,
+        max: f32,
+        limit: usize,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::search_by_importance_range");
+        let mut items: Vec<MemoryItem> = inner
+            .items
+            .get(agent_id)
+            .map_or_else(Vec::new, |v| {
+                v.iter().filter(|i| i.importance >= min && i.importance <= max).cloned().collect()
+            });
+        items.sort_unstable_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
+        if limit > 0 {
+            items.truncate(limit);
+        }
+        Ok(items)
     }
 
     /// Return the sum of `recall_count` across all episodes for `agent_id`.
@@ -1267,6 +1375,12 @@ impl SemanticStore {
         Ok(inner.entries.iter().find(|e| e.key == key).map(|e| (e.value.clone(), e.tags.clone())))
     }
 
+    /// Return `true` if an entry with the given key is stored.
+    pub fn contains(&self, key: &str) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::contains");
+        Ok(inner.entries.iter().any(|e| e.key == key))
+    }
+
     /// Remove the first entry whose key matches `key`.  Returns `true` if found.
     pub fn remove(&self, key: &str) -> Result<bool, AgentRuntimeError> {
         let mut inner = recover_lock(self.inner.lock(), "SemanticStore::remove");
@@ -1319,6 +1433,31 @@ impl SemanticStore {
             .flat_map(|e| e.tags.iter().map(|t| t.as_str()))
             .collect();
         Ok(distinct.len())
+    }
+
+    /// Return all stored entry keys in insertion order.
+    ///
+    /// Duplicate keys (if any) will appear multiple times.
+    pub fn list_keys(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::list_keys");
+        Ok(inner.entries.iter().map(|e| e.key.clone()).collect())
+    }
+
+    /// Update the tags of the first entry whose key matches `key`.
+    ///
+    /// Returns `Ok(true)` if found and updated, `Ok(false)` if not found.
+    pub fn update_tags(
+        &self,
+        key: &str,
+        new_tags: Vec<String>,
+    ) -> Result<bool, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "SemanticStore::update_tags");
+        if let Some(entry) = inner.entries.iter_mut().find(|e| e.key == key) {
+            entry.tags = new_tags;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Return the total number of stored entries.
@@ -1465,6 +1604,30 @@ impl WorkingMemory {
         }
     }
 
+    /// Rename a key without changing its value or insertion order.
+    ///
+    /// Returns `true` if `old_key` existed and was renamed.  Returns `false` if
+    /// `old_key` is not present.  If `new_key` already exists it is overwritten
+    /// and its old value is lost.
+    pub fn rename(
+        &self,
+        old_key: &str,
+        new_key: impl Into<String>,
+    ) -> Result<bool, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "WorkingMemory::rename");
+        let value = match inner.map.remove(old_key) {
+            None => return Ok(false),
+            Some(v) => v,
+        };
+        let new_key = new_key.into();
+        // Update the insertion-order list.
+        if let Some(pos) = inner.order.iter().position(|k| k == old_key) {
+            inner.order[pos] = new_key.clone();
+        }
+        inner.map.insert(new_key, value);
+        Ok(true)
+    }
+
     /// Retrieve multiple values in a single lock acquisition.
     ///
     /// Returns a `Vec` of the same length as `keys`.  Each entry is `Some(value)`
@@ -1572,6 +1735,17 @@ impl WorkingMemory {
             .filter_map(|k| inner.map.get(k).map(|v| (k.clone(), v.clone())))
             .collect();
         Ok(entries)
+    }
+
+    /// Return the maximum number of entries this store can hold.
+    ///
+    /// When [`len`] reaches this value, the oldest entry is evicted on the
+    /// next [`set`] call for a new key.
+    ///
+    /// [`len`]: WorkingMemory::len
+    /// [`set`]: WorkingMemory::set
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 }
 
@@ -2721,5 +2895,76 @@ mod tests {
     fn test_semantic_store_tag_count_empty() {
         let store = SemanticStore::new();
         assert_eq!(store.tag_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_episodic_top_n_returns_highest_importance() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("ag");
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        store.add_episode(agent.clone(), "med", 0.5).unwrap();
+        store.add_episode(agent.clone(), "low", 0.1).unwrap();
+        let top = store.top_n(&agent, 2).unwrap();
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].content, "high");
+        assert_eq!(top[1].content, "med");
+    }
+
+    #[test]
+    fn test_episodic_top_n_zero_returns_all() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("ag");
+        store.add_episode(agent.clone(), "a", 0.9).unwrap();
+        store.add_episode(agent.clone(), "b", 0.5).unwrap();
+        assert_eq!(store.top_n(&agent, 0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_episodic_search_by_importance_range() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("ag");
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        store.add_episode(agent.clone(), "mid", 0.5).unwrap();
+        store.add_episode(agent.clone(), "low", 0.1).unwrap();
+        let results = store.search_by_importance_range(&agent, 0.4, 1.0, 0).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].content, "high");
+    }
+
+    #[test]
+    fn test_semantic_store_contains_true_for_stored_key() {
+        let store = SemanticStore::new();
+        store.store("k", "v", vec![]).unwrap();
+        assert!(store.contains("k").unwrap());
+    }
+
+    #[test]
+    fn test_semantic_store_contains_false_for_missing_key() {
+        let store = SemanticStore::new();
+        assert!(!store.contains("missing").unwrap());
+    }
+
+    #[test]
+    fn test_working_memory_rename_changes_key() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("old", "value".to_string()).unwrap();
+        assert!(wm.rename("old", "new").unwrap());
+        assert_eq!(wm.get("new").unwrap().as_deref(), Some("value"));
+        assert!(wm.get("old").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_working_memory_rename_preserves_order() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("a", "1".to_string()).unwrap();
+        wm.set("b", "2".to_string()).unwrap();
+        wm.rename("a", "x").unwrap();
+        assert_eq!(wm.keys().unwrap(), vec!["x", "b"]);
+    }
+
+    #[test]
+    fn test_working_memory_rename_missing_returns_false() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(!wm.rename("nope", "other").unwrap());
     }
 }

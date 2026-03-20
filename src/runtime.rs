@@ -160,6 +160,29 @@ impl AgentSession {
         self.steps.iter().min_by_key(|s| s.step_duration_ms)
     }
 
+    /// Return references to all steps that are tool calls (not `FINAL_ANSWER`).
+    pub fn filter_tool_call_steps(&self) -> Vec<&ReActStep> {
+        self.steps.iter().filter(|s| s.is_tool_call()).collect()
+    }
+
+    /// Return the zero-based index of the slowest step, or `None` if there are no steps.
+    pub fn slowest_step_index(&self) -> Option<usize> {
+        self.steps
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, s)| s.step_duration_ms)
+            .map(|(i, _)| i)
+    }
+
+    /// Return the zero-based index of the fastest step, or `None` if there are no steps.
+    pub fn fastest_step_index(&self) -> Option<usize> {
+        self.steps
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, s)| s.step_duration_ms)
+            .map(|(i, _)| i)
+    }
+
     /// Collect all thought strings from every step, in order.
     pub fn all_thoughts(&self) -> Vec<&str> {
         self.steps.iter().map(|s| s.thought.as_str()).collect()
@@ -173,6 +196,22 @@ impl AgentSession {
     /// Collect all observation strings from every step, in order.
     pub fn all_observations(&self) -> Vec<&str> {
         self.steps.iter().map(|s| s.observation.as_str()).collect()
+    }
+
+    /// Return references to steps where the observation indicates a tool error.
+    ///
+    /// A step is classified as failed when its observation starts with
+    /// `{"error"` (the structured error JSON produced by required-field
+    /// validation) or contains the substring `"error"` (case-insensitive).
+    pub fn failed_steps(&self) -> Vec<&crate::agent::ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| {
+                let obs = s.observation.trim();
+                obs.starts_with("{\"error\"")
+                    || obs.to_ascii_lowercase().contains("\"error\"")
+            })
+            .collect()
     }
 
     /// Return `true` if any checkpoint errors were recorded during the session.
@@ -1653,5 +1692,60 @@ mod tests {
             checkpoint_errors: vec![],
         };
         assert!((session.memory_hit_rate() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_filter_tool_call_steps_excludes_final_answer() {
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![
+                ReActStep::new("t1", "search {}", "res"),
+                ReActStep::new("t2", "FINAL_ANSWER done", ""),
+            ],
+            memory_hits: 0,
+            graph_lookups: 0,
+            duration_ms: 0,
+            checkpoint_errors: vec![],
+        };
+        let tool_steps = session.filter_tool_call_steps();
+        assert_eq!(tool_steps.len(), 1);
+        assert_eq!(tool_steps[0].action, "search {}");
+    }
+
+    #[test]
+    fn test_slowest_step_index() {
+        let mut s0 = ReActStep::new("t", "a", "o");
+        s0.step_duration_ms = 5;
+        let mut s1 = ReActStep::new("t", "a", "o");
+        s1.step_duration_ms = 100;
+        let mut s2 = ReActStep::new("t", "a", "o");
+        s2.step_duration_ms = 10;
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![s0, s1, s2],
+            memory_hits: 0,
+            graph_lookups: 0,
+            duration_ms: 0,
+            checkpoint_errors: vec![],
+        };
+        assert_eq!(session.slowest_step_index(), Some(1));
+        assert_eq!(session.fastest_step_index(), Some(0));
+    }
+
+    #[test]
+    fn test_slowest_step_index_none_when_empty() {
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![],
+            memory_hits: 0,
+            graph_lookups: 0,
+            duration_ms: 0,
+            checkpoint_errors: vec![],
+        };
+        assert_eq!(session.slowest_step_index(), None);
+        assert_eq!(session.fastest_step_index(), None);
     }
 }

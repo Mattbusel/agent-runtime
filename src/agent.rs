@@ -341,6 +341,27 @@ impl AgentConfig {
     pub fn is_valid(&self) -> bool {
         self.max_iterations >= 1 && !self.model.is_empty()
     }
+
+    /// Validate the configuration, returning a structured error on failure.
+    ///
+    /// Checks the same invariants as [`is_valid`] but returns
+    /// `Err(AgentRuntimeError::AgentLoop)` with a descriptive message instead
+    /// of `false`, making it more useful in `?`-propagation chains.
+    ///
+    /// [`is_valid`]: AgentConfig::is_valid
+    pub fn validate(&self) -> Result<(), crate::error::AgentRuntimeError> {
+        if self.max_iterations == 0 {
+            return Err(crate::error::AgentRuntimeError::AgentLoop(
+                "AgentConfig: max_iterations must be >= 1".into(),
+            ));
+        }
+        if self.model.is_empty() {
+            return Err(crate::error::AgentRuntimeError::AgentLoop(
+                "AgentConfig: model must not be empty".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 // ── ToolSpec ──────────────────────────────────────────────────────────────────
@@ -1030,6 +1051,13 @@ impl ReActLoop {
     /// Return a read-only reference to the tool registry.
     pub fn registry(&self) -> &ToolRegistry {
         &self.registry
+    }
+
+    /// Return the number of tools currently registered.
+    ///
+    /// Shorthand for `loop_.registry().tool_count()`.
+    pub fn tool_count(&self) -> usize {
+        self.registry.tool_count()
     }
 
     /// Remove a registered tool by name.  Returns `true` if the tool was found.
@@ -2412,5 +2440,15 @@ mod tests {
         let mut cfg = AgentConfig::new(5, "my-model");
         cfg.model = String::new();
         assert!(!cfg.is_valid());
+    }
+
+    #[test]
+    fn test_react_loop_tool_count_delegates_to_registry() {
+        let cfg = AgentConfig::new(5, "model");
+        let mut loop_ = ReActLoop::new(cfg);
+        assert_eq!(loop_.tool_count(), 0);
+        loop_.register_tool(ToolSpec::new("t1", "desc", |_| serde_json::json!("ok")));
+        loop_.register_tool(ToolSpec::new("t2", "desc", |_| serde_json::json!("ok")));
+        assert_eq!(loop_.tool_count(), 2);
     }
 }
