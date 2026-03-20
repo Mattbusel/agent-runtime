@@ -11,6 +11,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.58.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::total_thought_bytes`** — sum of byte lengths of all thought strings in the session.
+- **`AgentSession::total_observation_bytes`** — sum of byte lengths of all observation strings.
+- **`EpisodicStore::episodes_by_importance`** — content strings sorted by descending importance.
+- **`SemanticStore::all_keys`** — sorted list of all stored keys.
+- **`WorkingMemory::min_value_length`** — byte length of the shortest stored value.
+- **`MetricsSnapshot::failed_tool_ratio_for`** — failure rate for a specific named tool.
+- **`MetricsSnapshot::backpressure_shed_rate`** — ratio of backpressure-shed events to tool calls.
+- **`GraphStore::edges_from`** — all relationships originating from a given entity.
+- **`GraphStore::neighbors_of`** — sorted list of entities reachable in one hop from a node.
+- **`ToolRegistry::description_contains_count`** — count of tools whose description contains a keyword.
+
+---
+
 ## [1.57.0] - 2026-03-20
 
 ### Added

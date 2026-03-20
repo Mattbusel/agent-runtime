@@ -1124,6 +1124,23 @@ impl EpisodicStore {
             .unwrap_or(0))
     }
 
+    /// Return the content strings of all episodes for `agent_id`, sorted by
+    /// descending importance (most important first).
+    pub fn episodes_by_importance(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episodes_by_importance");
+        let mut items: Vec<(f32, String)> = inner
+            .items
+            .get(agent_id)
+            .map_or_else(Vec::new, |v| {
+                v.iter().map(|i| (i.importance, i.content.clone())).collect()
+            });
+        items.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(items.into_iter().map(|(_, c)| c).collect())
+    }
+
     /// Return the count of episodes for `agent_id` whose content contains `substring`.
     ///
     /// The match is case-sensitive.  Returns `0` if the agent has no episodes.
@@ -2540,6 +2557,14 @@ impl SemanticStore {
         Ok(inner.entries.iter().map(|e| e.value.len()).min().unwrap_or(0))
     }
 
+    /// Return all stored keys in ascending sorted order.
+    pub fn all_keys(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::all_keys");
+        let mut keys: Vec<String> = inner.entries.iter().map(|e| e.key.clone()).collect();
+        keys.sort_unstable();
+        Ok(keys)
+    }
+
     /// Return the total number of stored entries.
     pub fn len(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::len");
@@ -3053,6 +3078,14 @@ impl WorkingMemory {
     pub fn max_value_length(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::max_value_length");
         Ok(inner.map.values().map(|v| v.len()).max().unwrap_or(0))
+    }
+
+    /// Return the byte length of the shortest stored value.
+    ///
+    /// Returns `0` when the memory is empty.
+    pub fn min_value_length(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::min_value_length");
+        Ok(inner.map.values().map(|v| v.len()).min().unwrap_or(0))
     }
 
     /// Return the number of keys whose text contains `substring`.
@@ -7064,5 +7097,54 @@ mod tests {
     fn test_working_memory_max_value_length_empty_returns_zero() {
         let wm = WorkingMemory::new(10).unwrap();
         assert_eq!(wm.max_value_length().unwrap(), 0);
+    }
+
+    // ── Round 39 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_episodic_store_episodes_by_importance_returns_desc_order() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "low", 0.2).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        store.add_episode(agent.clone(), "med", 0.5).unwrap();
+        let contents = store.episodes_by_importance(&agent).unwrap();
+        assert_eq!(contents[0], "high");
+        assert_eq!(contents[2], "low");
+    }
+
+    #[test]
+    fn test_episodic_store_episodes_by_importance_empty_agent_returns_empty() {
+        let store = EpisodicStore::new();
+        assert!(store.episodes_by_importance(&AgentId::new("x")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_semantic_store_all_keys_returns_sorted_keys() {
+        let store = SemanticStore::new();
+        store.store("banana", "v1", vec![]).unwrap();
+        store.store("apple", "v2", vec![]).unwrap();
+        store.store("cherry", "v3", vec![]).unwrap();
+        assert_eq!(store.all_keys().unwrap(), vec!["apple", "banana", "cherry"]);
+    }
+
+    #[test]
+    fn test_semantic_store_all_keys_empty_returns_empty() {
+        let store = SemanticStore::new();
+        assert!(store.all_keys().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_working_memory_min_value_length_returns_shortest() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "ab").unwrap();    // 2
+        wm.set("k2", "abcde").unwrap(); // 5
+        assert_eq!(wm.min_value_length().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_working_memory_min_value_length_empty_returns_zero() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.min_value_length().unwrap(), 0);
     }
 }

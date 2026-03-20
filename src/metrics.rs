@@ -719,6 +719,27 @@ impl MetricsSnapshot {
         names
     }
 
+    /// Return the failure rate for a specific tool (failures / calls).
+    ///
+    /// Returns `0.0` if the tool has no recorded calls.
+    pub fn failed_tool_ratio_for(&self, name: &str) -> f64 {
+        let calls = self.tool_call_count(name);
+        if calls == 0 {
+            return 0.0;
+        }
+        self.tool_failure_count(name) as f64 / calls as f64
+    }
+
+    /// Return the ratio of backpressure-shed events to total tool calls.
+    ///
+    /// Returns `0.0` if no tool calls have been recorded.
+    pub fn backpressure_shed_rate(&self) -> f64 {
+        if self.total_tool_calls == 0 {
+            return 0.0;
+        }
+        self.backpressure_shed_count as f64 / self.total_tool_calls as f64
+    }
+
     /// Return the number of distinct agents that have recorded tool-call data.
     pub fn total_agent_count(&self) -> usize {
         self.per_agent_tool_calls.len()
@@ -2811,5 +2832,39 @@ mod tests {
     fn test_steps_per_tool_call_zero_when_no_tool_calls() {
         let snap = MetricsSnapshot::default();
         assert_eq!(snap.steps_per_tool_call(), 0.0);
+    }
+
+    // ── Round 39 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_failed_tool_ratio_for_returns_failure_rate() {
+        let snap = MetricsSnapshot {
+            per_tool_calls: [("tool".to_string(), 10u64)].into_iter().collect(),
+            per_tool_failures: [("tool".to_string(), 2u64)].into_iter().collect(),
+            ..Default::default()
+        };
+        assert!((snap.failed_tool_ratio_for("tool") - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_failed_tool_ratio_for_zero_when_no_calls() {
+        let snap = MetricsSnapshot::default();
+        assert_eq!(snap.failed_tool_ratio_for("missing"), 0.0);
+    }
+
+    #[test]
+    fn test_backpressure_shed_rate_returns_ratio() {
+        let snap = MetricsSnapshot {
+            total_tool_calls: 100,
+            backpressure_shed_count: 5,
+            ..Default::default()
+        };
+        assert!((snap.backpressure_shed_rate() - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_backpressure_shed_rate_zero_when_no_tool_calls() {
+        let snap = MetricsSnapshot::default();
+        assert_eq!(snap.backpressure_shed_rate(), 0.0);
     }
 }

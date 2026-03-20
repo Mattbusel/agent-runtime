@@ -1249,6 +1249,15 @@ impl ToolRegistry {
         names.sort_unstable();
         names
     }
+
+    /// Return the count of tools whose description contains `keyword` (case-insensitive).
+    pub fn description_contains_count(&self, keyword: &str) -> usize {
+        let kw = keyword.to_ascii_lowercase();
+        self.tools
+            .values()
+            .filter(|s| s.description.to_ascii_lowercase().contains(&kw))
+            .count()
+    }
 }
 
 // ── ReActLoop ─────────────────────────────────────────────────────────────────
@@ -3797,5 +3806,24 @@ mod tests {
     fn test_tool_names_sorted_empty_returns_empty() {
         let reg = ToolRegistry::new();
         assert!(reg.tool_names_sorted().is_empty());
+    }
+
+    // ── Round 39 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_description_contains_count_counts_matching_descriptions() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("a", "search the web", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("b", "write to disk", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("c", "search and filter", |_| serde_json::json!({})));
+        assert_eq!(reg.description_contains_count("search"), 2);
+        assert_eq!(reg.description_contains_count("SEARCH"), 2);
+        assert_eq!(reg.description_contains_count("missing"), 0);
+    }
+
+    #[test]
+    fn test_description_contains_count_zero_when_empty() {
+        let reg = ToolRegistry::new();
+        assert_eq!(reg.description_contains_count("anything"), 0);
     }
 }

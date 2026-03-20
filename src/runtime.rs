@@ -822,6 +822,16 @@ impl AgentSession {
             .map(|s| s.action.as_str())
     }
 
+    /// Return the sum of byte lengths of all thought strings in the session.
+    pub fn total_thought_bytes(&self) -> usize {
+        self.steps.iter().map(|s| s.thought.len()).sum()
+    }
+
+    /// Return the sum of byte lengths of all observation strings in the session.
+    pub fn total_observation_bytes(&self) -> usize {
+        self.steps.iter().map(|s| s.observation.len()).sum()
+    }
+
     /// Return the action string of the first step in the session.
     ///
     /// Returns `None` if the session has no steps.
@@ -4171,5 +4181,27 @@ mod tests {
     fn test_last_step_action_returns_none_for_empty_session() {
         let session = make_session(vec![], 0);
         assert!(session.last_step_action().is_none());
+    }
+
+    // ── Round 39 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_total_thought_bytes_sums_all_thought_lengths() {
+        let steps = vec![
+            make_step("hi", "a", "o"),   // thought = "hi" → 2
+            make_step("hello", "b", "o"), // thought = "hello" → 5
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_thought_bytes(), 7);
+    }
+
+    #[test]
+    fn test_total_observation_bytes_sums_all_observation_lengths() {
+        let steps = vec![
+            make_step("t", "a", "ok"),     // 2
+            make_step("t", "b", "done!"),  // 5
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_observation_bytes(), 7);
     }
 }

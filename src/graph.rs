@@ -473,6 +473,32 @@ impl GraphStore {
             .map_or(0, |rels| rels.iter().filter(|r| &r.to == to).count()))
     }
 
+    /// Return all relationships originating from `id`, in insertion order.
+    ///
+    /// Returns an empty `Vec` if the entity has no outgoing relationships or does not exist.
+    pub fn edges_from(&self, id: &EntityId) -> Result<Vec<Relationship>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::edges_from");
+        Ok(inner
+            .adjacency
+            .get(id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Return the `EntityId`s reachable from `id` in a single hop, sorted.
+    ///
+    /// Returns an empty `Vec` if the entity has no outgoing relationships or does not exist.
+    pub fn neighbors_of(&self, id: &EntityId) -> Result<Vec<EntityId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::neighbors_of");
+        let mut targets: Vec<EntityId> = inner
+            .adjacency
+            .get(id)
+            .map_or_else(Vec::new, |rels| rels.iter().map(|r| r.to.clone()).collect());
+        targets.sort_unstable();
+        targets.dedup();
+        Ok(targets)
+    }
+
     /// Add a directed relationship between two existing entities.
     ///
     /// Both source and target entities must already exist in the graph.
@@ -4990,5 +5016,44 @@ mod tests {
         let from = EntityId::new("a");
         let to = EntityId::new("b");
         assert_eq!(g.relationship_count_between(&from, &to).unwrap(), 0);
+    }
+
+    // ── Round 39 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_edges_from_returns_all_outgoing_relationships() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "friend", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "enemy", 0.5)).unwrap();
+        let edges = g.edges_from(&EntityId::new("a")).unwrap();
+        assert_eq!(edges.len(), 2);
+    }
+
+    #[test]
+    fn test_edges_from_returns_empty_for_unknown_entity() {
+        let g = GraphStore::new();
+        assert!(g.edges_from(&EntityId::new("missing")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_neighbors_of_returns_sorted_unique_targets() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "link", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        let neighbors = g.neighbors_of(&EntityId::new("a")).unwrap();
+        assert_eq!(neighbors, vec![EntityId::new("b"), EntityId::new("c")]);
+    }
+
+    #[test]
+    fn test_neighbors_of_returns_empty_for_no_outgoing_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        assert!(g.neighbors_of(&EntityId::new("a")).unwrap().is_empty());
     }
 }
