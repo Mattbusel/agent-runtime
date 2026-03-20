@@ -17,6 +17,54 @@
 use crate::error::AgentRuntimeError;
 use async_trait::async_trait;
 
+// ── CompletionOptions ─────────────────────────────────────────────────────────
+
+/// Options for a completion request, passed to [`LlmProvider::complete_with_options`].
+///
+/// Allows callers to supply per-request parameters (max tokens, temperature,
+/// timeout) in addition to the model name, without changing the base
+/// [`LlmProvider::complete`] signature.
+pub struct CompletionOptions<'a> {
+    /// Model identifier (e.g. `"claude-sonnet-4-6"`, `"gpt-4o"`).
+    pub model: &'a str,
+    /// Maximum number of output tokens. Overrides provider defaults when set.
+    pub max_tokens: Option<usize>,
+    /// Sampling temperature in `[0.0, 2.0]`. Higher = more random.
+    pub temperature: Option<f32>,
+    /// Per-request wall-clock timeout.
+    pub timeout: Option<std::time::Duration>,
+}
+
+impl<'a> CompletionOptions<'a> {
+    /// Create options with just a model name and all other fields unset.
+    pub fn new(model: &'a str) -> Self {
+        Self {
+            model,
+            max_tokens: None,
+            temperature: None,
+            timeout: None,
+        }
+    }
+
+    /// Set the maximum output tokens.
+    pub fn with_max_tokens(mut self, n: usize) -> Self {
+        self.max_tokens = Some(n);
+        self
+    }
+
+    /// Set the sampling temperature.
+    pub fn with_temperature(mut self, t: f32) -> Self {
+        self.temperature = Some(t);
+        self
+    }
+
+    /// Set the per-request timeout.
+    pub fn with_timeout(mut self, d: std::time::Duration) -> Self {
+        self.timeout = Some(d);
+        self
+    }
+}
+
 // ── LlmProvider ───────────────────────────────────────────────────────────────
 
 /// Abstraction over an LLM inference endpoint.
@@ -33,11 +81,39 @@ pub trait LlmProvider: Send + Sync {
     /// * `model`  — model identifier (e.g. `"claude-sonnet-4-6"`, `"gpt-4o"`)
     async fn complete(&self, prompt: &str, model: &str) -> Result<String, AgentRuntimeError>;
 
+    /// Send a prompt with additional per-request options.
+    ///
+    /// The default implementation ignores `options.max_tokens`,
+    /// `options.temperature`, and `options.timeout` and delegates to
+    /// `complete(prompt, options.model)`.  Override this method to honour those
+    /// fields in your provider implementation.
+    async fn complete_with_options(
+        &self,
+        prompt: &str,
+        options: CompletionOptions<'_>,
+    ) -> Result<String, AgentRuntimeError> {
+        self.complete(prompt, options.model).await
+    }
+
     /// Stream the completion token-by-token.
     ///
     /// Returns a `Receiver` that yields string chunks as they arrive.
     /// The channel closes when the stream is complete or an error occurs.
-    /// The default implementation wraps `complete` as a single-chunk stream.
+    ///
+    /// # Default implementation
+    ///
+    /// The default wraps `complete` into a single-chunk stream using a channel
+    /// with a buffer of 64 slots.  Custom providers that support true token
+    /// streaming should override this method; the 64-slot buffer is sized so
+    /// that fast producers do not block waiting for a slow consumer to drain
+    /// the first chunk.
+    ///
+    /// # Note for implementors
+    ///
+    /// If you override this method, choose a channel capacity that balances
+    /// memory use against throughput for your expected token rate.  A capacity
+    /// of 1 will cause the producer to block after each token; a capacity of
+    /// 0 is unbounded and may exhaust memory on a slow consumer.
     async fn stream_complete(
         &self,
         prompt: &str,
@@ -45,7 +121,7 @@ pub trait LlmProvider: Send + Sync {
     ) -> Result<tokio::sync::mpsc::Receiver<Result<String, AgentRuntimeError>>, AgentRuntimeError>
     {
         let result = self.complete(prompt, model).await;
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
         // Ignore send error — receiver may already be dropped
         let _ = tx.send(result).await;
         Ok(rx)
@@ -66,14 +142,17 @@ pub trait LlmProvider: Send + Sync {
 /// ```
 pub struct AnthropicProvider {
     api_key: String,
+    /// Messages API endpoint. Overridable via [`with_base_url`](AnthropicProvider::with_base_url)
+    /// to point at a mock server or proxy during testing.
+    api_url: String,
     client: reqwest::Client,
-    /// Semaphore bounding concurrent SSE background tasks (item 10).
+    /// Semaphore bounding concurrent SSE background tasks.
     stream_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 #[cfg(feature = "anthropic")]
 impl AnthropicProvider {
-    const API_URL: &'static str = "https://api.anthropic.com/v1/messages";
+    const DEFAULT_API_URL: &'static str = "https://api.anthropic.com/v1/messages";
     const API_VERSION: &'static str = "2023-06-01";
     const MAX_TOKENS: u32 = 1024;
     /// Default maximum number of concurrent streaming tasks.
@@ -83,6 +162,21 @@ impl AnthropicProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
+            api_url: Self::DEFAULT_API_URL.to_owned(),
+            client: reqwest::Client::new(),
+            stream_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                Self::DEFAULT_STREAM_CONCURRENCY,
+            )),
+        }
+    }
+
+    /// Create a provider pointing to a custom API endpoint.
+    ///
+    /// Useful for testing against a mock server or routing through a proxy.
+    pub fn with_base_url(api_key: impl Into<String>, api_url: impl Into<String>) -> Self {
+        Self {
+            api_key: api_key.into(),
+            api_url: api_url.into(),
             client: reqwest::Client::new(),
             stream_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(
                 Self::DEFAULT_STREAM_CONCURRENCY,
@@ -97,6 +191,7 @@ impl AnthropicProvider {
     pub fn with_max_concurrent_streams(api_key: impl Into<String>, max: usize) -> Self {
         Self {
             api_key: api_key.into(),
+            api_url: Self::DEFAULT_API_URL.to_owned(),
             client: reqwest::Client::new(),
             stream_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(max)),
         }
@@ -107,15 +202,34 @@ impl AnthropicProvider {
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
     async fn complete(&self, prompt: &str, model: &str) -> Result<String, AgentRuntimeError> {
-        let body = serde_json::json!({
-            "model": model,
-            "max_tokens": Self::MAX_TOKENS,
+        self.complete_with_options(prompt, CompletionOptions::new(model))
+            .await
+    }
+
+    /// Complete with per-request options (max_tokens, temperature).
+    ///
+    /// Falls back to `Self::MAX_TOKENS` when `options.max_tokens` is not set.
+    async fn complete_with_options(
+        &self,
+        prompt: &str,
+        options: CompletionOptions<'_>,
+    ) -> Result<String, AgentRuntimeError> {
+        let max_tokens = options
+            .max_tokens
+            .unwrap_or(Self::MAX_TOKENS as usize) as u32;
+
+        let mut body = serde_json::json!({
+            "model": options.model,
+            "max_tokens": max_tokens,
             "messages": [{ "role": "user", "content": prompt }]
         });
+        if let Some(t) = options.temperature {
+            body["temperature"] = serde_json::json!(t);
+        }
 
         let response = self
             .client
-            .post(Self::API_URL)
+            .post(&self.api_url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", Self::API_VERSION)
             .header("content-type", "application/json")
@@ -148,6 +262,11 @@ impl LlmProvider for AnthropicProvider {
         Ok(text.to_owned())
     }
 
+    /// Stream the completion token-by-token using `chunk()` for true streaming.
+    ///
+    /// Uses `response.chunk()` to consume the SSE body incrementally so tokens
+    /// are emitted as they arrive rather than after the entire response has been
+    /// buffered, fixing the original `bytes().await` implementation.
     async fn stream_complete(
         &self,
         prompt: &str,
@@ -163,7 +282,7 @@ impl LlmProvider for AnthropicProvider {
 
         let response = self
             .client
-            .post(Self::API_URL)
+            .post(&self.api_url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", Self::API_VERSION)
             .header("content-type", "application/json")
@@ -184,7 +303,6 @@ impl LlmProvider for AnthropicProvider {
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, AgentRuntimeError>>(32);
 
-        // Item 10 — acquire a semaphore permit before spawning to bound concurrency.
         let permit = std::sync::Arc::clone(&self.stream_semaphore)
             .acquire_owned()
             .await
@@ -192,46 +310,55 @@ impl LlmProvider for AnthropicProvider {
                 AgentRuntimeError::Provider("Anthropic stream semaphore closed".into())
             })?;
 
-        // Parse SSE in a background task.
+        // Parse SSE incrementally using chunk() so tokens are emitted as they
+        // arrive rather than after the full response body has been buffered.
         tokio::spawn(async move {
-            let _permit = permit; // released when this task finishes
-            match response.bytes().await {
-                Ok(bytes) => {
-                    // Item 7 — strict UTF-8; propagate errors rather than silently
-                    // replacing invalid sequences with the replacement character.
-                    let text = match String::from_utf8(bytes.to_vec()) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            let _ = tx
-                                .send(Err(AgentRuntimeError::Provider(format!(
-                                    "Anthropic stream response is not valid UTF-8: {e}"
-                                ))))
-                                .await;
-                            return;
-                        }
-                    };
-                    for line in text.lines() {
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            if data == "[DONE]" {
-                                break;
+            let _permit = permit;
+            let mut response = response;
+            let mut buffer = String::new();
+            loop {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => {
+                        match String::from_utf8(chunk.to_vec()) {
+                            Ok(s) => buffer.push_str(&s),
+                            Err(e) => {
+                                let _ = tx
+                                    .send(Err(AgentRuntimeError::Provider(format!(
+                                        "Anthropic stream: invalid UTF-8 in chunk: {e}"
+                                    ))))
+                                    .await;
+                                return;
                             }
-                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                // Anthropic streaming event: content_block_delta
-                                if let Some(delta_text) = json["delta"]["text"].as_str() {
-                                    if tx.send(Ok(delta_text.to_owned())).await.is_err() {
-                                        break;
+                        }
+                        // Drain complete SSE lines from the buffer.
+                        while let Some(newline) = buffer.find('\n') {
+                            let line = buffer[..newline].trim().to_owned();
+                            buffer = buffer[newline + 1..].to_owned();
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                if data == "[DONE]" {
+                                    return;
+                                }
+                                if let Ok(json) =
+                                    serde_json::from_str::<serde_json::Value>(data)
+                                {
+                                    if let Some(delta) = json["delta"]["text"].as_str() {
+                                        if tx.send(Ok(delta.to_owned())).await.is_err() {
+                                            return;
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    let _ = tx
-                        .send(Err(AgentRuntimeError::Provider(format!(
-                            "Anthropic stream read failed: {e}"
-                        ))))
-                        .await;
+                    Ok(None) => break,
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(AgentRuntimeError::Provider(format!(
+                                "Anthropic stream chunk error: {e}"
+                            ))))
+                            .await;
+                        return;
+                    }
                 }
             }
         });
@@ -399,45 +526,57 @@ impl LlmProvider for OpenAiProvider {
 
         tokio::spawn(async move {
             let _permit = permit;
-            match response.bytes().await {
-                Ok(bytes) => {
-                    // Item 7 — strict UTF-8 decoding.
-                    let text = match String::from_utf8(bytes.to_vec()) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            let _ = tx
-                                .send(Err(AgentRuntimeError::Provider(format!(
-                                    "OpenAI stream response is not valid UTF-8: {e}"
-                                ))))
-                                .await;
-                            return;
-                        }
-                    };
-                    for line in text.lines() {
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            if data == "[DONE]" {
-                                break;
+            // Incremental chunk-by-chunk reading — avoids buffering the full
+            // response body before emitting any tokens.
+            let mut buffer = String::new();
+            loop {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => {
+                        let text = match std::str::from_utf8(&chunk) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                let _ = tx
+                                    .send(Err(AgentRuntimeError::Provider(format!(
+                                        "OpenAI stream chunk is not valid UTF-8: {e}"
+                                    ))))
+                                    .await;
+                                return;
                             }
-                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                if let Some(content) = json["choices"]
-                                    .as_array()
-                                    .and_then(|c| c.first())
-                                    .and_then(|c| c["delta"]["content"].as_str())
+                        };
+                        buffer.push_str(text);
+                        // Drain complete SSE lines from the buffer.
+                        while let Some(newline) = buffer.find('\n') {
+                            let line: String = buffer.drain(..=newline).collect();
+                            let line = line.trim_end_matches(['\r', '\n']);
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                if data == "[DONE]" {
+                                    return;
+                                }
+                                if let Ok(json) =
+                                    serde_json::from_str::<serde_json::Value>(data)
                                 {
-                                    if tx.send(Ok(content.to_owned())).await.is_err() {
-                                        break;
+                                    if let Some(content) = json["choices"]
+                                        .as_array()
+                                        .and_then(|c| c.first())
+                                        .and_then(|c| c["delta"]["content"].as_str())
+                                    {
+                                        if tx.send(Ok(content.to_owned())).await.is_err() {
+                                            return;
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    let _ = tx
-                        .send(Err(AgentRuntimeError::Provider(format!(
-                            "OpenAI stream read failed: {e}"
-                        ))))
-                        .await;
+                    Ok(None) => break,
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(AgentRuntimeError::Provider(format!(
+                                "OpenAI stream read failed: {e}"
+                            ))))
+                            .await;
+                        return;
+                    }
                 }
             }
         });

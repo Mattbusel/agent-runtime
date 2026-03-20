@@ -33,7 +33,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
+    if norm_a < f32::EPSILON || norm_b < f32::EPSILON {
         return 0.0;
     }
     (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
@@ -47,10 +47,33 @@ pub struct AgentId(pub String);
 
 impl AgentId {
     /// Create a new `AgentId` from any string-like value.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Triggers a `debug_assert!` if `id` is empty.  In release builds a
+    /// `tracing::warn!` is emitted instead so that the misconfiguration is
+    /// surfaced in production logs without aborting the process.
     pub fn new(id: impl Into<String>) -> Self {
         let id = id.into();
-        debug_assert!(!id.is_empty(), "AgentId must not be empty");
+        if id.is_empty() {
+            debug_assert!(false, "AgentId must not be empty");
+            tracing::warn!("AgentId::new called with an empty string — agent IDs should be non-empty to avoid lookup ambiguity");
+        }
         Self(id)
+    }
+
+    /// Create a validated `AgentId`, returning an error if `id` is empty.
+    ///
+    /// Prefer this constructor in user-facing code where empty IDs must be
+    /// rejected explicitly rather than silently warned about.
+    pub fn try_new(id: impl Into<String>) -> Result<Self, crate::error::AgentRuntimeError> {
+        let id = id.into();
+        if id.is_empty() {
+            return Err(crate::error::AgentRuntimeError::Memory(
+                "AgentId must not be empty".into(),
+            ));
+        }
+        Ok(Self(id))
     }
 
     /// Generate a random `AgentId` backed by a UUID v4.
@@ -86,6 +109,17 @@ impl MemoryId {
         let id = id.into();
         debug_assert!(!id.is_empty(), "MemoryId must not be empty");
         Self(id)
+    }
+
+    /// Create a validated `MemoryId`, returning an error if `id` is empty.
+    pub fn try_new(id: impl Into<String>) -> Result<Self, crate::error::AgentRuntimeError> {
+        let id = id.into();
+        if id.is_empty() {
+            return Err(crate::error::AgentRuntimeError::Memory(
+                "MemoryId must not be empty".into(),
+            ));
+        }
+        Ok(Self(id))
     }
 
     /// Generate a random `MemoryId` backed by a UUID v4.
@@ -336,6 +370,19 @@ impl EpisodicStoreBuilder {
 
     /// Consume the builder and create an [`EpisodicStore`].
     pub fn build(self) -> EpisodicStore {
+        // Warn when both a DecayPolicy and RecallPolicy::Hybrid are active:
+        // decay is applied before scoring, so Hybrid's recency term produces a
+        // double time penalty.  Set one or the other unless the double penalty
+        // is intentional.
+        if self.decay.is_some() {
+            if let Some(RecallPolicy::Hybrid { .. }) = &self.recall_policy {
+                tracing::warn!(
+                    "EpisodicStore configured with both DecayPolicy and RecallPolicy::Hybrid \
+                     — time-based decay is applied before hybrid scoring, resulting in a \
+                     double time penalty.  Set one or the other unless this is intentional."
+                );
+            }
+        }
         EpisodicStore {
             inner: Arc::new(Mutex::new(EpisodicInner {
                 items: HashMap::new(),
@@ -465,7 +512,21 @@ impl EpisodicStore {
     }
 
     /// Create a new episodic store with both a decay policy and a recall policy.
+    ///
+    /// # Warning
+    ///
+    /// When `recall` is [`RecallPolicy::Hybrid`], decay is applied **before**
+    /// scoring, producing a double time penalty.  See [`RecallPolicy`] docs for
+    /// details.  Consider using the [`builder`](EpisodicStore::builder) to
+    /// configure only one of these time-based mechanisms.
     pub fn with_decay_and_recall_policy(decay: DecayPolicy, recall: RecallPolicy) -> Self {
+        if let RecallPolicy::Hybrid { .. } = &recall {
+            tracing::warn!(
+                "EpisodicStore::with_decay_and_recall_policy called with RecallPolicy::Hybrid \
+                 — this applies a double time penalty.  Set DecayPolicy OR Hybrid recency \
+                 weighting, not both, unless the double penalty is intentional."
+            );
+        }
         Self {
             inner: Arc::new(Mutex::new(EpisodicInner {
                 items: HashMap::new(),

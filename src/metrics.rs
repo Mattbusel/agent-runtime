@@ -5,6 +5,7 @@
 //! Per-tool counters use a `Mutex<HashMap>` to avoid requiring a concurrent
 //! map dependency.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -100,6 +101,15 @@ impl LatencyHistogram {
             .map(|(&b, a)| (b, a.load(Ordering::Relaxed)))
             .collect()
     }
+
+    /// Reset all histogram counters to zero.
+    pub fn reset(&self) {
+        self.total_count.store(0, Ordering::Relaxed);
+        self.total_sum_ms.store(0, Ordering::Relaxed);
+        for bucket in &self.buckets {
+            bucket.store(0, Ordering::Relaxed);
+        }
+    }
 }
 
 /// A point-in-time snapshot of all runtime counters.
@@ -121,7 +131,7 @@ impl LatencyHistogram {
 /// ```
 ///
 /// [`snapshot`]: RuntimeMetrics::snapshot
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
     /// Number of agent sessions currently in progress.
     pub active_sessions: usize,
@@ -151,6 +161,23 @@ pub struct MetricsSnapshot {
     pub per_agent_tool_failures: HashMap<String, HashMap<String, u64>>,
 }
 
+/// All four per-tool / per-agent counter maps, protected by a single lock.
+///
+/// Grouping them under one `Mutex` halves lock acquisitions on the hot path
+/// (a single `record_tool_call` + `record_agent_tool_call` pair now requires
+/// only one acquire/release) and makes snapshot reads cheaper too.
+#[derive(Debug, Default)]
+struct PerToolMaps {
+    /// Per-tool call counts: `tool_name → total_calls`.
+    calls: HashMap<String, u64>,
+    /// Per-tool failure counts: `tool_name → failed_calls`.
+    failures: HashMap<String, u64>,
+    /// Per-agent, per-tool call counts: `agent_id → tool_name → count`.
+    agent_calls: HashMap<String, HashMap<String, u64>>,
+    /// Per-agent, per-tool failure counts: `agent_id → tool_name → count`.
+    agent_failures: HashMap<String, HashMap<String, u64>>,
+}
+
 /// Shared runtime metrics. Clone the `Arc` to share across threads.
 #[derive(Debug)]
 pub struct RuntimeMetrics {
@@ -168,16 +195,10 @@ pub struct RuntimeMetrics {
     pub backpressure_shed_count: AtomicU64,
     /// Total number of memory recall operations.
     pub memory_recall_count: AtomicU64,
-    /// Per-tool call counts: `tool_name → total_calls`.
-    per_tool_calls: Mutex<HashMap<String, u64>>,
-    /// Per-tool failure counts: `tool_name → failed_calls`.
-    per_tool_failures: Mutex<HashMap<String, u64>>,
+    /// All four per-tool / per-agent maps under a single lock.
+    per_tool: Mutex<PerToolMaps>,
     /// Per-step latency histogram.
     pub step_latency: LatencyHistogram,
-    /// Per-agent, per-tool call counts.
-    per_agent_tool_calls: Mutex<HashMap<String, HashMap<String, u64>>>,
-    /// Per-agent, per-tool failure counts.
-    per_agent_tool_failures: Mutex<HashMap<String, HashMap<String, u64>>>,
 }
 
 impl Default for RuntimeMetrics {
@@ -190,11 +211,8 @@ impl Default for RuntimeMetrics {
             failed_tool_calls: AtomicU64::new(0),
             backpressure_shed_count: AtomicU64::new(0),
             memory_recall_count: AtomicU64::new(0),
-            per_tool_calls: Mutex::new(HashMap::new()),
-            per_tool_failures: Mutex::new(HashMap::new()),
+            per_tool: Mutex::new(PerToolMaps::default()),
             step_latency: LatencyHistogram::default(),
-            per_agent_tool_calls: Mutex::new(HashMap::new()),
-            per_agent_tool_failures: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -245,8 +263,8 @@ impl RuntimeMetrics {
     /// Called automatically by the agent loop when `with_metrics` is configured.
     pub fn record_tool_call(&self, tool_name: &str) {
         self.total_tool_calls.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut map) = self.per_tool_calls.lock() {
-            *map.entry(tool_name.to_owned()).or_insert(0) += 1;
+        if let Ok(mut maps) = self.per_tool.lock() {
+            *maps.calls.entry(tool_name.to_owned()).or_insert(0) += 1;
         }
     }
 
@@ -255,31 +273,33 @@ impl RuntimeMetrics {
     /// Called automatically by the agent loop when a tool returns an error.
     pub fn record_tool_failure(&self, tool_name: &str) {
         self.failed_tool_calls.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut map) = self.per_tool_failures.lock() {
-            *map.entry(tool_name.to_owned()).or_insert(0) += 1;
+        if let Ok(mut maps) = self.per_tool.lock() {
+            *maps.failures.entry(tool_name.to_owned()).or_insert(0) += 1;
         }
     }
 
     /// Return a snapshot of per-tool call counts as a `HashMap<tool_name, count>`.
     pub fn per_tool_calls_snapshot(&self) -> HashMap<String, u64> {
-        self.per_tool_calls
+        self.per_tool
             .lock()
-            .map(|m| m.clone())
+            .map(|m| m.calls.clone())
             .unwrap_or_default()
     }
 
     /// Return a snapshot of per-tool failure counts as a `HashMap<tool_name, count>`.
     pub fn per_tool_failures_snapshot(&self) -> HashMap<String, u64> {
-        self.per_tool_failures
+        self.per_tool
             .lock()
-            .map(|m| m.clone())
+            .map(|m| m.failures.clone())
             .unwrap_or_default()
     }
 
     /// Increment call counter for (agent_id, tool_name).
     pub fn record_agent_tool_call(&self, agent_id: &str, tool_name: &str) {
-        if let Ok(mut map) = self.per_agent_tool_calls.lock() {
-            *map.entry(agent_id.to_owned())
+        if let Ok(mut maps) = self.per_tool.lock() {
+            *maps
+                .agent_calls
+                .entry(agent_id.to_owned())
                 .or_default()
                 .entry(tool_name.to_owned())
                 .or_insert(0) += 1;
@@ -288,8 +308,10 @@ impl RuntimeMetrics {
 
     /// Increment failure counter for (agent_id, tool_name).
     pub fn record_agent_tool_failure(&self, agent_id: &str, tool_name: &str) {
-        if let Ok(mut map) = self.per_agent_tool_failures.lock() {
-            *map.entry(agent_id.to_owned())
+        if let Ok(mut maps) = self.per_tool.lock() {
+            *maps
+                .agent_failures
+                .entry(agent_id.to_owned())
                 .or_default()
                 .entry(tool_name.to_owned())
                 .or_insert(0) += 1;
@@ -298,17 +320,17 @@ impl RuntimeMetrics {
 
     /// Snapshot of per-agent, per-tool call counts.
     pub fn per_agent_tool_calls_snapshot(&self) -> HashMap<String, HashMap<String, u64>> {
-        self.per_agent_tool_calls
+        self.per_tool
             .lock()
-            .map(|m| m.clone())
+            .map(|m| m.agent_calls.clone())
             .unwrap_or_default()
     }
 
     /// Snapshot of per-agent, per-tool failure counts.
     pub fn per_agent_tool_failures_snapshot(&self) -> HashMap<String, HashMap<String, u64>> {
-        self.per_agent_tool_failures
+        self.per_tool
             .lock()
-            .map(|m| m.clone())
+            .map(|m| m.agent_failures.clone())
             .unwrap_or_default()
     }
 
@@ -319,6 +341,20 @@ impl RuntimeMetrics {
     ///
     /// [`to_snapshot`]: RuntimeMetrics::to_snapshot
     pub fn snapshot(&self) -> MetricsSnapshot {
+        // Acquire the single per-tool lock once for all four maps.
+        let (per_tool_calls, per_tool_failures, per_agent_tool_calls, per_agent_tool_failures) =
+            self.per_tool
+                .lock()
+                .map(|m| {
+                    (
+                        m.calls.clone(),
+                        m.failures.clone(),
+                        m.agent_calls.clone(),
+                        m.agent_failures.clone(),
+                    )
+                })
+                .unwrap_or_default();
+
         MetricsSnapshot {
             active_sessions: self.active_sessions.load(Ordering::Relaxed),
             total_sessions: self.total_sessions.load(Ordering::Relaxed),
@@ -327,12 +363,12 @@ impl RuntimeMetrics {
             failed_tool_calls: self.failed_tool_calls.load(Ordering::Relaxed),
             backpressure_shed_count: self.backpressure_shed_count.load(Ordering::Relaxed),
             memory_recall_count: self.memory_recall_count.load(Ordering::Relaxed),
-            per_tool_calls: self.per_tool_calls_snapshot(),
-            per_tool_failures: self.per_tool_failures_snapshot(),
+            per_tool_calls,
+            per_tool_failures,
             step_latency_buckets: self.step_latency.buckets(),
             step_latency_mean_ms: self.step_latency.mean_ms(),
-            per_agent_tool_calls: self.per_agent_tool_calls_snapshot(),
-            per_agent_tool_failures: self.per_agent_tool_failures_snapshot(),
+            per_agent_tool_calls,
+            per_agent_tool_failures,
         }
     }
 
@@ -352,23 +388,13 @@ impl RuntimeMetrics {
         self.failed_tool_calls.store(0, Ordering::Relaxed);
         self.backpressure_shed_count.store(0, Ordering::Relaxed);
         self.memory_recall_count.store(0, Ordering::Relaxed);
-        if let Ok(mut m) = self.per_tool_calls.lock() {
-            m.clear();
+        if let Ok(mut maps) = self.per_tool.lock() {
+            maps.calls.clear();
+            maps.failures.clear();
+            maps.agent_calls.clear();
+            maps.agent_failures.clear();
         }
-        if let Ok(mut m) = self.per_tool_failures.lock() {
-            m.clear();
-        }
-        if let Ok(mut m) = self.per_agent_tool_calls.lock() {
-            m.clear();
-        }
-        if let Ok(mut m) = self.per_agent_tool_failures.lock() {
-            m.clear();
-        }
-        self.step_latency.total_count.store(0, Ordering::Relaxed);
-        self.step_latency.total_sum_ms.store(0, Ordering::Relaxed);
-        for b in &self.step_latency.buckets {
-            b.store(0, Ordering::Relaxed);
-        }
+        self.step_latency.reset();
     }
 
     /// Capture a snapshot of global counters as plain integers.
@@ -379,8 +405,16 @@ impl RuntimeMetrics {
     /// For per-tool breakdowns use [`per_tool_calls_snapshot`] and
     /// [`per_tool_failures_snapshot`].
     ///
+    /// # Deprecation
+    ///
+    /// Prefer [`snapshot`] which returns the named [`MetricsSnapshot`] struct
+    /// and includes per-tool, per-agent, and histogram data.  This method
+    /// returns an anonymous tuple whose field order is easy to misread.
+    ///
+    /// [`snapshot`]: RuntimeMetrics::snapshot
     /// [`per_tool_calls_snapshot`]: RuntimeMetrics::per_tool_calls_snapshot
     /// [`per_tool_failures_snapshot`]: RuntimeMetrics::per_tool_failures_snapshot
+    #[deprecated(since = "1.0.3", note = "use `snapshot()` which returns the named MetricsSnapshot struct")]
     pub fn to_snapshot(&self) -> (usize, u64, u64, u64, u64, u64, u64) {
         (
             self.active_sessions.load(Ordering::Relaxed),
