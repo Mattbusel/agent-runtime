@@ -816,6 +816,19 @@ impl EpisodicStore {
         Ok(removed)
     }
 
+    /// Return the most recently stored episode for `agent_id`, or `None` if
+    /// the agent has no episodes.
+    ///
+    /// "Most recent" is defined as the last element in the stored list, which
+    /// matches insertion order.
+    pub fn most_recent(&self, agent_id: &AgentId) -> Result<Option<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::most_recent");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|v| v.last().cloned()))
+    }
+
     /// Return the arithmetic mean importance for `agent_id`, or `0.0` if the
     /// agent has no stored episodes.
     pub fn importance_avg(&self, agent_id: &AgentId) -> Result<f32, AgentRuntimeError> {
@@ -2124,6 +2137,22 @@ impl WorkingMemory {
 
     /// Rename a key without changing its value or insertion order.
     ///
+    /// Return `true` if **all** of the given keys are currently stored.
+    ///
+    /// An empty iterator returns `true` vacuously.
+    pub fn contains_all<'a>(&self, keys: impl IntoIterator<Item = &'a str>) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::contains_all");
+        Ok(keys.into_iter().all(|k| inner.map.contains_key(k)))
+    }
+
+    /// Return `true` if **any** of the given keys is currently stored.
+    ///
+    /// An empty iterator returns `false`.
+    pub fn has_any_key<'a>(&self, keys: impl IntoIterator<Item = &'a str>) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::has_any_key");
+        Ok(keys.into_iter().any(|k| inner.map.contains_key(k)))
+    }
+
     /// Returns `true` if `old_key` existed and was renamed.  Returns `false` if
     /// `old_key` is not present.  If `new_key` already exists it is overwritten
     /// and its old value is lost.
@@ -4486,7 +4515,64 @@ mod tests {
         assert!(wm.keys_starting_with("xyz:").unwrap().is_empty());
     }
 
-    // ── Round 11: SemanticStore::to_map / WorkingMemory::fill_ratio ──────────
+    // ── Round 11: most_recent / contains_all / has_any_key / to_map / fill_ratio ──
+
+    #[test]
+    fn test_episodic_most_recent_returns_last_inserted() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "first", 0.5).unwrap();
+        store.add_episode(agent.clone(), "second", 0.3).unwrap();
+        let recent = store.most_recent(&agent).unwrap().unwrap();
+        assert_eq!(recent.content, "second");
+    }
+
+    #[test]
+    fn test_episodic_most_recent_none_when_empty() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("nobody");
+        assert!(store.most_recent(&agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_working_memory_contains_all_true_when_all_present() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("x", "1").unwrap();
+        wm.set("y", "2").unwrap();
+        assert!(wm.contains_all(["x", "y"]).unwrap());
+    }
+
+    #[test]
+    fn test_working_memory_contains_all_false_when_one_missing() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("x", "1").unwrap();
+        assert!(!wm.contains_all(["x", "missing"]).unwrap());
+    }
+
+    #[test]
+    fn test_working_memory_contains_all_vacuously_true_for_empty() {
+        let wm = WorkingMemory::new(5).unwrap();
+        assert!(wm.contains_all(std::iter::empty::<&str>()).unwrap());
+    }
+
+    #[test]
+    fn test_working_memory_has_any_key_true_when_at_least_one_present() {
+        let wm = WorkingMemory::new(5).unwrap();
+        wm.set("present", "v").unwrap();
+        assert!(wm.has_any_key(["missing", "present"]).unwrap());
+    }
+
+    #[test]
+    fn test_working_memory_has_any_key_false_when_none_present() {
+        let wm = WorkingMemory::new(5).unwrap();
+        assert!(!wm.has_any_key(["a", "b"]).unwrap());
+    }
+
+    #[test]
+    fn test_working_memory_has_any_key_false_for_empty_iter() {
+        let wm = WorkingMemory::new(5).unwrap();
+        assert!(!wm.has_any_key(std::iter::empty::<&str>()).unwrap());
+    }
 
     #[test]
     fn test_semantic_to_map_returns_key_value_pairs() {
@@ -4518,5 +4604,65 @@ mod tests {
         wm.set("b", "2").unwrap();
         // 2 out of 4 = 0.5
         assert!((wm.fill_ratio().unwrap() - 0.5).abs() < 1e-9);
+    }
+
+    // ── Round 11: most_recent / contains_all / has_any_key ───────────────────
+
+    #[test]
+    fn test_most_recent_returns_last_inserted_episode() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "first", 0.5).unwrap();
+        store.add_episode(agent.clone(), "second", 0.8).unwrap();
+        let recent = store.most_recent(&agent).unwrap().unwrap();
+        assert_eq!(recent.content, "second");
+    }
+
+    #[test]
+    fn test_most_recent_returns_none_for_new_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("empty");
+        assert!(store.most_recent(&agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_contains_all_true_when_all_keys_present() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("a", "1").unwrap();
+        wm.set("b", "2").unwrap();
+        assert!(wm.contains_all(["a", "b"]).unwrap());
+    }
+
+    #[test]
+    fn test_contains_all_false_when_one_key_missing() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("a", "1").unwrap();
+        assert!(!wm.contains_all(["a", "missing"]).unwrap());
+    }
+
+    #[test]
+    fn test_contains_all_true_for_empty_iter() {
+        let wm = WorkingMemory::new(5).unwrap();
+        assert!(wm.contains_all([]).unwrap());
+    }
+
+    #[test]
+    fn test_has_any_key_true_when_one_key_present() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("x", "v").unwrap();
+        assert!(wm.has_any_key(["x", "y"]).unwrap());
+    }
+
+    #[test]
+    fn test_has_any_key_false_when_none_present() {
+        let wm = WorkingMemory::new(5).unwrap();
+        assert!(!wm.has_any_key(["nope", "also_nope"]).unwrap());
+    }
+
+    #[test]
+    fn test_has_any_key_false_for_empty_iter() {
+        let wm = WorkingMemory::new(5).unwrap();
+        wm.set("a", "1").unwrap();
+        assert!(!wm.has_any_key([]).unwrap());
     }
 }
