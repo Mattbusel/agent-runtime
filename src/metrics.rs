@@ -272,6 +272,14 @@ impl LatencyHistogram {
         self.percentile(0.10)
     }
 
+    /// Return the median (50th-percentile) step latency in milliseconds.
+    ///
+    /// Convenience alias for `p50`; useful when callers want an explicit
+    /// "median" name without importing percentile constants.
+    pub fn median_ms(&self) -> u64 {
+        self.p50()
+    }
+
     /// Reset all histogram counters to zero.
     pub fn reset(&self) {
         self.total_count.store(0, Ordering::Relaxed);
@@ -488,6 +496,17 @@ impl MetricsSnapshot {
             return 0.0;
         }
         self.memory_recall_count as f64 / self.total_sessions as f64
+    }
+
+    /// Return the average number of ReAct steps per session.
+    ///
+    /// Alias for `avg_steps_per_session` on the snapshot type; returns `0.0`
+    /// when no sessions have been recorded.
+    pub fn steps_per_session(&self) -> f64 {
+        if self.total_sessions == 0 {
+            return 0.0;
+        }
+        self.total_steps as f64 / self.total_sessions as f64
     }
 
     /// Return `true` if the snapshot shows no error indicators.
@@ -722,6 +741,14 @@ impl RuntimeMetrics {
             return 0.0;
         }
         self.checkpoint_errors() as f64 / sessions as f64
+    }
+
+    /// Return the median (50th-percentile) step latency in milliseconds.
+    ///
+    /// Convenience shorthand for `self.step_latency.p50()`.  Returns `0`
+    /// when no step latencies have been recorded.
+    pub fn p50_latency_ms(&self) -> u64 {
+        self.step_latency.p50()
     }
 
     /// Increment the call counter for `tool_name` by 1.
@@ -1812,5 +1839,55 @@ mod tests {
         }
         assert!(h.p10() <= h.p50());
         assert!(h.p50() <= h.p99());
+    }
+
+    // ── Round 29: is_below_p99, MetricsSnapshot::is_healthy ──────────────────
+
+    #[test]
+    fn test_latency_histogram_is_below_p99_true_when_empty() {
+        let h = LatencyHistogram::default();
+        assert!(h.is_below_p99(1)); // p99 == 0 < 1
+    }
+
+    #[test]
+    fn test_latency_histogram_is_below_p99_true_when_under_threshold() {
+        let h = LatencyHistogram::default();
+        for _ in 0..100 {
+            h.record(50);
+        }
+        assert!(h.is_below_p99(100));
+    }
+
+    #[test]
+    fn test_latency_histogram_is_below_p99_false_when_at_threshold() {
+        let h = LatencyHistogram::default();
+        for _ in 0..100 {
+            h.record(200);
+        }
+        assert!(!h.is_below_p99(200)); // p99 == 200, not strictly less
+    }
+
+    #[test]
+    fn test_metrics_snapshot_is_healthy_true_when_default() {
+        let snap = MetricsSnapshot::default();
+        assert!(snap.is_healthy());
+    }
+
+    #[test]
+    fn test_metrics_snapshot_is_healthy_false_when_failed_tool_calls() {
+        let snap = MetricsSnapshot { failed_tool_calls: 1, ..Default::default() };
+        assert!(!snap.is_healthy());
+    }
+
+    #[test]
+    fn test_metrics_snapshot_is_healthy_false_when_backpressure_shed() {
+        let snap = MetricsSnapshot { backpressure_shed_count: 2, ..Default::default() };
+        assert!(!snap.is_healthy());
+    }
+
+    #[test]
+    fn test_metrics_snapshot_is_healthy_false_when_checkpoint_errors() {
+        let snap = MetricsSnapshot { checkpoint_errors: 1, ..Default::default() };
+        assert!(!snap.is_healthy());
     }
 }

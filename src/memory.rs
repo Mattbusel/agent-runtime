@@ -1559,6 +1559,22 @@ impl EpisodicStore {
         Ok(inner.items.get(agent_id).map_or(0, |v| v.len()))
     }
 
+    /// Return the most recently inserted episode for `agent_id`, or `None` if
+    /// the agent has no stored episodes.
+    ///
+    /// "Most recent" is determined by `timestamp`.
+    pub fn latest_episode(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::latest_episode");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .and_then(|v| v.iter().max_by_key(|i| i.timestamp))
+            .cloned())
+    }
+
     /// Return the maximum single `recall_count` value across all episodes for
     /// `agent_id`, or `None` if the agent has no stored episodes.
     pub fn max_recall_count_for(&self, agent_id: &AgentId) -> Result<Option<u64>, AgentRuntimeError> {
@@ -2002,6 +2018,12 @@ impl SemanticStore {
     pub fn most_recent_key(&self) -> Result<Option<String>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::most_recent_key");
         Ok(inner.entries.last().map(|e| e.key.clone()))
+    }
+
+    /// Return the key of the earliest inserted entry, or `None` if empty.
+    pub fn oldest_key(&self) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::oldest_key");
+        Ok(inner.entries.first().map(|e| e.key.clone()))
     }
 
     /// Remove all entries whose key equals `key`.
@@ -2613,6 +2635,28 @@ impl WorkingMemory {
     pub fn max_key_length(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "WorkingMemory::max_key_length");
         Ok(inner.map.keys().map(|k| k.len()).max().unwrap_or(0))
+    }
+
+    /// Return the number of keys whose text contains `substring`.
+    ///
+    /// The search is case-sensitive.  Returns `0` when the store is empty or
+    /// no key matches.
+    pub fn key_count_matching(&self, substring: &str) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::key_count_matching");
+        Ok(inner.map.keys().filter(|k| k.contains(substring)).count())
+    }
+
+    /// Return the mean byte length of all stored values.
+    ///
+    /// Returns `0.0` when the store is empty.
+    pub fn avg_value_length(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::avg_value_length");
+        let n = inner.map.len();
+        if n == 0 {
+            return Ok(0.0);
+        }
+        let total: usize = inner.map.values().map(|v| v.len()).sum();
+        Ok(total as f64 / n as f64)
     }
 
     /// Remove all entries for which `predicate(key, value)` returns `false`.
@@ -5540,5 +5584,31 @@ mod tests {
         mem.set("abcde", "v2").unwrap();
         mem.set("abc", "v3").unwrap();
         assert_eq!(mem.max_key_length().unwrap(), 5);
+    }
+
+    // ── Round 29: WorkingMemory::set_if_absent ────────────────────────────────
+
+    #[test]
+    fn test_working_memory_set_if_absent_inserts_new_key() {
+        let mem = WorkingMemory::new(10).unwrap();
+        let inserted = mem.set_if_absent("fresh", "value").unwrap();
+        assert!(inserted);
+        assert_eq!(mem.get("fresh").unwrap(), Some("value".to_string()));
+    }
+
+    #[test]
+    fn test_working_memory_set_if_absent_does_not_overwrite_existing() {
+        let mem = WorkingMemory::new(10).unwrap();
+        mem.set("key", "original").unwrap();
+        let inserted = mem.set_if_absent("key", "replacement").unwrap();
+        assert!(!inserted);
+        assert_eq!(mem.get("key").unwrap(), Some("original".to_string()));
+    }
+
+    #[test]
+    fn test_working_memory_set_if_absent_second_call_returns_false() {
+        let mem = WorkingMemory::new(10).unwrap();
+        assert!(mem.set_if_absent("k", "v1").unwrap());
+        assert!(!mem.set_if_absent("k", "v2").unwrap());
     }
 }

@@ -2860,4 +2860,40 @@ mod tests {
         cb.record_failure();
         assert_eq!(cb.failures_until_open(), 0);
     }
+
+    // ── Round 29: Deduplicator::cached_keys ──────────────────────────────────
+
+    #[test]
+    fn test_deduplicator_cached_keys_empty_initially() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        assert!(d.cached_keys().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_deduplicator_cached_keys_contains_completed_key() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("ck-key").unwrap();
+        d.complete("ck-key", "result").unwrap();
+        let keys = d.cached_keys().unwrap();
+        assert!(keys.contains(&"ck-key".to_string()));
+    }
+
+    #[test]
+    fn test_deduplicator_cached_keys_excludes_in_flight() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("pending-key").unwrap();
+        // In-flight keys live in a separate map, not in cache
+        assert!(!d.cached_keys().unwrap().contains(&"pending-key".to_string()));
+    }
+
+    #[test]
+    fn test_deduplicator_cached_keys_multiple_entries() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        for k in ["alpha", "beta", "gamma"] {
+            d.check_and_register(k).unwrap();
+            d.complete(k, "v").unwrap();
+        }
+        let keys = d.cached_keys().unwrap();
+        assert_eq!(keys.len(), 3);
+    }
 }

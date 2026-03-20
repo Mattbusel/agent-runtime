@@ -11,6 +11,37 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.38.0] - 2026-03-20
+
+### Added
+
+- **`LatencyHistogram::is_below_p99`** (`metrics.rs`) — SLO helper; returns
+  `true` if the p99 latency is strictly below the given threshold.  Returns
+  `true` when no samples have been recorded.
+- **`MetricsSnapshot::is_healthy`** (`metrics.rs`) — returns `true` when all
+  of `failed_tool_calls`, `backpressure_shed_count`, and `checkpoint_errors`
+  are zero.
+- **`Deduplicator::cached_keys`** (`orchestrator.rs`) — snapshot of all keys
+  whose results have been stored in the cache (includes expired entries until
+  purged).
+- **`WorkingMemory::set_if_absent`** (`memory.rs`) — conditional insert;
+  returns `Ok(true)` when the key was new, `Ok(false)` when the key already
+  existed (existing value unchanged).
+- **`AgentRuntime::has_memory`** (`runtime.rs`, `#[cfg(feature = "memory")]`)
+  — `true` when episodic memory was configured on this runtime.
+- **`AgentRuntime::has_graph`** (`runtime.rs`, `#[cfg(feature = "graph")]`)
+  — `true` when a graph store was configured on this runtime.
+- **`AgentRuntime::has_working_memory`** (`runtime.rs`,
+  `#[cfg(feature = "memory")]`) — `true` when working memory was configured
+  on this runtime.
+
+### Tests
+
+- 20 new tests across `metrics.rs`, `orchestrator.rs`, `memory.rs`, and
+  `runtime.rs` covering all seven methods above.
+
+---
+
 ## [1.37.0] - 2026-03-20
 
 ### Added
