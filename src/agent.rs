@@ -114,6 +114,16 @@ impl Message {
     pub fn is_tool(&self) -> bool {
         self.role == Role::Tool
     }
+
+    /// Return `true` if the message content is empty.
+    pub fn is_empty(&self) -> bool {
+        self.content.is_empty()
+    }
+
+    /// Return the approximate number of whitespace-separated words in the content.
+    pub fn word_count(&self) -> usize {
+        self.content.split_whitespace().count()
+    }
 }
 
 impl std::fmt::Display for Role {
@@ -170,6 +180,20 @@ impl ReActStep {
     /// Returns `true` if this step's action is a tool call (not a FINAL_ANSWER).
     pub fn is_tool_call(&self) -> bool {
         !self.is_final_answer() && !self.action.trim().is_empty()
+    }
+
+    /// Set the `step_duration_ms` field, returning `self` for chaining.
+    ///
+    /// Useful in tests and benchmarks that need to build `AgentSession` values
+    /// with realistic timings without running the full ReAct loop.
+    pub fn with_duration(mut self, ms: u64) -> Self {
+        self.step_duration_ms = ms;
+        self
+    }
+
+    /// Return `true` if all three text fields are empty strings.
+    pub fn is_empty(&self) -> bool {
+        self.thought.is_empty() && self.action.is_empty() && self.observation.is_empty()
     }
 }
 
@@ -283,6 +307,11 @@ impl AgentConfig {
         self
     }
 
+    /// Return the configured maximum number of ReAct iterations.
+    pub fn max_iterations(&self) -> usize {
+        self.max_iterations
+    }
+
     /// Set the model sampling temperature.
     pub fn with_temperature(mut self, t: f32) -> Self {
         self.temperature = Some(t);
@@ -377,6 +406,25 @@ impl AgentConfig {
             ));
         }
         Ok(())
+    }
+
+    /// Return `true` if a loop timeout has been configured.
+    pub fn has_loop_timeout(&self) -> bool {
+        self.loop_timeout.is_some()
+    }
+
+    /// Return `true` if at least one stop sequence has been configured.
+    pub fn has_stop_sequences(&self) -> bool {
+        !self.stop_sequences.is_empty()
+    }
+
+    /// Return `true` if the agent runs at most one iteration.
+    ///
+    /// A single-shot agent executes exactly one Thought-Action-Observation
+    /// cycle and then terminates regardless of whether a `FINAL_ANSWER` was
+    /// produced.
+    pub fn is_single_shot(&self) -> bool {
+        self.max_iterations == 1
     }
 }
 
@@ -681,6 +729,11 @@ impl InMemoryToolCache {
         }
         false
     }
+
+    /// Return the configured maximum capacity, or `None` if the cache is unbounded.
+    pub fn capacity(&self) -> Option<usize> {
+        self.max_entries
+    }
 }
 
 impl Default for InMemoryToolCache {
@@ -969,6 +1022,19 @@ impl ToolRegistry {
     /// Return `true` if a tool with the given name is registered.
     pub fn contains(&self, name: &str) -> bool {
         self.tools.contains_key(name)
+    }
+
+    /// Return `(name, description)` pairs for all registered tools, sorted by name.
+    ///
+    /// Useful for generating help text or logging the tool set at startup.
+    pub fn descriptions(&self) -> Vec<(&str, &str)> {
+        let mut pairs: Vec<(&str, &str)> = self
+            .tools
+            .values()
+            .map(|s| (s.name.as_str(), s.description.as_str()))
+            .collect();
+        pairs.sort_unstable_by_key(|(name, _)| *name);
+        pairs
     }
 }
 
@@ -2808,5 +2874,19 @@ mod tests {
         reg.register(ToolSpec::new("b", "d2", |_| serde_json::json!({})));
         let all = reg.filter_tools(|_| true);
         assert_eq!(all.len(), 2);
+    }
+
+    // ── Round 10: AgentConfig::max_iterations getter ──────────────────────────
+
+    #[test]
+    fn test_agent_config_max_iterations_getter_returns_configured_value() {
+        let cfg = AgentConfig::new(5, "model-x");
+        assert_eq!(cfg.max_iterations(), 5);
+    }
+
+    #[test]
+    fn test_agent_config_with_max_iterations_updates_getter() {
+        let cfg = AgentConfig::new(3, "m").with_max_iterations(10);
+        assert_eq!(cfg.max_iterations(), 10);
     }
 }

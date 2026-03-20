@@ -11,6 +11,67 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.23.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::step_count_for_action`** (`runtime.rs`) — count how many
+  steps used a specific action name; complements `has_action` with a frequency.
+- **`AgentSession::observations`** (`runtime.rs`) — collect all observation
+  strings in step order; avoids manual iteration over `steps`.
+- **`EpisodicStore::retain_top_n`** (`memory.rs`) — keep only the `n`
+  most-important episodes per agent, evicting the rest; returns removed count.
+- **`WorkingMemory::keys_starting_with`** (`memory.rs`) — return keys matching
+  a given prefix, enabling namespace-based key grouping.
+- **`GraphStore::average_out_degree`** (`graph.rs`) — mean out-degree across
+  all entities; useful for detecting dense vs. sparse graph regions.
+- **`GraphStore::in_degree_for`** (`graph.rs`) — incoming edge count for a
+  single entity; complements `out_degree_for` for hub-detection.
+- **`RetryPolicy::is_exponential`** (`orchestrator.rs`) — `true` when the
+  policy uses exponential back-off; companion to `is_no_retry`.
+- **`AgentConfig::max_iterations`** (`agent.rs`) — getter for the configured
+  maximum iteration count; avoids accessing the public field directly.
+- **`LatencyHistogram::std_dev_ms`** (`metrics.rs`) — bucket-midpoint
+  approximation of the standard deviation; completes the descriptive stats suite.
+
+---
+
+## [1.22.0] - 2026-03-20
+
+### Added
+
+- **`AgentConfig::has_loop_timeout`** (`agent.rs`) — `true` when a loop timeout
+  has been set; avoids inspecting `loop_timeout.is_some()` at call sites.
+- **`AgentConfig::has_stop_sequences`** (`agent.rs`) — `true` when at least one
+  stop sequence is configured.
+- **`AgentConfig::is_single_shot`** (`agent.rs`) — `true` when `max_iterations == 1`;
+  flags one-shot agents without inspecting the raw field.
+- **`ReActStep::with_duration`** (`agent.rs`) — builder method to set
+  `step_duration_ms`; useful for constructing test sessions with realistic
+  timings without running the full loop.
+- **`ReActStep::is_empty`** (`agent.rs`) — `true` when all three text fields
+  (thought, action, observation) are empty strings.
+- **`Message::is_empty`** (`agent.rs`) — `true` when the message content is
+  an empty string.
+- **`Message::word_count`** (`agent.rs`) — approximate whitespace-separated
+  word count of the message content.
+- **`ToolRegistry::descriptions`** (`agent.rs`) — return `(name, description)`
+  pairs for all registered tools, sorted by name; useful for generating help
+  text at startup.
+- **`InMemoryToolCache::capacity`** (`agent.rs`) — return the configured maximum
+  entry limit, or `None` if the cache is unbounded.
+- **`RetryPolicy::is_constant`** (`orchestrator.rs`) — `true` when the policy
+  uses a fixed-interval delay; companion to `is_exponential`.
+- **`AgentId::starts_with`** / **`MemoryId::starts_with`** (`types.rs`) — check
+  whether an ID string begins with a given prefix; useful for namespace-based
+  routing.
+- **`FilePersistenceBackend::key_count`** (`persistence.rs`) — count stored keys
+  without building a string list; more efficient than `list_keys().len()`.
+- **`MetricsSnapshot::total_successful_tool_calls`** (`metrics.rs`) — total tool
+  calls minus failed calls using saturating arithmetic.
+
+---
+
 ## [1.21.0] - 2026-03-20
 
 ### Added

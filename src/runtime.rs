@@ -241,6 +241,24 @@ impl AgentSession {
         self.steps.get(idx).map(|s| s.thought.as_str())
     }
 
+    /// Count how many steps used `action_name` as their action.
+    ///
+    /// Returns `0` if the action was never invoked.  Complements
+    /// [`has_action`], which only tests for presence.
+    ///
+    /// [`has_action`]: AgentSession::has_action
+    pub fn step_count_for_action(&self, action_name: &str) -> usize {
+        self.steps.iter().filter(|s| s.action == action_name).count()
+    }
+
+    /// Return all observation strings in step order.
+    ///
+    /// Each string is a borrow of the corresponding `ReActStep::observation`
+    /// field.  Useful for bulk post-processing of tool results.
+    pub fn observations(&self) -> Vec<&str> {
+        self.steps.iter().map(|s| s.observation.as_str()).collect()
+    }
+
     /// Return all per-step durations in milliseconds, in order.
     ///
     /// Useful for computing custom percentiles or detecting slow outlier steps.
@@ -2207,5 +2225,79 @@ mod tests {
     fn test_thought_at_returns_none_for_out_of_bounds_index() {
         let session = make_session(vec![ReActStep::new("t", "a", "r")], 0);
         assert!(session.thought_at(99).is_none());
+    }
+
+    // ── Round 10: step_count_for_action / observations ────────────────────────
+
+    #[test]
+    fn test_step_count_for_action_counts_correctly() {
+        let session = make_session(
+            vec![
+                ReActStep::new("t", "search", "r1"),
+                ReActStep::new("t", "search", "r2"),
+                ReActStep::new("t", "FINAL_ANSWER", "done"),
+            ],
+            0,
+        );
+        assert_eq!(session.step_count_for_action("search"), 2);
+        assert_eq!(session.step_count_for_action("FINAL_ANSWER"), 1);
+        assert_eq!(session.step_count_for_action("unknown"), 0);
+    }
+
+    #[test]
+    fn test_observations_returns_all_observation_strings() {
+        let session = make_session(
+            vec![
+                ReActStep::new("t1", "a", "obs_one"),
+                ReActStep::new("t2", "b", "obs_two"),
+            ],
+            0,
+        );
+        let obs = session.observations();
+        assert_eq!(obs, vec!["obs_one", "obs_two"]);
+    }
+
+    #[test]
+    fn test_observations_empty_for_no_steps() {
+        let session = make_session(vec![], 0);
+        assert!(session.observations().is_empty());
+    }
+
+    // ── Round 10: unique_tools_used ──────────────────────────────────────────
+
+    #[test]
+    fn test_unique_tools_used_deduplicates_actions() {
+        let session = make_session(
+            vec![
+                ReActStep::new("t", "search", "r1"),
+                ReActStep::new("t", "lookup", "r2"),
+                ReActStep::new("t", "search", "r3"),
+            ],
+            0,
+        );
+        let tools = session.unique_tools_used();
+        assert_eq!(tools.len(), 2);
+        assert!(tools.contains(&"search".to_string()));
+        assert!(tools.contains(&"lookup".to_string()));
+    }
+
+    #[test]
+    fn test_unique_tools_used_excludes_final_answer() {
+        let session = make_session(
+            vec![
+                ReActStep::new("t", "search", "r1"),
+                ReActStep::new("t", "FINAL_ANSWER: done", "r2"),
+            ],
+            0,
+        );
+        let tools = session.unique_tools_used();
+        assert_eq!(tools.len(), 1);
+        assert!(tools.contains(&"search".to_string()));
+    }
+
+    #[test]
+    fn test_unique_tools_used_empty_for_no_steps() {
+        let session = make_session(vec![], 0);
+        assert!(session.unique_tools_used().is_empty());
     }
 }

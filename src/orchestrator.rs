@@ -171,6 +171,16 @@ impl RetryPolicy {
         self.max_attempts <= 1
     }
 
+    /// Return `true` if this policy uses exponential back-off between retries.
+    pub fn is_exponential(&self) -> bool {
+        matches!(self.kind, RetryKind::Exponential)
+    }
+
+    /// Return `true` if this policy uses a constant (fixed-interval) delay between retries.
+    pub fn is_constant(&self) -> bool {
+        matches!(self.kind, RetryKind::Constant)
+    }
+
     /// Return a copy of this policy with the base delay changed to `ms` milliseconds.
     ///
     /// # Errors
@@ -2398,5 +2408,25 @@ mod tests {
     fn test_is_no_retry_false_for_constant_policy_with_multiple_attempts() {
         let p = RetryPolicy::constant(2, 100).unwrap();
         assert!(!p.is_no_retry());
+    }
+
+    // ── Round 10: is_exponential ──────────────────────────────────────────────
+
+    #[test]
+    fn test_is_exponential_true_for_exponential_policy() {
+        let p = RetryPolicy::exponential(3, 50).unwrap();
+        assert!(p.is_exponential());
+    }
+
+    #[test]
+    fn test_is_exponential_false_for_constant_policy() {
+        let p = RetryPolicy::constant(3, 50).unwrap();
+        assert!(!p.is_exponential());
+    }
+
+    #[test]
+    fn test_is_exponential_false_for_none_policy() {
+        let p = RetryPolicy::none();
+        assert!(!p.is_exponential());
     }
 }

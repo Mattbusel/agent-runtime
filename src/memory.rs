@@ -796,6 +796,26 @@ impl EpisodicStore {
         Ok(items)
     }
 
+    /// Keep only the `n` most-important episodes for `agent_id`, removing
+    /// the rest.  Returns the number of episodes that were removed.
+    ///
+    /// If the agent has `n` or fewer episodes already, nothing is removed.
+    pub fn retain_top_n(&self, agent_id: &AgentId, n: usize) -> Result<usize, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::retain_top_n");
+        let items = inner.items.entry(agent_id.clone()).or_default();
+        if items.len() <= n {
+            return Ok(0);
+        }
+        items.sort_unstable_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let removed = items.len() - n;
+        items.truncate(n);
+        Ok(removed)
+    }
+
     /// Return the arithmetic mean importance for `agent_id`, or `0.0` if the
     /// agent has no stored episodes.
     pub fn importance_avg(&self, agent_id: &AgentId) -> Result<f32, AgentRuntimeError> {
@@ -2086,6 +2106,20 @@ impl WorkingMemory {
             }
         }
         Ok(updated)
+    }
+
+    /// Return all keys whose names start with `prefix`, in insertion order.
+    ///
+    /// Useful for namespace-prefixed keys such as `"user:name"`,
+    /// `"user:email"` where all user-related keys share the `"user:"` prefix.
+    pub fn keys_starting_with(&self, prefix: &str) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::keys_starting_with");
+        Ok(inner
+            .map
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .cloned()
+            .collect())
     }
 
     /// Rename a key without changing its value or insertion order.
@@ -4406,5 +4440,49 @@ mod tests {
         store.store_with_embedding("has_emb", "v1", vec![], vec![0.1_f32, 0.2_f32]).unwrap();
         store.store("no_emb", "v2", vec![]).unwrap();
         assert_eq!(store.entry_count_with_embedding().unwrap(), 1);
+    }
+
+    // ── Round 10: retain_top_n / keys_starting_with ───────────────────────────
+
+    #[test]
+    fn test_retain_top_n_removes_low_importance_episodes() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "low", 0.1).unwrap();
+        store.add_episode(agent.clone(), "mid", 0.5).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        let removed = store.retain_top_n(&agent, 2).unwrap();
+        assert_eq!(removed, 1);
+        let remaining = store.recall(&agent, 10).unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.iter().all(|i| i.importance >= 0.5));
+    }
+
+    #[test]
+    fn test_retain_top_n_noop_when_fewer_than_n() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("b");
+        store.add_episode(agent.clone(), "only", 0.7).unwrap();
+        let removed = store.retain_top_n(&agent, 5).unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(store.recall(&agent, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_keys_starting_with_returns_matching_keys() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("user:name", "alice").unwrap();
+        wm.set("user:email", "alice@example.com").unwrap();
+        wm.set("session:id", "abc").unwrap();
+        let mut keys = wm.keys_starting_with("user:").unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["user:email", "user:name"]);
+    }
+
+    #[test]
+    fn test_keys_starting_with_returns_empty_when_no_match() {
+        let wm = WorkingMemory::new(5).unwrap();
+        wm.set("foo", "bar").unwrap();
+        assert!(wm.keys_starting_with("xyz:").unwrap().is_empty());
     }
 }

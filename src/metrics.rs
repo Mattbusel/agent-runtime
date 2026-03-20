@@ -88,6 +88,35 @@ impl LatencyHistogram {
         self.total_sum_ms.load(Ordering::Relaxed) as f64 / count as f64
     }
 
+    /// Return a bucket-midpoint approximation of the standard deviation in ms.
+    ///
+    /// Uses the midpoint of each histogram bucket to estimate the second moment,
+    /// then applies `√(E[X²] − E[X]²)`.  Returns `0.0` when fewer than two
+    /// samples have been recorded.
+    ///
+    /// # Accuracy
+    /// The result is an estimate; its accuracy improves as the sample count
+    /// increases and degrades near the boundaries of wide buckets.
+    pub fn std_dev_ms(&self) -> f64 {
+        let count = self.total_count.load(Ordering::Relaxed);
+        if count < 2 {
+            return 0.0;
+        }
+        const MIDS: [f64; 7] = [0.5, 3.0, 7.5, 30.0, 75.0, 300.0, 500.0];
+        let (sum, sum_sq): (f64, f64) = self
+            .buckets
+            .iter()
+            .zip(MIDS.iter())
+            .map(|(b, &m)| {
+                let c = b.load(Ordering::Relaxed) as f64;
+                (c * m, c * m * m)
+            })
+            .fold((0.0, 0.0), |(s, ss), (v, v2)| (s + v, ss + v2));
+        let n = count as f64;
+        let variance = sum_sq / n - (sum / n) * (sum / n);
+        variance.max(0.0).sqrt()
+    }
+
     /// Return the total sample count.
     pub fn count(&self) -> u64 {
         self.total_count.load(Ordering::Relaxed)
@@ -352,6 +381,14 @@ impl MetricsSnapshot {
             return 0.0;
         }
         self.tool_failure_count(name) as f64 / calls as f64
+    }
+
+    /// Return the total number of successful tool calls (total minus failed).
+    ///
+    /// Uses saturating subtraction so a race between `total_tool_calls`
+    /// and `failed_tool_calls` cannot produce an underflow.
+    pub fn total_successful_tool_calls(&self) -> u64 {
+        self.total_tool_calls.saturating_sub(self.failed_tool_calls)
     }
 
     /// Return `true` if all counters are zero (no activity has been recorded).
@@ -1336,5 +1373,39 @@ mod tests {
         m.checkpoint_errors.fetch_add(5, Ordering::Relaxed);
         m.reset();
         assert_eq!(m.checkpoint_errors(), 0);
+    }
+
+    // ── Round 10: LatencyHistogram::std_dev_ms ────────────────────────────────
+
+    #[test]
+    fn test_std_dev_ms_zero_for_no_samples() {
+        let h = LatencyHistogram::default();
+        assert!((h.std_dev_ms() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_std_dev_ms_zero_for_single_sample() {
+        let h = LatencyHistogram::default();
+        h.record(5);
+        assert!((h.std_dev_ms() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_std_dev_ms_positive_for_varied_samples() {
+        let h = LatencyHistogram::default();
+        h.record(1);    // bucket 0 mid ~0.5
+        h.record(200);  // bucket 5 mid ~300
+        // Two samples with very different values → std_dev > 0
+        assert!(h.std_dev_ms() > 0.0);
+    }
+
+    #[test]
+    fn test_std_dev_ms_zero_for_identical_samples() {
+        let h = LatencyHistogram::default();
+        h.record(5);
+        h.record(5);
+        h.record(5);
+        // All samples in the same bucket → std_dev ≈ 0
+        assert!(h.std_dev_ms() < 1.0);
     }
 }

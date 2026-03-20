@@ -686,6 +686,31 @@ impl GraphStore {
         Ok(inner.relationships.len())
     }
 
+    /// Return the average out-degree across all entities.
+    ///
+    /// Returns `0.0` for an empty graph.  The result is the total number of
+    /// directed edges divided by the number of nodes.
+    pub fn average_out_degree(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "average_out_degree");
+        let n = inner.entities.len();
+        if n == 0 {
+            return Ok(0.0);
+        }
+        Ok(inner.relationships.len() as f64 / n as f64)
+    }
+
+    /// Return the in-degree (number of incoming edges) for the given entity.
+    ///
+    /// Returns `0` if the entity does not exist or has no incoming edges.
+    pub fn in_degree_for(&self, entity_id: &EntityId) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "in_degree_for");
+        Ok(inner
+            .reverse_adjacency
+            .get(entity_id)
+            .map(|v| v.len())
+            .unwrap_or(0))
+    }
+
     /// Return the number of relationships in the graph.
     ///
     /// Alias for [`relationship_count`] using graph-theory terminology.
@@ -3384,5 +3409,41 @@ mod tests {
         let g = make_graph();
         add(&g, "iso");
         assert!(g.incident_relationships(&EntityId::new("iso")).unwrap().is_empty());
+    }
+
+    // ── Round 10: average_out_degree / in_degree_for ──────────────────────────
+
+    #[test]
+    fn test_average_out_degree_empty_graph_is_zero() {
+        let g = GraphStore::new();
+        assert!((g.average_out_degree().unwrap() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_average_out_degree_two_nodes_one_edge() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        // 1 edge / 2 nodes = 0.5
+        assert!((g.average_out_degree().unwrap() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_in_degree_for_counts_incoming_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "A")).unwrap();
+        g.add_entity(Entity::new("b", "B")).unwrap();
+        g.add_entity(Entity::new("c", "C")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "r", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("c", "b", "r", 1.0)).unwrap();
+        assert_eq!(g.in_degree_for(&EntityId::new("b")).unwrap(), 2);
+        assert_eq!(g.in_degree_for(&EntityId::new("a")).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_in_degree_for_returns_zero_for_unknown_entity() {
+        let g = GraphStore::new();
+        assert_eq!(g.in_degree_for(&EntityId::new("ghost")).unwrap(), 0);
     }
 }
