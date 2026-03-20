@@ -4291,4 +4291,81 @@ mod tests {
         assert_eq!(iso.len(), 1);
         assert!(iso.contains(&EntityId::new("orphan")));
     }
+
+    // ── Round 30: reverse, max_in_degree_entity, shortest_path_length ────────
+
+    #[test]
+    fn test_reverse_flips_edge_direction() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("x", "N")).unwrap();
+        g.add_entity(Entity::new("y", "N")).unwrap();
+        g.add_relationship(Relationship::new("x", "y", "edge", 1.0)).unwrap();
+        let rev = g.reverse().unwrap();
+        // In the reversed graph, y → x should exist
+        let y_id = EntityId::new("y");
+        let succs = rev.successors(&y_id).unwrap();
+        assert!(succs.iter().any(|e| e.id == EntityId::new("x")));
+    }
+
+    #[test]
+    fn test_reverse_empty_graph_produces_empty_reverse() {
+        let g = GraphStore::new();
+        let rev = g.reverse().unwrap();
+        assert!(rev.is_empty().unwrap());
+    }
+
+    #[test]
+    fn test_max_in_degree_entity_none_for_empty_graph() {
+        let g = GraphStore::new();
+        assert!(g.max_in_degree_entity().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_max_in_degree_entity_returns_node_with_most_incoming() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("hub", "N")).unwrap();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "hub", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "hub", "e", 1.0)).unwrap();
+        let best = g.max_in_degree_entity().unwrap().unwrap();
+        assert_eq!(best.id, EntityId::new("hub"));
+    }
+
+    #[test]
+    fn test_shortest_path_length_none_when_no_path() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        let len = g
+            .shortest_path_length(&EntityId::new("a"), &EntityId::new("b"))
+            .unwrap();
+        assert!(len.is_none());
+    }
+
+    #[test]
+    fn test_shortest_path_length_one_for_direct_edge() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "e", 1.0)).unwrap();
+        let len = g
+            .shortest_path_length(&EntityId::new("a"), &EntityId::new("b"))
+            .unwrap();
+        assert_eq!(len, Some(1));
+    }
+
+    #[test]
+    fn test_shortest_path_length_two_for_two_hop_path() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "e", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "e", 1.0)).unwrap();
+        let len = g
+            .shortest_path_length(&EntityId::new("a"), &EntityId::new("c"))
+            .unwrap();
+        assert_eq!(len, Some(2));
+    }
 }

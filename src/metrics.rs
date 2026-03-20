@@ -296,6 +296,19 @@ impl LatencyHistogram {
         self.total_sum_ms.load(Ordering::Relaxed)
     }
 
+    /// Return the coefficient of variation: `std_dev_ms / mean_ms`.
+    ///
+    /// A value of `0.0` means no variation; higher values indicate more
+    /// spread in latency.  Returns `0.0` when `mean_ms` is zero (empty
+    /// histogram or all-zero samples) to avoid division by zero.
+    pub fn coefficient_of_variation(&self) -> f64 {
+        let mean = self.mean_ms();
+        if mean == 0.0 {
+            return 0.0;
+        }
+        self.std_dev_ms() / mean
+    }
+
     /// Reset all histogram counters to zero.
     ///
     /// Alias for [`reset`] using more conventional naming.

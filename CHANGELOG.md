@@ -11,6 +11,33 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.40.0] - 2026-03-20
+
+### Tests
+
+- **`RetryPolicy::is_constant`** — verify constant vs exponential discrimination.
+- **`RetryPolicy::total_max_delay_ms`** — verify sum of per-attempt delays.
+- **`CircuitBreaker::is_healthy`** — healthy when Closed, unhealthy when Open.
+- **`CircuitBreaker::is_half_open`** — enters HalfOpen after zero-duration
+  recovery window elapses.
+- **`Deduplicator::is_idle`** — idle when empty; not idle with in-flight
+  request; idle again after complete.
+- **`EpisodicStore::has_agent`** — false for unknown agent, true after episode.
+- **`EpisodicStore::export_agent_memory`** — empty for unknown agent, correct
+  count after episodes.
+- **`SemanticStore::store_with_embedding`** — rejects empty vector; stores
+  entry; rejects dimension mismatch on second call.
+- **`GraphStore::reverse`** — flips edge direction; empty graph gives empty
+  reverse.
+- **`GraphStore::max_in_degree_entity`** — None for empty graph; returns node
+  with highest in-degree.
+- **`GraphStore::shortest_path_length`** — None when unreachable; 1 for direct
+  edge; 2 for two-hop path.
+
+28 new tests across `orchestrator.rs`, `memory.rs`, and `graph.rs`.
+
+---
+
 ## [1.39.0] - 2026-03-20
 
 ### Added

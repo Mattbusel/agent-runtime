@@ -487,6 +487,63 @@ impl AgentSession {
         with_obs as f64 / n as f64
     }
 
+    /// Return the fraction of steps (from the second onward) that repeat the
+    /// immediately preceding action.
+    ///
+    /// Returns `0.0` for sessions with fewer than two steps.  A high value
+    /// may indicate the agent is stuck in a loop.
+    pub fn action_repetition_rate(&self) -> f64 {
+        let n = self.steps.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let repeats = self
+            .steps
+            .windows(2)
+            .filter(|w| w[0].action == w[1].action)
+            .count();
+        repeats as f64 / (n - 1) as f64
+    }
+
+    /// Return the length of the longest consecutive run of failed steps.
+    ///
+    /// A step is considered failed when its observation starts with `{"error"`
+    /// or contains the substring `"error"` (case-insensitive).
+    /// Returns `0` for sessions with no steps or no failures.
+    pub fn max_consecutive_failures(&self) -> usize {
+        let mut max_run = 0usize;
+        let mut current = 0usize;
+        for step in &self.steps {
+            let obs = step.observation.trim();
+            if obs.starts_with("{\"error\"") || obs.to_ascii_lowercase().contains("\"error\"") {
+                current += 1;
+                if current > max_run {
+                    max_run = current;
+                }
+            } else {
+                current = 0;
+            }
+        }
+        max_run
+    }
+
+    /// Return the mean character length of non-empty thought strings.
+    ///
+    /// Only steps with a non-empty `thought` field are included.
+    /// Returns `0.0` when no step has a thought.
+    pub fn avg_thought_length(&self) -> f64 {
+        let thoughts: Vec<_> = self
+            .steps
+            .iter()
+            .filter(|s| !s.thought.is_empty())
+            .collect();
+        if thoughts.is_empty() {
+            return 0.0;
+        }
+        let total: usize = thoughts.iter().map(|s| s.thought.len()).sum();
+        total as f64 / thoughts.len() as f64
+    }
+
     /// Return the rate of knowledge-graph lookups per step.
     ///
     /// Computed as `graph_lookups / step_count`.  Returns `0.0` when there
@@ -3289,5 +3346,79 @@ mod tests {
     fn test_observation_rate_zero_for_empty_session() {
         let session = make_session(vec![], 0);
         assert!((session.observation_rate() - 0.0).abs() < 1e-9);
+    }
+
+    // ── Round 24: action_repetition_rate / max_consecutive_failures / avg_thought_length
+
+    #[test]
+    fn test_action_repetition_rate_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!((session.action_repetition_rate() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_action_repetition_rate_zero_for_single_step() {
+        let session = make_session(vec![make_step("t", "search", "r")], 0);
+        assert!((session.action_repetition_rate() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_action_repetition_rate_one_when_all_same() {
+        let steps = vec![
+            make_step("t", "search", "r"),
+            make_step("t", "search", "r"),
+            make_step("t", "search", "r"),
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.action_repetition_rate() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_action_repetition_rate_partial_repeats() {
+        // [search, search, calc] → 1 repeat out of 2 transitions → 0.5
+        let steps = vec![
+            make_step("t", "search", "r"),
+            make_step("t", "search", "r"),
+            make_step("t", "calc", "r"),
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.action_repetition_rate() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_max_consecutive_failures_zero_for_no_errors() {
+        let steps = vec![make_step("t", "a", "ok"), make_step("t", "b", "done")];
+        let session = make_session(steps, 0);
+        assert_eq!(session.max_consecutive_failures(), 0);
+    }
+
+    #[test]
+    fn test_max_consecutive_failures_counts_run() {
+        let steps = vec![
+            make_step("t", "a", "ok"),
+            make_step("t", "b", r#"{"error":"x"}"#),
+            make_step("t", "c", r#"{"error":"y"}"#),
+            make_step("t", "d", "ok"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.max_consecutive_failures(), 2);
+    }
+
+    #[test]
+    fn test_avg_thought_length_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!((session.avg_thought_length() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_thought_length_excludes_empty_thoughts() {
+        let steps = vec![
+            make_step("hello", "a", "r"),  // 5 chars
+            make_step("", "b", "r"),        // excluded
+            make_step("hi", "c", "r"),      // 2 chars
+        ];
+        // mean = (5 + 2) / 2 = 3.5
+        let session = make_session(steps, 0);
+        assert!((session.avg_thought_length() - 3.5).abs() < 1e-9);
     }
 }

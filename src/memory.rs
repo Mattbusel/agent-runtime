@@ -1585,6 +1585,42 @@ impl EpisodicStore {
             .and_then(|v| v.iter().map(|i| i.recall_count).max()))
     }
 
+    /// Return the mean importance score across all episodes for `agent_id`.
+    ///
+    /// Returns `0.0` when the agent has no stored episodes.
+    pub fn avg_importance(&self, agent_id: &AgentId) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::avg_importance");
+        let episodes = match inner.items.get(agent_id) {
+            Some(v) if !v.is_empty() => v,
+            _ => return Ok(0.0),
+        };
+        let sum: f64 = episodes.iter().map(|i| f64::from(i.importance)).sum();
+        Ok(sum / episodes.len() as f64)
+    }
+
+    /// Return the `(min, max)` importance pair across all episodes for
+    /// `agent_id`, or `None` when the agent has no stored episodes.
+    pub fn importance_range(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<(f32, f32)>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::importance_range");
+        Ok(inner.items.get(agent_id).and_then(|v| {
+            if v.is_empty() {
+                return None;
+            }
+            let min = v
+                .iter()
+                .map(|i| i.importance)
+                .fold(f32::INFINITY, f32::min);
+            let max = v
+                .iter()
+                .map(|i| i.importance)
+                .fold(f32::NEG_INFINITY, f32::max);
+            Some((min, max))
+        }))
+    }
+
     /// Return the total `recall_count` across all episodes for `agent_id`.
     ///
     /// Returns `0` if the agent has no stored episodes.
@@ -2012,6 +2048,25 @@ impl SemanticStore {
     pub fn has_key(&self, key: &str) -> Result<bool, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::has_key");
         Ok(inner.entries.iter().any(|e| e.key == key))
+    }
+
+    /// Return the number of entries that have no tags.
+    pub fn entries_without_tags(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::entries_without_tags");
+        Ok(inner.entries.iter().filter(|e| e.tags.is_empty()).count())
+    }
+
+    /// Return the mean number of tags per entry.
+    ///
+    /// Returns `0.0` when the store is empty.
+    pub fn avg_tag_count_per_entry(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::avg_tag_count_per_entry");
+        let n = inner.entries.len();
+        if n == 0 {
+            return Ok(0.0);
+        }
+        let total: usize = inner.entries.iter().map(|e| e.tags.len()).sum();
+        Ok(total as f64 / n as f64)
     }
 
     /// Return the key of the most recently inserted entry, or `None` if empty.
@@ -2657,6 +2712,32 @@ impl WorkingMemory {
         }
         let total: usize = inner.map.values().map(|v| v.len()).sum();
         Ok(total as f64 / n as f64)
+    }
+
+    /// Return the key with the most bytes, or `None` if the store is empty.
+    ///
+    /// When multiple keys share the maximum byte length, one of them is
+    /// returned (unspecified which).
+    pub fn longest_key(&self) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::longest_key");
+        Ok(inner
+            .map
+            .keys()
+            .max_by_key(|k| k.len())
+            .map(|k| k.clone()))
+    }
+
+    /// Return the value with the most bytes, or `None` if the store is empty.
+    ///
+    /// When multiple values share the maximum byte length, one of them is
+    /// returned (unspecified which).
+    pub fn longest_value(&self) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::longest_value");
+        Ok(inner
+            .map
+            .values()
+            .max_by_key(|v| v.len())
+            .map(|v| v.clone()))
     }
 
     /// Remove all entries for which `predicate(key, value)` returns `false`.
@@ -5767,5 +5848,161 @@ mod tests {
         mem.set("k2", "abcd").unwrap();  // 4 bytes
         // mean = 3.0
         assert!((mem.avg_value_length().unwrap() - 3.0).abs() < 1e-9);
+    }
+
+    // ── Round 30: EpisodicStore::has_agent, export_agent_memory ──────────────
+
+    #[test]
+    fn test_episodic_store_has_agent_false_when_empty() {
+        let store = EpisodicStore::new();
+        assert!(!store.has_agent(&AgentId::new("nobody")).unwrap());
+    }
+
+    #[test]
+    fn test_episodic_store_has_agent_true_after_episode() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("agent-ha");
+        store.add_episode(agent.clone(), "event", 0.5).unwrap();
+        assert!(store.has_agent(&agent).unwrap());
+    }
+
+    #[test]
+    fn test_episodic_store_export_agent_memory_empty_for_unknown() {
+        let store = EpisodicStore::new();
+        let exported = store.export_agent_memory(&AgentId::new("ghost")).unwrap();
+        assert!(exported.is_empty());
+    }
+
+    #[test]
+    fn test_episodic_store_export_agent_memory_returns_episodes() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("agent-exp");
+        store.add_episode(agent.clone(), "ep1", 0.9).unwrap();
+        store.add_episode(agent.clone(), "ep2", 0.7).unwrap();
+        let exported = store.export_agent_memory(&agent).unwrap();
+        assert_eq!(exported.len(), 2);
+    }
+
+    // ── Round 30: SemanticStore::store_with_embedding ────────────────────────
+
+    #[test]
+    fn test_semantic_store_store_with_embedding_rejects_empty_vec() {
+        let store = SemanticStore::new();
+        let result = store.store_with_embedding("k", "v", vec![], vec![]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_semantic_store_store_with_embedding_stores_entry() {
+        let store = SemanticStore::new();
+        let emb = vec![1.0f32, 0.0, 0.0];
+        store.store_with_embedding("k1", "v1", vec![], emb).unwrap();
+        assert_eq!(store.len().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_semantic_store_store_with_embedding_rejects_dimension_mismatch() {
+        let store = SemanticStore::new();
+        store.store_with_embedding("k1", "v1", vec![], vec![1.0f32, 0.0]).unwrap();
+        // Second call with different dimension should fail
+        let result = store.store_with_embedding("k2", "v2", vec![], vec![1.0f32, 0.0, 0.0]);
+        assert!(result.is_err());
+    }
+
+    // ── Round 24: avg_importance / importance_range / entries_without_tags /
+    //             avg_tag_count_per_entry / longest_key / longest_value ────────
+
+    #[test]
+    fn test_avg_importance_zero_for_new_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("ghost");
+        assert!((store.avg_importance(&agent).unwrap() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_importance_correct_mean() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "ep1", 0.2).unwrap();
+        store.add_episode(agent.clone(), "ep2", 0.8).unwrap();
+        // mean = 0.5
+        assert!((store.avg_importance(&agent).unwrap() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_importance_range_none_for_new_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("ghost");
+        assert!(store.importance_range(&agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_importance_range_returns_min_max() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "ep1", 0.1).unwrap();
+        store.add_episode(agent.clone(), "ep2", 0.9).unwrap();
+        let (min, max) = store.importance_range(&agent).unwrap().unwrap();
+        assert!((min - 0.1_f32).abs() < 1e-6);
+        assert!((max - 0.9_f32).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_semantic_entries_without_tags_all_untagged() {
+        let store = SemanticStore::new();
+        store.store("k1", "v1", vec![]).unwrap();
+        store.store("k2", "v2", vec![]).unwrap();
+        assert_eq!(store.entries_without_tags().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_semantic_entries_without_tags_mixed() {
+        let store = SemanticStore::new();
+        store.store("k1", "v1", vec!["tag".to_string()]).unwrap();
+        store.store("k2", "v2", vec![]).unwrap();
+        assert_eq!(store.entries_without_tags().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_semantic_avg_tag_count_zero_when_empty() {
+        let store = SemanticStore::new();
+        assert!((store.avg_tag_count_per_entry().unwrap() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_semantic_avg_tag_count_correct_mean() {
+        let store = SemanticStore::new();
+        store.store("k1", "v1", vec!["a".to_string(), "b".to_string()]).unwrap(); // 2
+        store.store("k2", "v2", vec![]).unwrap(); // 0
+        // mean = 1.0
+        assert!((store.avg_tag_count_per_entry().unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_working_memory_longest_key_none_when_empty() {
+        let mem = WorkingMemory::new(10).unwrap();
+        assert!(mem.longest_key().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_working_memory_longest_key_returns_longest() {
+        let mem = WorkingMemory::new(10).unwrap();
+        mem.set("ab", "v1").unwrap();
+        mem.set("abcde", "v2").unwrap();
+        assert_eq!(mem.longest_key().unwrap().as_deref(), Some("abcde"));
+    }
+
+    #[test]
+    fn test_working_memory_longest_value_none_when_empty() {
+        let mem = WorkingMemory::new(10).unwrap();
+        assert!(mem.longest_value().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_working_memory_longest_value_returns_longest() {
+        let mem = WorkingMemory::new(10).unwrap();
+        mem.set("k1", "short").unwrap();
+        mem.set("k2", "much longer value").unwrap();
+        assert_eq!(mem.longest_value().unwrap().as_deref(), Some("much longer value"));
     }
 }

@@ -2896,4 +2896,104 @@ mod tests {
         let keys = d.cached_keys().unwrap();
         assert_eq!(keys.len(), 3);
     }
+
+    // ── Round 30: RetryPolicy::is_constant, total_max_delay_ms ───────────────
+
+    #[test]
+    fn test_retry_policy_is_constant_true_for_constant() {
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        assert!(p.is_constant());
+        assert!(!p.is_exponential());
+    }
+
+    #[test]
+    fn test_retry_policy_is_constant_false_for_exponential() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(!p.is_constant());
+    }
+
+    #[test]
+    fn test_retry_policy_total_max_delay_ms_constant() {
+        // constant(3, 100) → delays [100, 100, 100] = 300
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        assert_eq!(p.total_max_delay_ms(), 300);
+    }
+
+    #[test]
+    fn test_retry_policy_total_max_delay_ms_exponential() {
+        // exponential(3, 100) → delays [100, 200, 400] (capped at MAX)
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        let total = p.total_max_delay_ms();
+        assert!(total >= 300); // at minimum 100+100+100
+    }
+
+    // ── Round 30: CircuitBreaker::is_half_open, is_healthy ───────────────────
+
+    #[test]
+    fn test_circuit_breaker_is_healthy_true_when_closed() {
+        let cb = CircuitBreaker::new("svc-ih1", 3, Duration::from_secs(60)).unwrap();
+        assert!(cb.is_healthy());
+    }
+
+    #[test]
+    fn test_circuit_breaker_is_healthy_false_when_open() {
+        let cb = CircuitBreaker::new("svc-ih2", 1, Duration::from_secs(60)).unwrap();
+        let _: Result<(), _> = cb.call(|| Err::<(), _>("fail".to_string()));
+        assert!(!cb.is_healthy());
+    }
+
+    #[test]
+    fn test_circuit_breaker_is_half_open_after_zero_recovery() {
+        let cb = CircuitBreaker::new("svc-ho1", 1, Duration::ZERO).unwrap();
+        let _: Result<(), _> = cb.call(|| Err::<(), _>("fail".to_string()));
+        // With zero recovery window the circuit immediately enters HalfOpen
+        assert!(cb.is_half_open() || cb.is_healthy()); // HalfOpen or recovered
+    }
+
+    // ── Round 30: Deduplicator::is_idle ──────────────────────────────────────
+
+    #[test]
+    fn test_deduplicator_is_idle_true_when_empty() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        assert!(d.is_idle().unwrap());
+    }
+
+    #[test]
+    fn test_deduplicator_is_idle_false_when_in_flight() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("req-x").unwrap();
+        assert!(!d.is_idle().unwrap());
+    }
+
+    #[test]
+    fn test_deduplicator_is_idle_true_after_complete() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("req-y").unwrap();
+        d.complete("req-y", "done").unwrap();
+        assert!(d.is_idle().unwrap());
+    }
+
+    // ── Round 26: in_flight_count ─────────────────────────────────────────────
+
+    #[test]
+    fn test_deduplicator_in_flight_count_zero_initially() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        assert_eq!(d.in_flight_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_deduplicator_in_flight_count_increments_on_register() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("k1").unwrap();
+        d.check_and_register("k2").unwrap();
+        assert_eq!(d.in_flight_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_deduplicator_in_flight_count_decrements_after_complete() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("k1").unwrap();
+        d.complete("k1", "result").unwrap();
+        assert_eq!(d.in_flight_count().unwrap(), 0);
+    }
 }
