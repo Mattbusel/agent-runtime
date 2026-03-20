@@ -2542,4 +2542,43 @@ mod tests {
         assert_eq!(spec.name, "new");
         assert_eq!(spec.description, "new desc");
     }
+
+    // ── Round 16: Message constructors, parse_react_step ─────────────────────
+
+    #[test]
+    fn test_message_user_sets_role_and_content() {
+        let m = Message::user("hello");
+        assert_eq!(m.content(), "hello");
+        assert!(m.is_user());
+        assert!(!m.is_assistant());
+    }
+
+    #[test]
+    fn test_message_assistant_sets_role() {
+        let m = Message::assistant("reply");
+        assert!(m.is_assistant());
+        assert!(!m.is_user());
+        assert!(!m.is_system());
+    }
+
+    #[test]
+    fn test_message_system_sets_role() {
+        let m = Message::system("system prompt");
+        assert!(m.is_system());
+        assert_eq!(m.content(), "system prompt");
+    }
+
+    #[test]
+    fn test_parse_react_step_valid_input() {
+        let text = "Thought: I need to search\nAction: search[query]";
+        let step = parse_react_step(text).unwrap();
+        assert!(step.thought.contains("search"));
+        assert!(step.action.contains("search"));
+    }
+
+    #[test]
+    fn test_parse_react_step_missing_fields_returns_err() {
+        let text = "no structured content here";
+        assert!(parse_react_step(text).is_err());
+    }
 }

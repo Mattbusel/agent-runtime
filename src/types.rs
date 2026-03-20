@@ -50,6 +50,19 @@ impl AgentId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Return the byte length of the inner ID string.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Return `true` if the inner ID string is empty.
+    ///
+    /// Note: `AgentId::new` warns (debug: asserts) against empty IDs.
+    /// This predicate is provided for defensive checks.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl AsRef<str> for AgentId {
@@ -100,6 +113,21 @@ impl MemoryId {
     pub fn random() -> Self {
         Self(Uuid::new_v4().to_string())
     }
+
+    /// Return the inner ID string as a `&str`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Return the byte length of the inner ID string.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Return `true` if the inner ID string is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl AsRef<str> for MemoryId {
@@ -111,5 +139,78 @@ impl AsRef<str> for MemoryId {
 impl std::fmt::Display for MemoryId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_id_new_stores_value() {
+        let id = AgentId::new("agent-1");
+        assert_eq!(id.as_str(), "agent-1");
+    }
+
+    #[test]
+    fn test_agent_id_try_new_rejects_empty() {
+        assert!(AgentId::try_new("").is_err());
+    }
+
+    #[test]
+    fn test_agent_id_try_new_accepts_nonempty() {
+        let id = AgentId::try_new("ok").unwrap();
+        assert_eq!(id.as_str(), "ok");
+    }
+
+    #[test]
+    fn test_agent_id_random_generates_unique_ids() {
+        let a = AgentId::random();
+        let b = AgentId::random();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_agent_id_len_and_is_empty() {
+        let id = AgentId::new("abc");
+        assert_eq!(id.len(), 3);
+        assert!(!id.is_empty());
+    }
+
+    #[test]
+    fn test_agent_id_display() {
+        let id = AgentId::new("my-agent");
+        assert_eq!(id.to_string(), "my-agent");
+    }
+
+    #[test]
+    fn test_memory_id_new_stores_value() {
+        let id = MemoryId::new("mem-42");
+        assert_eq!(id.as_str(), "mem-42");
+    }
+
+    #[test]
+    fn test_memory_id_try_new_rejects_empty() {
+        assert!(MemoryId::try_new("").is_err());
+    }
+
+    #[test]
+    fn test_memory_id_len_and_is_empty() {
+        let id = MemoryId::new("hello");
+        assert_eq!(id.len(), 5);
+        assert!(!id.is_empty());
+    }
+
+    #[test]
+    fn test_memory_id_display() {
+        let id = MemoryId::new("mem-id");
+        assert_eq!(id.to_string(), "mem-id");
+    }
+
+    #[test]
+    fn test_memory_id_random_generates_unique_ids() {
+        let a = MemoryId::random();
+        let b = MemoryId::random();
+        assert_ne!(a, b);
     }
 }

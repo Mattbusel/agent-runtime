@@ -723,6 +723,46 @@ impl EpisodicStore {
         Ok(max)
     }
 
+    /// Return the number of episodes stored for `agent_id`.
+    ///
+    /// Cheaper than `recall(agent, usize::MAX)?.len()` because it does not
+    /// sort, clone, or increment recall counts.
+    pub fn count_for(&self, agent_id: &AgentId) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::count_for");
+        Ok(inner.items.get(agent_id).map_or(0, |v| v.len()))
+    }
+
+    /// Recall up to `limit` episodes for `agent_id` that carry `tag`,
+    /// sorted by descending importance.  `limit = 0` returns all matches.
+    pub fn recall_by_tag(
+        &self,
+        agent_id: &AgentId,
+        tag: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::recall_by_tag");
+        let mut matches: Vec<MemoryItem> = inner
+            .items
+            .get(agent_id)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|i| i.tags.iter().any(|t| t == tag))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        matches.sort_unstable_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if limit > 0 {
+            matches.truncate(limit);
+        }
+        Ok(matches)
+    }
+
     /// Add an episode with an explicit timestamp.
     #[tracing::instrument(skip(self))]
     pub fn add_episode_at(
@@ -1494,17 +1534,6 @@ impl SemanticStore {
         Ok(inner.entries.iter().any(|e| e.key == key))
     }
 
-    /// Remove the first entry whose key matches `key`.  Returns `true` if found.
-    pub fn remove(&self, key: &str) -> Result<bool, AgentRuntimeError> {
-        let mut inner = recover_lock(self.inner.lock(), "SemanticStore::remove");
-        if let Some(pos) = inner.entries.iter().position(|e| e.key == key) {
-            inner.entries.remove(pos);
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
     /// Remove all entries.
     pub fn clear(&self) -> Result<(), AgentRuntimeError> {
         let mut inner = recover_lock(self.inner.lock(), "SemanticStore::clear");
@@ -1602,6 +1631,26 @@ impl SemanticStore {
     /// Return `true` if no entries have been stored.
     pub fn is_empty(&self) -> Result<bool, AgentRuntimeError> {
         Ok(self.len()? == 0)
+    }
+
+    /// Return the number of stored entries.
+    ///
+    /// Alias for [`len`] using conventional naming.
+    ///
+    /// [`len`]: SemanticStore::len
+    pub fn count(&self) -> Result<usize, AgentRuntimeError> {
+        self.len()
+    }
+
+    /// Remove the first entry with key `key`.
+    ///
+    /// Returns `Ok(true)` if an entry was found and removed, `Ok(false)` if
+    /// no entry with that key exists.
+    pub fn remove(&self, key: &str) -> Result<bool, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "SemanticStore::remove");
+        let before = inner.entries.len();
+        inner.entries.retain(|e| e.key != key);
+        Ok(inner.entries.len() < before)
     }
 }
 
@@ -1902,6 +1951,54 @@ impl WorkingMemory {
     /// [`set`]: WorkingMemory::set
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Remove all entries for which `predicate(key, value)` returns `false`.
+    ///
+    /// Preserves insertion order of the surviving entries.
+    /// Returns the number of entries removed.
+    pub fn retain<F>(&self, mut predicate: F) -> Result<usize, AgentRuntimeError>
+    where
+        F: FnMut(&str, &str) -> bool,
+    {
+        let mut inner = recover_lock(self.inner.lock(), "WorkingMemory::retain");
+        let before = inner.map.len();
+        inner.map.retain(|k, v| predicate(k.as_str(), v.as_str()));
+        let surviving: std::collections::HashSet<String> =
+            inner.map.keys().cloned().collect();
+        inner.order.retain(|k| surviving.contains(k));
+        Ok(before - inner.map.len())
+    }
+
+    /// Return all keys in insertion order.
+    pub fn get_all_keys(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::get_all_keys");
+        Ok(inner.order.iter().cloned().collect())
+    }
+
+    /// Atomically replace **all** entries with `map`.
+    ///
+    /// The new entries are stored in iteration order of `map`.  Capacity
+    /// limits apply: if `map.len() > capacity`, only the last `capacity`
+    /// entries (in iteration order) are retained.
+    pub fn replace_all(
+        &self,
+        map: std::collections::HashMap<String, String>,
+    ) -> Result<(), AgentRuntimeError> {
+        let capacity = self.capacity;
+        let mut inner = recover_lock(self.inner.lock(), "WorkingMemory::replace_all");
+        inner.map.clear();
+        inner.order.clear();
+        for (k, v) in map {
+            if inner.map.len() >= capacity {
+                if let Some(oldest) = inner.order.pop_front() {
+                    inner.map.remove(&oldest);
+                }
+            }
+            inner.order.push_back(k.clone());
+            inner.map.insert(k, v);
+        }
+        Ok(())
     }
 }
 

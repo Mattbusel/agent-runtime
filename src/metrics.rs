@@ -1189,4 +1189,38 @@ mod tests {
         let h = LatencyHistogram::default();
         assert_eq!(h.sum_ms(), 0);
     }
+
+    // ── Round 16: mean_ms, failure_rate ──────────────────────────────────────
+
+    #[test]
+    fn test_latency_histogram_mean_ms_zero_when_empty() {
+        let h = LatencyHistogram::default();
+        assert_eq!(h.mean_ms(), 0.0);
+    }
+
+    #[test]
+    fn test_latency_histogram_mean_ms_computes_average() {
+        let h = LatencyHistogram::default();
+        h.record(100);
+        h.record(200);
+        h.record(300);
+        assert!((h.mean_ms() - 200.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_failure_rate_zero_when_no_calls() {
+        let m = RuntimeMetrics::new();
+        let snap = m.snapshot();
+        assert_eq!(snap.failure_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_failure_rate_correct() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("t");
+        m.record_tool_call("t");
+        m.record_tool_failure("t");
+        let snap = m.snapshot();
+        assert!((snap.failure_rate() - 0.5).abs() < 1e-9);
+    }
 }

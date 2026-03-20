@@ -56,3 +56,29 @@ pub fn djb2(s: &str) -> u64 {
     }
     h
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_djb2_empty_string_returns_seed() {
+        assert_eq!(djb2(""), 5381);
+    }
+
+    #[test]
+    fn test_djb2_same_input_same_output() {
+        assert_eq!(djb2("hello"), djb2("hello"));
+    }
+
+    #[test]
+    fn test_djb2_different_inputs_differ() {
+        assert_ne!(djb2("foo"), djb2("bar"));
+    }
+
+    #[test]
+    fn test_djb2_known_value() {
+        // djb2("a") = 5381 * 33 + 97 = 177670
+        assert_eq!(djb2("a"), 177670);
+    }
+}

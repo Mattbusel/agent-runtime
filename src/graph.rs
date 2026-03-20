@@ -718,6 +718,7 @@ impl GraphStore {
         inner.entities.clear();
         inner.relationships.clear();
         inner.adjacency.clear();
+        inner.reverse_adjacency.clear();
         inner.cycle_cache = None;
         Ok(())
     }
@@ -726,6 +727,34 @@ impl GraphStore {
     pub fn entity_count_by_label(&self, label: &str) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "entity_count_by_label");
         Ok(inner.entities.values().filter(|e| e.label == label).count())
+    }
+
+    /// Compute the directed graph density: |E| / (|V| × (|V| − 1)).
+    ///
+    /// Returns `0.0` for graphs with fewer than two entities (no edges possible).
+    /// A density of `1.0` means every possible directed edge is present.
+    pub fn graph_density(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "graph_density");
+        let v = inner.entities.len();
+        if v < 2 {
+            return Ok(0.0);
+        }
+        let e = inner.relationships.len() as f64;
+        Ok(e / (v as f64 * (v - 1) as f64))
+    }
+
+    /// Return all distinct relationship kind strings present in the graph, sorted.
+    pub fn relationship_kinds(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "relationship_kinds");
+        let mut kinds: Vec<String> = inner
+            .relationships
+            .iter()
+            .map(|r| r.kind.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        kinds.sort_unstable();
+        Ok(kinds)
     }
 
     /// Update the label of an existing entity in-place.
@@ -752,24 +781,14 @@ impl GraphStore {
         let inner = recover_lock(self.inner.lock(), "degree_centrality");
         let n = inner.entities.len();
 
-        // Out-degree is already available directly from the adjacency index:
-        // adjacency[id].len() == number of outgoing edges from id.
-        // Only in-degree requires a pass over relationships.
-        let mut in_degree: HashMap<EntityId, usize> = inner
-            .entities
-            .keys()
-            .map(|id| (id.clone(), 0usize))
-            .collect();
-
-        for rel in &inner.relationships {
-            *in_degree.entry(rel.to.clone()).or_insert(0) += 1;
-        }
-
+        // Both out-degree and in-degree are now available from the index:
+        // adjacency[id].len()         == out-degree
+        // reverse_adjacency[id].len() == in-degree
         let denom = if n <= 1 { 1.0 } else { (n - 1) as f32 };
         let mut result = HashMap::new();
         for id in inner.entities.keys() {
             let od = inner.adjacency.get(id).map_or(0, |v| v.len());
-            let id_ = *in_degree.get(id).unwrap_or(&0);
+            let id_ = inner.reverse_adjacency.get(id).map_or(0, |v| v.len());
             let centrality = if n <= 1 {
                 0.0
             } else {
@@ -1166,12 +1185,16 @@ impl GraphStore {
     /// states in a workflow or dependency graph.
     pub fn sink_nodes(&self) -> Result<Vec<Entity>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "sink_nodes");
-        let has_outgoing: std::collections::HashSet<&EntityId> =
-            inner.relationships.iter().map(|r| &r.from).collect();
+        // Use adjacency index: entities with no entry (or an empty entry) have no outgoing edges.
         Ok(inner
             .entities
             .values()
-            .filter(|e| !has_outgoing.contains(&e.id))
+            .filter(|e| {
+                inner
+                    .adjacency
+                    .get(&e.id)
+                    .map_or(true, |v| v.is_empty())
+            })
             .cloned()
             .collect())
     }
@@ -1465,6 +1488,24 @@ impl GraphStore {
         Ok(neighbors)
     }
 
+    /// Return the IDs of all directly reachable neighbours from `id`
+    /// (i.e. the `to` end of every outgoing relationship).
+    ///
+    /// Cheaper than [`neighbor_entities`] when only IDs are needed.
+    ///
+    /// [`neighbor_entities`]: GraphStore::neighbor_entities
+    pub fn neighbor_ids(&self, id: &EntityId) -> Result<Vec<EntityId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "neighbor_ids");
+        let ids: Vec<EntityId> = inner
+            .adjacency
+            .get(id)
+            .iter()
+            .flat_map(|rels| rels.iter())
+            .map(|r| r.to.clone())
+            .collect();
+        Ok(ids)
+    }
+
     /// Remove **all** relationships where `id` is the source (outgoing edges).
     ///
     /// Also updates the adjacency index.  Does **not** remove incoming edges
@@ -1620,6 +1661,37 @@ impl GraphStore {
             .filter_map(|id| inner.entities.get(*id).cloned())
             .collect();
         Ok(common)
+    }
+
+    /// Return the weight of the first relationship from `from` to `to`.
+    ///
+    /// Returns `None` if no such edge exists.
+    pub fn weight_of(
+        &self,
+        from: &EntityId,
+        to: &EntityId,
+    ) -> Result<Option<f32>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "weight_of");
+        let weight = inner
+            .adjacency
+            .get(from)
+            .and_then(|rels| rels.iter().find(|r| &r.to == to))
+            .map(|r| r.weight);
+        Ok(weight)
+    }
+
+    /// Return the IDs of all entities that have an outgoing edge pointing **to** `id`.
+    ///
+    /// This is the inverse of `neighbor_entities`, which returns out-neighbors.
+    /// Returns an empty `Vec` if no incoming edges exist for `id`.
+    pub fn neighbors_in(&self, id: &EntityId) -> Result<Vec<EntityId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "neighbors_in");
+        // Use reverse_adjacency for O(in-degree) lookup instead of O(|E|) scan.
+        Ok(inner
+            .reverse_adjacency
+            .get(id)
+            .cloned()
+            .unwrap_or_default())
     }
 }
 
@@ -2664,5 +2736,63 @@ mod tests {
         assert_eq!(g.entity_count().unwrap(), 0);
         assert_eq!(g.relationship_count().unwrap(), 0);
         assert!(g.is_empty().unwrap());
+    }
+
+    // ── Round 16: weight_of, neighbors_in, path_exists ───────────────────────
+
+    #[test]
+    fn test_weight_of_returns_edge_weight() {
+        let g = make_graph();
+        add(&g, "x"); add(&g, "y");
+        link_w(&g, "x", "y", 3.5);
+        let w = g.weight_of(&EntityId::new("x"), &EntityId::new("y")).unwrap();
+        assert!(w.is_some());
+        assert!((w.unwrap() - 3.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_weight_of_absent_edge_returns_none() {
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b");
+        let w = g.weight_of(&EntityId::new("a"), &EntityId::new("b")).unwrap();
+        assert!(w.is_none());
+    }
+
+    #[test]
+    fn test_neighbors_in_returns_predecessors() {
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        link(&g, "a", "c"); link(&g, "b", "c");
+        let mut preds: Vec<String> = g
+            .neighbors_in(&EntityId::new("c"))
+            .unwrap()
+            .into_iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
+        preds.sort();
+        assert_eq!(preds, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_neighbors_in_empty_for_node_with_no_incoming() {
+        let g = make_graph();
+        add(&g, "isolated");
+        let preds = g.neighbors_in(&EntityId::new("isolated")).unwrap();
+        assert!(preds.is_empty());
+    }
+
+    #[test]
+    fn test_path_exists_reachable() {
+        let g = make_graph();
+        add(&g, "s"); add(&g, "m"); add(&g, "t");
+        link(&g, "s", "m"); link(&g, "m", "t");
+        assert!(g.path_exists("s", "t").unwrap());
+    }
+
+    #[test]
+    fn test_path_exists_unreachable() {
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b");
+        assert!(!g.path_exists("a", "b").unwrap());
     }
 }
