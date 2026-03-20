@@ -2153,4 +2153,96 @@ mod tests {
         let p = RetryPolicy::exponential(3, 100).unwrap();
         assert_eq!(p.attempts_remaining(10), 0);
     }
+
+    // ── Round 18: untested circuit-breaker, deduplicator, backpressure methods
+
+    #[test]
+    fn test_retry_policy_max_attempts_getter() {
+        let p = RetryPolicy::exponential(7, 50).unwrap();
+        assert_eq!(p.max_attempts(), 7);
+    }
+
+    #[test]
+    fn test_circuit_breaker_failure_count_increments() {
+        let cb = CircuitBreaker::new("svc2", 3, std::time::Duration::from_secs(60)).unwrap();
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.failure_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_circuit_breaker_record_success_resets_failures() {
+        let cb = CircuitBreaker::new("svc3", 5, std::time::Duration::from_secs(60)).unwrap();
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_success();
+        assert_eq!(cb.failure_count().unwrap(), 0);
+        assert!(cb.is_closed());
+    }
+
+    #[test]
+    fn test_circuit_breaker_threshold_and_recovery_window() {
+        let cb = CircuitBreaker::new("svc4", 3, std::time::Duration::from_secs(30)).unwrap();
+        assert_eq!(cb.threshold(), 3);
+        assert_eq!(cb.recovery_window(), std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_circuit_breaker_reset_clears_state() {
+        let cb = CircuitBreaker::new("svc5", 2, std::time::Duration::from_secs(60)).unwrap();
+        cb.record_failure();
+        cb.record_failure(); // should open circuit
+        assert!(cb.is_open());
+        cb.reset();
+        assert!(cb.is_closed());
+        assert_eq!(cb.failure_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_deduplicator_cached_count_after_complete() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check("key1", Duration::from_secs(60)).unwrap();
+        d.complete("key1", "result").unwrap();
+        assert_eq!(d.cached_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_deduplicator_ttl_matches_configured() {
+        let d = Deduplicator::new(Duration::from_secs(42));
+        assert_eq!(d.ttl(), Duration::from_secs(42));
+    }
+
+    #[test]
+    fn test_deduplicator_purge_expired_removes_stale_entries() {
+        let d = Deduplicator::new(Duration::ZERO); // instant TTL
+        d.check("stale", Duration::ZERO).unwrap();
+        d.complete("stale", "val").unwrap();
+        // Sleep briefly to ensure the entry expires
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let removed = d.purge_expired().unwrap();
+        assert!(removed >= 1);
+    }
+
+    #[test]
+    fn test_backpressure_remaining_capacity() {
+        let g = BackpressureGuard::new(5).unwrap();
+        g.try_acquire().unwrap();
+        assert_eq!(g.remaining_capacity().unwrap(), 4);
+    }
+
+    #[test]
+    fn test_backpressure_soft_depth_ratio_without_soft_limit() {
+        let g = BackpressureGuard::new(5).unwrap();
+        assert_eq!(g.soft_depth_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_backpressure_soft_depth_ratio_with_soft_limit() {
+        let g = BackpressureGuard::new(10).unwrap()
+            .with_soft_limit(4).unwrap();
+        g.try_acquire().unwrap();
+        g.try_acquire().unwrap();
+        let ratio = g.soft_depth_ratio();
+        assert!((ratio - 0.5).abs() < 1e-6);
+    }
 }

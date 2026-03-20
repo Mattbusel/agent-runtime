@@ -251,6 +251,11 @@ impl AgentSession {
         !self.checkpoint_errors.is_empty()
     }
 
+    /// Return the number of knowledge-graph lookups performed during this session.
+    pub fn graph_lookup_count(&self) -> usize {
+        self.graph_lookups
+    }
+
     /// Return the episodic memory hit rate for this session.
     ///
     /// Computed as `memory_hits / step_count`. Returns `0.0` when there are
@@ -1982,5 +1987,21 @@ mod tests {
     fn test_first_step_none_when_empty() {
         let s = make_session(vec![], 0);
         assert!(s.first_step().is_none());
+    }
+
+    // ── Round 18: graph_lookup_count ─────────────────────────────────────────
+
+    #[test]
+    fn test_graph_lookup_count_returns_field() {
+        let session = AgentSession {
+            session_id: "s".into(),
+            agent_id: AgentId::new("a"),
+            steps: vec![],
+            memory_hits: 0,
+            graph_lookups: 7,
+            duration_ms: 0,
+            checkpoint_errors: vec![],
+        };
+        assert_eq!(session.graph_lookup_count(), 7usize);
     }
 }

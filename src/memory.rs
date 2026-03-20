@@ -1199,6 +1199,15 @@ impl EpisodicStore {
         Ok(item)
     }
 
+    /// Remove all stored episodes for `agent_id`.
+    ///
+    /// Returns the number of episodes that were removed.
+    pub fn clear_agent(&self, agent_id: &AgentId) -> Result<usize, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "EpisodicStore::clear_agent");
+        let count = inner.items.remove(agent_id).map_or(0, |v| v.len());
+        Ok(count)
+    }
+
     /// Return the most recently inserted episode for `agent_id`, or `None`
     /// if the agent has no stored episodes.
     pub fn newest(
@@ -3682,5 +3691,25 @@ mod tests {
     fn test_working_memory_values_empty_when_no_entries() {
         let wm = WorkingMemory::new(10).unwrap();
         assert!(wm.values().unwrap().is_empty());
+    }
+
+    // ── Round 18: clear_agent ────────────────────────────────────────────────
+
+    #[test]
+    fn test_episodic_clear_agent_removes_all_episodes() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("agent-clear");
+        store.add_episode(agent.clone(), "ep1", 0.5).unwrap();
+        store.add_episode(agent.clone(), "ep2", 0.7).unwrap();
+        let removed = store.clear_agent(&agent).unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(store.agent_memory_count(&agent).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_episodic_clear_agent_returns_zero_when_none() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("no-agent");
+        assert_eq!(store.clear_agent(&agent).unwrap(), 0);
     }
 }

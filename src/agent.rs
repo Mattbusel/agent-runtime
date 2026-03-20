@@ -2581,4 +2581,66 @@ mod tests {
         let text = "no structured content here";
         assert!(parse_react_step(text).is_err());
     }
+
+    // ── Round 18: ReActStep predicates, ToolRegistry ops, AgentConfig builders
+
+    #[test]
+    fn test_react_step_is_final_answer_true() {
+        let step = ReActStep::new("t", "FINAL_ANSWER Paris", "");
+        assert!(step.is_final_answer());
+        assert!(!step.is_tool_call());
+    }
+
+    #[test]
+    fn test_react_step_is_tool_call_true() {
+        let step = ReActStep::new("t", "search {}", "result");
+        assert!(step.is_tool_call());
+        assert!(!step.is_final_answer());
+    }
+
+    #[test]
+    fn test_tool_registry_unregister_returns_true_when_present() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("tool-x", "desc", |_| serde_json::json!("ok")));
+        assert!(reg.unregister("tool-x"));
+        assert!(!reg.has_tool("tool-x"));
+    }
+
+    #[test]
+    fn test_tool_registry_unregister_returns_false_when_absent() {
+        let mut reg = ToolRegistry::new();
+        assert!(!reg.unregister("ghost"));
+    }
+
+    #[test]
+    fn test_tool_registry_contains_matches_has_tool() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("alpha", "desc", |_| serde_json::json!("ok")));
+        assert!(reg.contains("alpha"));
+        assert!(!reg.contains("beta"));
+    }
+
+    #[test]
+    fn test_agent_config_with_system_prompt() {
+        let cfg = AgentConfig::new(5, "model")
+            .with_system_prompt("You are helpful.");
+        assert_eq!(cfg.system_prompt, "You are helpful.");
+    }
+
+    #[test]
+    fn test_agent_config_with_temperature_and_max_tokens() {
+        let cfg = AgentConfig::new(3, "model")
+            .with_temperature(0.7)
+            .with_max_tokens(512);
+        assert!((cfg.temperature.unwrap() - 0.7).abs() < 1e-6);
+        assert_eq!(cfg.max_tokens, Some(512));
+    }
+
+    #[test]
+    fn test_agent_config_clone_with_model() {
+        let orig = AgentConfig::new(5, "gpt-4");
+        let cloned = orig.clone_with_model("claude-3");
+        assert_eq!(cloned.model, "claude-3");
+        assert_eq!(cloned.max_iterations, 5);
+    }
 }

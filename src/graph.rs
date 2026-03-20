@@ -1707,6 +1707,18 @@ impl GraphStore {
         let max_edges = n * (n - 1);
         Ok(inner.relationships.len() as f64 / max_edges as f64)
     }
+
+    /// Return the average out-degree across all nodes.
+    ///
+    /// Returns `0.0` for an empty graph.
+    pub fn avg_degree(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "avg_degree");
+        let n = inner.entities.len();
+        if n == 0 {
+            return Ok(0.0);
+        }
+        Ok(inner.relationships.len() as f64 / n as f64)
+    }
 }
 
 impl Default for GraphStore {
@@ -2900,5 +2912,23 @@ mod tests {
         assert!(visited.contains(&EntityId::new("b")));
         assert!(visited.contains(&EntityId::new("c")));
         assert!(!visited.contains(&EntityId::new("d")));
+    }
+
+    // ── Round 18: avg_degree ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_avg_degree_zero_for_empty_graph() {
+        let g = make_graph();
+        assert_eq!(g.avg_degree().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_avg_degree_correct_value() {
+        // 3 nodes, 2 edges → 2/3
+        let g = make_graph();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        link(&g, "a", "b"); link(&g, "a", "c");
+        let d = g.avg_degree().unwrap();
+        assert!((d - 2.0/3.0).abs() < 1e-9);
     }
 }
