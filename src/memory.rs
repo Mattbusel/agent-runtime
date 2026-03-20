@@ -9768,4 +9768,62 @@ mod tests {
         wm.set("k1", "hello").unwrap();
         assert!(wm.keys_with_value_equal_to("world").unwrap().is_empty());
     }
+
+    // ── Round 49 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_all_values_sorted_returns_sorted_values() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "banana").unwrap();
+        wm.set("k2", "apple").unwrap();
+        wm.set("k3", "cherry").unwrap();
+        let values = wm.all_values_sorted().unwrap();
+        assert_eq!(values, vec!["apple", "banana", "cherry"]);
+    }
+
+    #[test]
+    fn test_all_values_sorted_empty_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert!(wm.all_values_sorted().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_keys_with_value_prefix_returns_matching_keys() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("host", "http://example.com").unwrap();
+        wm.set("api", "http://api.example.com").unwrap();
+        wm.set("name", "alice").unwrap();
+        let mut keys = wm.keys_with_value_prefix("http://").unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["api", "host"]);
+    }
+
+    #[test]
+    fn test_keys_with_value_prefix_empty_when_no_match() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("k1", "hello").unwrap();
+        assert!(wm.keys_with_value_prefix("zzz").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_agents_with_episodes_above_count_returns_high_activity_agents() {
+        let store = EpisodicStore::new();
+        let a1 = AgentId::new("agent-high");
+        let a2 = AgentId::new("agent-low");
+        store.add_episode(a1.clone(), "e1", 0.5).unwrap();
+        store.add_episode(a1.clone(), "e2", 0.5).unwrap();
+        store.add_episode(a1.clone(), "e3", 0.5).unwrap();
+        store.add_episode(a2.clone(), "e1", 0.5).unwrap();
+        let above = store.agents_with_episodes_above_count(2).unwrap();
+        assert_eq!(above.len(), 1);
+        assert_eq!(above[0], a1);
+    }
+
+    #[test]
+    fn test_agents_with_episodes_above_count_empty_when_none_qualify() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "e1", 0.5).unwrap();
+        assert!(store.agents_with_episodes_above_count(5).unwrap().is_empty());
+    }
 }

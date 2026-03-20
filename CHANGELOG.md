@@ -11,6 +11,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.68.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::action_byte_variance`** — statistical variance of action byte lengths across steps.
+- **`AgentSession::thought_byte_variance`** — statistical variance of thought byte lengths across steps.
+- **`AgentSession::steps_above_thought_bytes`** — steps whose thought field exceeds a byte threshold.
+- **`WorkingMemory::all_values_sorted`** — all stored values sorted alphabetically.
+- **`WorkingMemory::keys_with_value_prefix`** — keys whose stored value begins with a given prefix.
+- **`EpisodicStore::agents_with_episodes_above_count`** — agent IDs with more than N episodes.
+- **`GraphStore::total_edge_weight`** — sum of all relationship weights in the graph.
+- **`GraphStore::entity_with_max_out_degree`** — entity with the most outgoing edges.
+- **`GraphStore::self_loops`** — relationships where source and target are the same entity.
+- **`RuntimeMetrics::avg_calls_per_step`** — average number of tool calls per recorded step.
+- **`Pipeline::stage_index_of`** — 0-based index of first stage matching a given name.
+
+---
+
 ## [1.67.0] - 2026-03-20
 
 ### Added

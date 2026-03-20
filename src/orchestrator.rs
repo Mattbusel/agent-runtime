@@ -2164,6 +2164,20 @@ impl Pipeline {
         self.stages.len() == n
     }
 
+    /// Return the 0-based index of the first stage whose name matches `name`,
+    /// or `None` if no such stage exists.
+    pub fn stage_index_of(&self, name: &str) -> Option<usize> {
+        self.stages.iter().position(|s| s.name == name)
+    }
+
+    /// Return `true` if **all** stage names start with `prefix`.
+    ///
+    /// Returns `true` for an empty pipeline (vacuously true) and for an empty
+    /// `prefix` string (all strings start with "").
+    pub fn all_stage_names_start_with(&self, prefix: &str) -> bool {
+        self.stages.iter().all(|s| s.name.starts_with(prefix))
+    }
+
 }
 
 impl Default for Pipeline {
@@ -4558,5 +4572,54 @@ mod tests {
     fn test_has_exactly_n_stages_true_for_empty() {
         let p = Pipeline::new();
         assert!(p.has_exactly_n_stages(0));
+    }
+
+    // ── Round 49 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_stage_index_of_returns_correct_index() {
+        let p = Pipeline::new()
+            .add_stage("first", |s: String| Ok(s))
+            .add_stage("second", |s: String| Ok(s))
+            .add_stage("third", |s: String| Ok(s));
+        assert_eq!(p.stage_index_of("second"), Some(1));
+    }
+
+    #[test]
+    fn test_stage_index_of_returns_none_when_absent() {
+        let p = Pipeline::new().add_stage("alpha", |s: String| Ok(s));
+        assert_eq!(p.stage_index_of("beta"), None);
+    }
+
+    #[test]
+    fn test_stage_index_of_returns_first_match_for_duplicates() {
+        let p = Pipeline::new()
+            .add_stage("dup", |s: String| Ok(s))
+            .add_stage("dup", |s: String| Ok(s));
+        assert_eq!(p.stage_index_of("dup"), Some(0));
+    }
+
+    // ── Round 54 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_all_stage_names_start_with_true_when_all_match() {
+        let p = Pipeline::new()
+            .add_stage("api_v1", |s: String| Ok(s))
+            .add_stage("api_v2", |s: String| Ok(s));
+        assert!(p.all_stage_names_start_with("api_"));
+    }
+
+    #[test]
+    fn test_all_stage_names_start_with_false_when_one_differs() {
+        let p = Pipeline::new()
+            .add_stage("api_v1", |s: String| Ok(s))
+            .add_stage("transform", |s: String| Ok(s));
+        assert!(!p.all_stage_names_start_with("api_"));
+    }
+
+    #[test]
+    fn test_all_stage_names_start_with_true_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.all_stage_names_start_with("anything"));
     }
 }

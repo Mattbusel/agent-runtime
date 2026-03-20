@@ -6632,4 +6632,40 @@ mod tests {
         let session = make_session(steps, 0);
         assert!(session.steps_above_thought_bytes(100).is_empty());
     }
+
+    // ── Round 54 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_unique_observation_count_counts_distinct_observations() {
+        let steps = vec![
+            make_step("t1", "a1", "result"),
+            make_step("t2", "a2", "result"),
+            make_step("t3", "a3", "other"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.unique_observation_count(), 2);
+    }
+
+    #[test]
+    fn test_unique_observation_count_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.unique_observation_count(), 0);
+    }
+
+    #[test]
+    fn test_avg_thought_word_count_computes_correctly() {
+        let steps = vec![
+            make_step("one word", "a", "o"),       // 2 words
+            make_step("three word count", "a", "o"), // 3 words
+        ];
+        let session = make_session(steps, 0);
+        let avg = session.avg_thought_word_count();
+        assert!((avg - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_thought_word_count_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.avg_thought_word_count(), 0.0);
+    }
 }

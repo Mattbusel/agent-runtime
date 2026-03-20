@@ -681,6 +681,13 @@ impl AgentConfig {
     pub fn model_starts_with(&self, prefix: &str) -> bool {
         self.model.starts_with(prefix)
     }
+
+    /// Return `true` if `steps_done` meets or exceeds `max_iterations`.
+    ///
+    /// Useful as a termination guard in agent loop implementations.
+    pub fn exceeds_iteration_limit(&self, steps_done: usize) -> bool {
+        steps_done >= self.max_iterations
+    }
 }
 
 // ── ToolSpec ──────────────────────────────────────────────────────────────────
@@ -1669,6 +1676,21 @@ impl ToolRegistry {
             .values()
             .filter(|t| !t.required_fields.is_empty())
             .count()
+    }
+
+    /// Return the names of all tools whose name starts with `prefix`, sorted
+    /// alphabetically.
+    ///
+    /// Returns an empty `Vec` for an empty registry or when no tool matches.
+    pub fn tool_names_with_prefix<'a>(&'a self, prefix: &str) -> Vec<&'a str> {
+        let mut names: Vec<&str> = self
+            .tools
+            .keys()
+            .filter(|n| n.starts_with(prefix))
+            .map(|n| n.as_str())
+            .collect();
+        names.sort_unstable();
+        names
     }
 }
 
@@ -5011,5 +5033,38 @@ mod tests {
     fn test_tools_with_required_fields_count_zero_for_empty_registry() {
         let registry = ToolRegistry::new();
         assert_eq!(registry.tools_with_required_fields_count(), 0);
+    }
+
+    // ── Round 54 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tool_names_with_prefix_returns_matching_names() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("search_web", "desc", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("search_code", "desc", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("write_file", "desc", |_| serde_json::json!({})));
+        let names = reg.tool_names_with_prefix("search_");
+        assert_eq!(names, vec!["search_code", "search_web"]);
+    }
+
+    #[test]
+    fn test_tool_names_with_prefix_empty_when_no_match() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("write_file", "desc", |_| serde_json::json!({})));
+        assert!(reg.tool_names_with_prefix("search_").is_empty());
+    }
+
+    #[test]
+    fn test_exceeds_iteration_limit_true_when_at_limit() {
+        let cfg = AgentConfig::new(5, "m");
+        assert!(cfg.exceeds_iteration_limit(5));
+        assert!(cfg.exceeds_iteration_limit(10));
+    }
+
+    #[test]
+    fn test_exceeds_iteration_limit_false_when_below_limit() {
+        let cfg = AgentConfig::new(5, "m");
+        assert!(!cfg.exceeds_iteration_limit(4));
+        assert!(!cfg.exceeds_iteration_limit(0));
     }
 }
