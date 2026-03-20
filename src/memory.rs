@@ -1531,6 +1531,12 @@ impl EpisodicStore {
         Ok(self.len()? == 0)
     }
 
+    /// Return the number of distinct agents that have at least one stored episode.
+    pub fn agent_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::agent_count");
+        Ok(inner.items.len())
+    }
+
     /// Return the number of stored episodes for a specific agent.
     ///
     /// Returns `0` if the agent has no episodes or has not been seen before.
@@ -1948,6 +1954,22 @@ impl SemanticStore {
             .iter()
             .find(|e| e.key == key)
             .map(|e| e.tags.clone()))
+    }
+
+    /// Return `true` if at least one entry with the given `key` exists.
+    pub fn has_key(&self, key: &str) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::has_key");
+        Ok(inner.entries.iter().any(|e| e.key == key))
+    }
+
+    /// Return the number of entries that include `tag` in their tag list.
+    pub fn entry_count_with_tag(&self, tag: &str) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::entry_count_with_tag");
+        Ok(inner
+            .entries
+            .iter()
+            .filter(|e| e.tags.iter().any(|t| t == tag))
+            .count())
     }
 
     /// Return all stored entry keys in insertion order.
@@ -2480,6 +2502,26 @@ impl WorkingMemory {
     /// the next insert will evict the oldest entry.
     pub fn fill_ratio(&self) -> Result<f64, AgentRuntimeError> {
         Ok(self.len()? as f64 / self.capacity as f64)
+    }
+
+    /// Return `true` when the number of stored entries equals the configured capacity.
+    ///
+    /// When `true`, the next [`set`] call for a new key will evict the oldest entry.
+    ///
+    /// [`set`]: WorkingMemory::set
+    pub fn is_at_capacity(&self) -> Result<bool, AgentRuntimeError> {
+        Ok(self.len()? >= self.capacity)
+    }
+
+    /// Remove all entries whose key begins with `prefix`.
+    ///
+    /// Returns the number of entries removed.  Removal preserves insertion order
+    /// for the surviving entries.
+    pub fn remove_keys_starting_with(&self, prefix: &str) -> Result<usize, AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "WorkingMemory::remove_keys_starting_with");
+        let before = inner.map.len();
+        inner.map.retain(|k, _| !k.starts_with(prefix));
+        Ok(before - inner.map.len())
     }
 
     /// Remove all entries for which `predicate(key, value)` returns `false`.

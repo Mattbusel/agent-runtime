@@ -462,6 +462,25 @@ impl AgentSession {
         self.memory_hits as f64 / steps as f64
     }
 
+    /// Return the raw count of episodic memory hits for this session.
+    pub fn total_memory_hits(&self) -> usize {
+        self.memory_hits
+    }
+
+    /// Return the ratio of unique actions to total steps.
+    ///
+    /// Returns `0.0` for sessions with no steps.  A value of `1.0` means every
+    /// step used a different action; lower values indicate repeated actions.
+    pub fn action_diversity(&self) -> f64 {
+        let total = self.steps.len();
+        if total == 0 {
+            return 0.0;
+        }
+        let unique: std::collections::HashSet<&str> =
+            self.steps.iter().map(|s| s.action.as_str()).collect();
+        unique.len() as f64 / total as f64
+    }
+
     /// Persist this session as a checkpoint under `"session:<session_id>"`.
     #[cfg(feature = "persistence")]
     pub async fn save_checkpoint(
@@ -2553,6 +2572,50 @@ mod tests {
         let ok = ReActStep::new("ok", "c", "success");
         let session = make_session(vec![err1, err2, ok], 0);
         assert_eq!(session.failed_tool_call_count(), 2);
+    }
+
+    // ── Round 15: AgentSession::total_memory_hits / action_diversity ─────────
+
+    #[test]
+    fn test_total_memory_hits_returns_memory_hits_field() {
+        let mut session = make_session(vec![], 0);
+        session.memory_hits = 7;
+        assert_eq!(session.total_memory_hits(), 7);
+    }
+
+    #[test]
+    fn test_total_memory_hits_zero_by_default() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.total_memory_hits(), 0);
+    }
+
+    #[test]
+    fn test_action_diversity_all_unique_is_one() {
+        let steps = vec![
+            ReActStep::new("t", "search", "r"),
+            ReActStep::new("t", "calc", "r"),
+            ReActStep::new("t", "lookup", "r"),
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.action_diversity() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_action_diversity_all_same_is_fraction() {
+        let steps = vec![
+            ReActStep::new("t", "search", "r"),
+            ReActStep::new("t", "search", "r"),
+            ReActStep::new("t", "search", "r"),
+        ];
+        let session = make_session(steps, 0);
+        // 1 unique / 3 total = 1/3
+        assert!((session.action_diversity() - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_action_diversity_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!((session.action_diversity() - 0.0).abs() < 1e-9);
     }
 
     // ── Round 14: AgentSession::last_n_steps ──────────────────────────────────

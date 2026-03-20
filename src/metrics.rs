@@ -127,6 +127,11 @@ impl LatencyHistogram {
         self.count() > 0
     }
 
+    /// Return `true` when no samples have been recorded yet.
+    pub fn is_empty(&self) -> bool {
+        self.count() == 0
+    }
+
     /// Estimate the p-th percentile latency in milliseconds from the histogram.
     ///
     /// `p` must be in `[0.0, 1.0]`.  Returns the **upper bound** of the first
@@ -644,6 +649,17 @@ impl RuntimeMetrics {
     /// Return the total number of checkpoint failures encountered during `run_agent`.
     pub fn checkpoint_errors(&self) -> u64 {
         self.checkpoint_errors.load(Ordering::Relaxed)
+    }
+
+    /// Return the ratio of checkpoint errors to total completed sessions.
+    ///
+    /// Returns `0.0` when no sessions have been recorded.
+    pub fn checkpoint_error_rate(&self) -> f64 {
+        let sessions = self.total_sessions();
+        if sessions == 0 {
+            return 0.0;
+        }
+        self.checkpoint_errors() as f64 / sessions as f64
     }
 
     /// Increment the call counter for `tool_name` by 1.
