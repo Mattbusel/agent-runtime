@@ -718,6 +718,17 @@ impl MetricsSnapshot {
         names.sort_unstable();
         names
     }
+
+    /// Return the agent id with the most total tool calls across all tools.
+    ///
+    /// Returns `None` if no per-agent tool-call data has been recorded.
+    pub fn agent_with_most_calls(&self) -> Option<String> {
+        self.per_agent_tool_calls
+            .iter()
+            .map(|(agent, tools)| (agent, tools.values().sum::<u64>()))
+            .max_by_key(|(_, total)| *total)
+            .map(|(agent, _)| agent.clone())
+    }
 }
 
 impl std::fmt::Display for MetricsSnapshot {
@@ -2725,5 +2736,27 @@ mod tests {
     fn test_tool_names_with_failures_empty_when_no_failures() {
         let snap = MetricsSnapshot::default();
         assert!(snap.tool_names_with_failures().is_empty());
+    }
+
+    // ── Round 37 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_agent_with_most_calls_returns_highest_total() {
+        let snap = MetricsSnapshot {
+            per_agent_tool_calls: [
+                ("agent_a".to_string(), [("search".to_string(), 3u64), ("write".to_string(), 2u64)].into_iter().collect()),
+                ("agent_b".to_string(), [("search".to_string(), 1u64)].into_iter().collect()),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        assert_eq!(snap.agent_with_most_calls(), Some("agent_a".to_string()));
+    }
+
+    #[test]
+    fn test_agent_with_most_calls_returns_none_when_empty() {
+        let snap = MetricsSnapshot::default();
+        assert!(snap.agent_with_most_calls().is_none());
     }
 }

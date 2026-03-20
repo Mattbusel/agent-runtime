@@ -11,6 +11,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.56.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::longest_thought`** — thought string of the step with the most bytes.
+- **`AgentSession::shortest_action`** — action string of the step with the fewest bytes.
+- **`EpisodicStore::agents_with_episodes`** — sorted list of `AgentId`s that have at least one episode.
+- **`EpisodicStore::high_importance_count`** — count of episodes whose importance exceeds a threshold.
+- **`SemanticStore::avg_value_bytes`** — mean byte length of all stored values.
+- **`SemanticStore::max_value_bytes`** — byte length of the longest stored value.
+- **`MetricsSnapshot::agent_with_most_calls`** — agent id with the most total tool calls.
+- **`GraphStore::isolated_entity_count`** — count of entities with neither outgoing nor incoming edges.
+- **`GraphStore::avg_relationship_weight`** — mean weight of all relationships in the graph.
+- **`ToolRegistry::shortest_description`** — description string of the tool with the fewest bytes.
+
+---
+
 ## [1.55.0] - 2026-03-20
 
 ### Added

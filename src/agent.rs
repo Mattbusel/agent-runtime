@@ -1195,6 +1195,16 @@ impl ToolRegistry {
         names
     }
 
+    /// Return the description of the tool with the shortest description string.
+    ///
+    /// Returns `None` if the registry is empty.
+    pub fn shortest_description(&self) -> Option<&str> {
+        self.tools
+            .values()
+            .min_by_key(|s| s.description.len())
+            .map(|s| s.description.as_str())
+    }
+
     /// Return the description of the tool with the longest description string.
     ///
     /// Returns `None` if the registry is empty.
@@ -3746,5 +3756,22 @@ mod tests {
     fn test_avg_description_length_returns_zero_when_empty() {
         let reg = ToolRegistry::new();
         assert_eq!(reg.avg_description_length(), 0.0);
+    }
+
+    // ── Round 37 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_shortest_description_returns_shortest_string() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("a", "hello world", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("b", "hi", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("c", "greetings", |_| serde_json::json!({})));
+        assert_eq!(reg.shortest_description(), Some("hi"));
+    }
+
+    #[test]
+    fn test_shortest_description_returns_none_when_empty() {
+        let reg = ToolRegistry::new();
+        assert!(reg.shortest_description().is_none());
     }
 }

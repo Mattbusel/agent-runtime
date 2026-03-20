@@ -427,6 +427,28 @@ impl GraphStore {
         Ok(count)
     }
 
+    /// Return the count of entities that have neither outgoing nor incoming relationships.
+    pub fn isolated_entity_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::isolated_entity_count");
+        let count = inner.entities.keys().filter(|id| {
+            inner.adjacency.get(*id).map_or(true, |v| v.is_empty())
+                && inner.reverse_adjacency.get(*id).map_or(true, |v| v.is_empty())
+        }).count();
+        Ok(count)
+    }
+
+    /// Return the mean weight of all relationships in the graph.
+    ///
+    /// Returns `0.0` if no relationships have been added.
+    pub fn avg_relationship_weight(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::avg_relationship_weight");
+        if inner.relationships.is_empty() {
+            return Ok(0.0);
+        }
+        let total: f32 = inner.relationships.iter().map(|r| r.weight).sum();
+        Ok(total as f64 / inner.relationships.len() as f64)
+    }
+
     /// Add a directed relationship between two existing entities.
     ///
     /// Both source and target entities must already exist in the graph.
@@ -4863,5 +4885,45 @@ mod tests {
         g.add_entity(Entity::new("b", "N")).unwrap();
         g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
         assert!(g.entities_with_self_loops().unwrap().is_empty());
+    }
+
+    // ── Round 37 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_isolated_entity_count_returns_count_with_no_edges() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        // c is isolated (no incoming, no outgoing)
+        assert_eq!(g.isolated_entity_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_isolated_entity_count_zero_when_all_connected() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        assert_eq!(g.isolated_entity_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_avg_relationship_weight_returns_mean() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap();
+        g.add_entity(Entity::new("c", "N")).unwrap();
+        g.add_relationship(Relationship::new("a", "b", "link", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "link", 3.0)).unwrap();
+        let avg = g.avg_relationship_weight().unwrap();
+        assert!((avg - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_avg_relationship_weight_zero_when_no_relationships() {
+        let g = GraphStore::new();
+        assert_eq!(g.avg_relationship_weight().unwrap(), 0.0);
     }
 }

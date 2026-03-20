@@ -1124,6 +1124,32 @@ impl EpisodicStore {
             .unwrap_or(0))
     }
 
+    /// Return a sorted list of all `AgentId`s that have at least one episode.
+    pub fn agents_with_episodes(&self) -> Result<Vec<AgentId>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::agents_with_episodes");
+        let mut ids: Vec<AgentId> = inner
+            .items
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, _)| k.clone())
+            .collect();
+        ids.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+        Ok(ids)
+    }
+
+    /// Return the count of episodes whose importance is strictly greater than `threshold`.
+    pub fn high_importance_count(
+        &self,
+        agent_id: &AgentId,
+        threshold: f32,
+    ) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::high_importance_count");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or(0, |v| v.iter().filter(|i| i.importance > threshold).count()))
+    }
+
     /// Return a list of content byte lengths for all episodes belonging to `agent_id`, in storage order.
     pub fn content_lengths(&self, agent_id: &AgentId) -> Result<Vec<usize>, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "EpisodicStore::content_lengths");
@@ -2469,6 +2495,26 @@ impl SemanticStore {
     pub fn total_value_bytes(&self) -> Result<usize, AgentRuntimeError> {
         let inner = recover_lock(self.inner.lock(), "SemanticStore::total_value_bytes");
         Ok(inner.entries.iter().map(|e| e.value.len()).sum())
+    }
+
+    /// Return the mean byte length of all stored values.
+    ///
+    /// Returns `0.0` if no entries have been stored.
+    pub fn avg_value_bytes(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::avg_value_bytes");
+        if inner.entries.is_empty() {
+            return Ok(0.0);
+        }
+        let total: usize = inner.entries.iter().map(|e| e.value.len()).sum();
+        Ok(total as f64 / inner.entries.len() as f64)
+    }
+
+    /// Return the byte length of the longest stored value.
+    ///
+    /// Returns `0` if no entries have been stored.
+    pub fn max_value_bytes(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "SemanticStore::max_value_bytes");
+        Ok(inner.entries.iter().map(|e| e.value.len()).max().unwrap_or(0))
     }
 
     /// Return the total number of stored entries.
@@ -6876,5 +6922,69 @@ mod tests {
     fn test_semantic_store_total_value_bytes_empty_returns_zero() {
         let store = SemanticStore::new();
         assert_eq!(store.total_value_bytes().unwrap(), 0);
+    }
+
+    // ── Round 37 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_episodic_store_agents_with_episodes_returns_sorted_ids() {
+        let store = EpisodicStore::new();
+        let b = AgentId::new("b");
+        let a = AgentId::new("a");
+        store.add_episode(b.clone(), "episode b", 0.5).unwrap();
+        store.add_episode(a.clone(), "episode a", 0.5).unwrap();
+        let agents = store.agents_with_episodes().unwrap();
+        assert_eq!(agents, vec![a, b]);
+    }
+
+    #[test]
+    fn test_episodic_store_agents_with_episodes_empty_returns_empty() {
+        let store = EpisodicStore::new();
+        assert!(store.agents_with_episodes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_episodic_store_high_importance_count_counts_above_threshold() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "low", 0.3).unwrap();
+        store.add_episode(agent.clone(), "high", 0.8).unwrap();
+        store.add_episode(agent.clone(), "med", 0.6).unwrap();
+        assert_eq!(store.high_importance_count(&agent, 0.5).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_episodic_store_high_importance_count_unknown_agent_returns_zero() {
+        let store = EpisodicStore::new();
+        assert_eq!(store.high_importance_count(&AgentId::new("x"), 0.5).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_semantic_store_avg_value_bytes_returns_mean() {
+        let store = SemanticStore::new();
+        store.store("k1", "ab", vec![]).unwrap();   // 2
+        store.store("k2", "abcd", vec![]).unwrap(); // 4
+        let avg = store.avg_value_bytes().unwrap();
+        assert!((avg - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_semantic_store_avg_value_bytes_empty_returns_zero() {
+        let store = SemanticStore::new();
+        assert_eq!(store.avg_value_bytes().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_semantic_store_max_value_bytes_returns_longest() {
+        let store = SemanticStore::new();
+        store.store("k1", "hi", vec![]).unwrap();      // 2
+        store.store("k2", "hello!", vec![]).unwrap();  // 6
+        assert_eq!(store.max_value_bytes().unwrap(), 6);
+    }
+
+    #[test]
+    fn test_semantic_store_max_value_bytes_empty_returns_zero() {
+        let store = SemanticStore::new();
+        assert_eq!(store.max_value_bytes().unwrap(), 0);
     }
 }

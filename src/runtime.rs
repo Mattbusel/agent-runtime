@@ -802,6 +802,26 @@ impl AgentSession {
         self.steps.len() - self.failed_tool_call_count()
     }
 
+    /// Return the thought string of the step with the most bytes.
+    ///
+    /// Returns `None` if the session has no steps.
+    pub fn longest_thought(&self) -> Option<&str> {
+        self.steps
+            .iter()
+            .max_by_key(|s| s.thought.len())
+            .map(|s| s.thought.as_str())
+    }
+
+    /// Return the action string of the step with the fewest bytes.
+    ///
+    /// Returns `None` if the session has no steps.
+    pub fn shortest_action(&self) -> Option<&str> {
+        self.steps
+            .iter()
+            .min_by_key(|s| s.action.len())
+            .map(|s| s.action.as_str())
+    }
+
     /// Return the count of steps that have a non-empty thought string.
     pub fn count_nonempty_thoughts(&self) -> usize {
         self.steps.iter().filter(|s| !s.thought.is_empty()).count()
@@ -4067,5 +4087,41 @@ mod tests {
         let steps = vec![make_step("t", "a", "ok"), make_step("t", "b", "ok")];
         let session = make_session(steps, 0);
         assert_eq!(session.step_success_count(), 2);
+    }
+
+    // ── Round 37 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_longest_thought_returns_step_with_most_bytes() {
+        let steps = vec![
+            make_step("hi", "a", "o"),
+            make_step("hello world", "b", "o"),
+            make_step("hey", "c", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.longest_thought(), Some("hello world"));
+    }
+
+    #[test]
+    fn test_longest_thought_returns_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.longest_thought().is_none());
+    }
+
+    #[test]
+    fn test_shortest_action_returns_step_with_fewest_bytes() {
+        let steps = vec![
+            make_step("t", "search", "o"),
+            make_step("t", "go", "o"),
+            make_step("t", "lookup", "o"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.shortest_action(), Some("go"));
+    }
+
+    #[test]
+    fn test_shortest_action_returns_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.shortest_action().is_none());
     }
 }
