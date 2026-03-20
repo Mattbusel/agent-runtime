@@ -477,6 +477,17 @@ impl AgentSession {
         self.memory_hits
     }
 
+    /// Return the session throughput in steps per second.
+    ///
+    /// Computed as `step_count / (duration_ms / 1000.0)`.  Returns `0.0`
+    /// if `duration_ms` is zero.
+    pub fn throughput_steps_per_sec(&self) -> f64 {
+        if self.duration_ms == 0 {
+            return 0.0;
+        }
+        self.steps.len() as f64 / (self.duration_ms as f64 / 1000.0)
+    }
+
     /// Return the ratio of unique actions to total steps.
     ///
     /// Returns `0.0` for sessions with no steps.  A value of `1.0` means every
@@ -2709,5 +2720,88 @@ mod tests {
         ];
         let session = make_session(steps, 0);
         assert_eq!(session.steps_without_observation(), 0);
+    }
+
+    // ── Round 17: AgentSession::throughput_steps_per_sec ─────────────────────
+
+    #[test]
+    fn test_throughput_steps_per_sec_correct_ratio() {
+        let steps = vec![
+            ReActStep::new("t", "a", "r"),
+            ReActStep::new("t", "b", "r"),
+        ];
+        // 2 steps in 1000ms = 2.0 steps/sec
+        let session = make_session(steps, 1000);
+        assert!((session.throughput_steps_per_sec() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_throughput_steps_per_sec_zero_when_no_duration() {
+        let steps = vec![ReActStep::new("t", "a", "r")];
+        let session = make_session(steps, 0);
+        assert!((session.throughput_steps_per_sec() - 0.0).abs() < 1e-9);
+    }
+
+    // ── Round 20: thoughts_containing, step_durations_ms, fastest_step_index ─
+
+    #[test]
+    fn test_thoughts_containing_returns_matching_steps() {
+        let session = make_session(
+            vec![
+                ReActStep::new("I need to search", "search", "found"),
+                ReActStep::new("Let me calculate", "calc", "done"),
+                ReActStep::new("search again", "search", "ok"),
+            ],
+            0,
+        );
+        let matches = session.thoughts_containing("search");
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn test_thoughts_containing_is_case_insensitive() {
+        let session = make_session(
+            vec![ReActStep::new("SEARCH the web", "search", "r")],
+            0,
+        );
+        assert_eq!(session.thoughts_containing("search").len(), 1);
+    }
+
+    #[test]
+    fn test_thoughts_containing_empty_when_no_match() {
+        let session = make_session(vec![ReActStep::new("think about x", "a", "r")], 0);
+        assert!(session.thoughts_containing("zebra").is_empty());
+    }
+
+    #[test]
+    fn test_step_durations_ms_returns_all_durations() {
+        let mut steps = vec![
+            ReActStep::new("t", "a", "r"),
+            ReActStep::new("t", "b", "r"),
+        ];
+        steps[0].step_duration_ms = 100;
+        steps[1].step_duration_ms = 200;
+        let session = make_session(steps, 300);
+        assert_eq!(session.step_durations_ms(), vec![100, 200]);
+    }
+
+    #[test]
+    fn test_fastest_step_index_returns_index_of_shortest_step() {
+        let mut steps = vec![
+            ReActStep::new("t", "a", "r"),
+            ReActStep::new("t", "b", "r"),
+            ReActStep::new("t", "c", "r"),
+        ];
+        steps[0].step_duration_ms = 300;
+        steps[1].step_duration_ms = 50;
+        steps[2].step_duration_ms = 200;
+        let session = make_session(steps, 550);
+        assert_eq!(session.fastest_step_index(), Some(1));
+    }
+
+    #[test]
+    fn test_fastest_step_index_none_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.fastest_step_index().is_none());
     }
 }

@@ -11,6 +11,40 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.35.0] - 2026-03-20
+
+### Added
+
+- **`Entity::property_value(key)`** (`graph.rs`) — returns `Option<&Value>` for a
+  property key; wraps `HashMap::get` for ergonomic property access.
+- **`GraphStore::find_relationships_by_kind(kind)`** (`graph.rs`) — filter all
+  stored relationships by `kind` (case-sensitive).
+- **`GraphStore::count_relationships_by_kind(kind)`** (`graph.rs`) — count of
+  relationships matching `kind` without allocating a full `Vec`.
+- **`LatencyHistogram::interquartile_range_ms()`** (`metrics.rs`) — p75 − p25
+  spread; less sensitive to outliers than `range_ms`.
+- **`MetricsSnapshot::avg_steps_per_session()`** (`metrics.rs`) — mean ReAct steps
+  per completed session; `0.0` when no sessions have been recorded.
+- **`WorkingMemory::peek_oldest()`** (`memory.rs`) — inspect the oldest entry
+  without removing it; read-only counterpart to `pop_oldest`.
+- **`SemanticStore::values()`** (`memory.rs`) — all stored values in insertion
+  order.
+- **`SemanticStore::get_tags(key)`** (`memory.rs`) — tags for the first entry
+  matching `key`, or `None` if absent.
+- **`Deduplicator::get_result(key)`** (`orchestrator.rs`) — look up the cached
+  result for `key` without side effects.
+- **`Pipeline::rename_stage(old, new)`** (`orchestrator.rs`) — rename an existing
+  pipeline stage in place.
+- **`CircuitBreaker::failure_rate()`** (`orchestrator.rs`) — `failure_count /
+  threshold` ratio for alerting and dashboards.
+- **`RunResult::failed_tool_call_count()`** (`runtime.rs`) — count of steps
+  with error observations; avoids a `Vec` allocation vs `failed_steps().len()`.
+- **`AgentSession::throughput_steps_per_sec()`** (`runtime.rs`) — steps per
+  second computed as `step_count / (duration_ms / 1000.0)`; `0.0` for zero
+  duration sessions.
+
+---
+
 ## [1.34.0] - 2026-03-20
 
 ### Added
