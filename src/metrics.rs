@@ -1542,4 +1542,20 @@ mod tests {
         let range = h.range_ms().unwrap();
         assert!(range > 0, "range should be > 0 for spread samples, got {range}");
     }
+
+    // ── Round 13: avg_tool_calls_per_session ──────────────────────────────────
+
+    #[test]
+    fn test_avg_tool_calls_per_session_zero_when_no_sessions() {
+        let m = RuntimeMetrics::new();
+        assert!((m.avg_tool_calls_per_session() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_tool_calls_per_session_correct_ratio() {
+        let m = RuntimeMetrics::new();
+        m.total_sessions.fetch_add(2, Ordering::Relaxed);
+        m.total_tool_calls.fetch_add(10, Ordering::Relaxed);
+        assert!((m.avg_tool_calls_per_session() - 5.0).abs() < 1e-9);
+    }
 }

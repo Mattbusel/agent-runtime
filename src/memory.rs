@@ -4779,4 +4779,57 @@ mod tests {
         let top = store.most_recalled(&agent).unwrap();
         assert_eq!(top.unwrap().content, "only one");
     }
+
+    // ── Round 13: max_importance / min_importance / values_matching ──────────
+
+    #[test]
+    fn test_max_importance_returns_highest_score() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("a");
+        store.add_episode(agent.clone(), "low", 0.1).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        let max = store.max_importance(&agent).unwrap().unwrap();
+        assert!((max - 0.9).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_min_importance_returns_lowest_score() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("b");
+        store.add_episode(agent.clone(), "low", 0.1).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        let min = store.min_importance(&agent).unwrap().unwrap();
+        assert!((min - 0.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_max_importance_none_for_empty_agent() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("empty");
+        assert!(store.max_importance(&agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_values_matching_returns_pairs_with_pattern() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("name", "alice wonder").unwrap();
+        wm.set("city", "wonderland").unwrap();
+        wm.set("role", "engineer").unwrap();
+        let mut matches = wm.values_matching("wonder").unwrap();
+        matches.sort_by_key(|(k, _)| k.clone());
+        assert_eq!(
+            matches,
+            vec![
+                ("city".to_string(), "wonderland".to_string()),
+                ("name".to_string(), "alice wonder".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_values_matching_returns_empty_when_no_match() {
+        let wm = WorkingMemory::new(5).unwrap();
+        wm.set("a", "foo").unwrap();
+        assert!(wm.values_matching("xyz").unwrap().is_empty());
+    }
 }

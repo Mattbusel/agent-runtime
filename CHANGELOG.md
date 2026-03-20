@@ -11,6 +11,29 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.29.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::first_action`** (`runtime.rs`) — action name from the first
+  step; `None` for empty sessions.
+- **`AgentSession::last_action`** (`runtime.rs`) — action name from the last
+  step; useful for detecting `FINAL_ANSWER` without scanning all steps.
+- **`GraphStore::successors`** (`graph.rs`) — entities directly reachable via
+  outgoing edges (immediate out-neighbors).
+- **`GraphStore::is_sink`** (`graph.rs`) — `true` when an entity has no
+  outgoing edges; identifies DAG leaf nodes.
+- **`EpisodicStore::max_importance`** (`memory.rs`) — highest importance score
+  stored for an agent; `None` if no episodes exist.
+- **`EpisodicStore::min_importance`** (`memory.rs`) — lowest importance score;
+  symmetric counterpart to `max_importance`.
+- **`WorkingMemory::values_matching`** (`memory.rs`) — return all `(key, value)`
+  pairs whose value contains a given substring.
+- **`RuntimeMetrics::avg_tool_calls_per_session`** (`metrics.rs`) — mean tool
+  calls per completed session; `0.0` when no sessions recorded.
+
+---
+
 ## [1.28.0] - 2026-03-20
 
 ### Added
