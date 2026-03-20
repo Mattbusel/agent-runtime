@@ -1,10 +1,10 @@
 # agent-runtime
 
 [![CI](https://github.com/Mattbusel/agent-runtime/actions/workflows/ci.yml/badge.svg)](https://github.com/Mattbusel/agent-runtime/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/crates/v/agent-runtime.svg)](https://crates.io/crates/agent-runtime)
-[![docs.rs](https://docs.rs/agent-runtime/badge.svg)](https://docs.rs/agent-runtime)
+[![Crates.io](https://img.shields.io/crates/v/llm-agent-runtime.svg)](https://crates.io/crates/llm-agent-runtime)
+[![docs.rs](https://docs.rs/llm-agent-runtime/badge.svg)](https://docs.rs/llm-agent-runtime)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
 **agent-runtime** is a unified Tokio async agent runtime for Rust. It combines orchestration
 primitives, episodic and semantic memory, an in-memory knowledge graph, and a ReAct
@@ -129,20 +129,20 @@ compile-time typestate builder that prevents misconfiguration at zero runtime co
 
 ```toml
 [dependencies]
-agent-runtime = "1.0"
+llm-agent-runtime = "1.58"
 tokio = { version = "1", features = ["full"] }
 ```
 
 To enable built-in LLM providers:
 
 ```toml
-agent-runtime = { version = "1.0", features = ["anthropic", "openai"] }
+llm-agent-runtime = { version = "1.58", features = ["anthropic", "openai"] }
 ```
 
 To opt in to only the subsystems you need:
 
 ```toml
-agent-runtime = { version = "1.0", default-features = false, features = ["memory", "orchestrator"] }
+llm-agent-runtime = { version = "1.58", default-features = false, features = ["memory", "orchestrator"] }
 ```
 
 ### 2. Environment variables
@@ -159,7 +159,7 @@ The default feature set (`orchestrator`, `memory`, `graph`, `wasm`) runs entirel
 with no API keys, no Redis, and no database.
 
 ```rust
-use agent_runtime::prelude::*;
+use llm_agent_runtime::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), AgentRuntimeError> {
@@ -216,7 +216,7 @@ Action: double {"n":21}"#
 ### 4. Using a built-in provider
 
 ```rust,no_run
-use agent_runtime::providers::{AnthropicProvider, LlmProvider};
+use llm_agent_runtime::providers::{AnthropicProvider, LlmProvider};
 
 #[tokio::main]
 async fn main() {
@@ -238,8 +238,8 @@ async fn main() {
 provider:
 
 ```rust,no_run
-use agent_runtime::prelude::*;
-use agent_runtime::providers::AnthropicProvider;
+use llm_agent_runtime::prelude::*;
+use llm_agent_runtime::providers::AnthropicProvider;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -363,13 +363,131 @@ let spec = ToolSpec::new("search", "Searches the web", |args| {
 .with_circuit_breaker(cb_arc);
 ```
 
+### `AgentSession`
+
+Every call to `run_agent` / `run_agent_with_provider` returns an `AgentSession` with rich
+introspection methods:
+
+| Method | Return | Description |
+|---|---|---|
+| `step_count()` | `usize` | Total Thought-Action-Observation cycles |
+| `has_final_answer()` | `bool` | Whether the session ended with `FINAL_ANSWER` |
+| `final_answer()` | `Option<&str>` | The final answer text, if any |
+| `duration_secs()` | `f64` | Wall-clock duration in seconds |
+| `failed_tool_call_count()` | `usize` | Steps with error-bearing observations |
+| `step_success_count()` | `usize` | Steps without tool failures |
+| `checkpoint_error_count()` | `usize` | Number of checkpoint save errors |
+| `all_thoughts()` | `Vec<&str>` | All thought strings in step order |
+| `all_actions()` | `Vec<&str>` | All action strings in step order |
+| `all_observations()` | `Vec<&str>` | All observation strings in step order |
+| `action_lengths()` | `Vec<usize>` | Byte length of each action string |
+| `thought_lengths()` | `Vec<usize>` | Byte length of each thought string |
+| `total_thought_bytes()` | `usize` | Sum of all thought byte lengths |
+| `total_observation_bytes()` | `usize` | Sum of all observation byte lengths |
+| `avg_action_length()` | `f64` | Mean byte length of action strings |
+| `avg_thought_length()` | `f64` | Mean byte length of thought strings |
+| `longest_thought()` | `Option<&str>` | Thought string with the most bytes |
+| `shortest_action()` | `Option<&str>` | Action string with the fewest bytes |
+| `first_step_action()` | `Option<&str>` | Action of the first step |
+| `last_step_action()` | `Option<&str>` | Action of the last step |
+| `most_common_action()` | `Option<String>` | Most frequently used action string |
+| `count_steps_with_action(s)` | `usize` | Steps whose action matches `s` exactly |
+| `thought_contains_count(s)` | `usize` | Steps whose thought contains substring `s` |
+| `observation_contains_count(s)` | `usize` | Steps whose observation contains `s` |
+| `count_nonempty_thoughts()` | `usize` | Steps with a non-empty thought string |
+| `steps_above_thought_length(n)` | `usize` | Steps whose thought exceeds `n` bytes |
+
+### `MetricsSnapshot`
+
+Obtained via `runtime.metrics().snapshot()`. All fields are plain integers, safe to log or
+serialize.
+
+| Method | Return | Description |
+|---|---|---|
+| `tool_call_count(name)` | `u64` | Total calls for a named tool |
+| `tool_failure_count(name)` | `u64` | Total failures for a named tool |
+| `tool_success_count(name)` | `u64` | Calls minus failures for a tool |
+| `tool_names()` | `Vec<&str>` | Sorted names of tools with recorded calls |
+| `failure_rate()` | `f64` | Overall failure rate (0.0–1.0) |
+| `success_rate()` | `f64` | Overall success rate (0.0–1.0) |
+| `failed_tool_ratio_for(name)` | `f64` | Per-tool failure rate |
+| `most_called_tool()` | `Option<String>` | Tool name with the highest call count |
+| `tool_names_with_failures()` | `Vec<String>` | Sorted names of tools with ≥1 failure |
+| `avg_failures_per_session()` | `f64` | Failed tool calls per completed session |
+| `steps_per_tool_call()` | `f64` | Ratio of total steps to total tool calls |
+| `tool_diversity()` | `usize` | Number of distinct tools called |
+| `total_agent_count()` | `usize` | Distinct agents with recorded call data |
+| `agent_with_most_calls()` | `Option<String>` | Agent id with the highest total calls |
+| `backpressure_shed_rate()` | `f64` | Ratio of shed events to total tool calls |
+| `delta(after, before)` | `MetricsSnapshot` | Per-request delta (saturating subtraction) |
+| `to_json()` | `serde_json::Value` | Serialize for logging or export |
+
+### `EpisodicStore` helpers
+
+Beyond the core `add_episode` / `recall` / `clear` API:
+
+| Method | Description |
+|---|---|
+| `episode_count_for(agent)` | Episode count for a specific agent |
+| `agents_with_episodes()` | Sorted list of agents with at least one episode |
+| `content_lengths(agent)` | Byte lengths of episode contents in insertion order |
+| `total_content_bytes(agent)` | Sum of byte lengths of all episode contents |
+| `avg_content_length(agent)` | Mean byte length of episode contents |
+| `max_content_length(agent)` | Byte length of the longest episode |
+| `min_content_length(agent)` | Byte length of the shortest episode |
+| `high_importance_count(agent, t)` | Episodes with importance > `t` |
+| `episodes_by_importance(agent)` | Content strings sorted by descending importance |
+| `content_contains_count(agent, s)` | Episodes whose content contains substring `s` |
+
+### `SemanticStore` helpers
+
+| Method | Description |
+|---|---|
+| `count_by_tag(tag)` | Entries that contain `tag` |
+| `list_tags()` | Sorted list of all distinct tags |
+| `most_common_tag()` | Tag appearing most often across all entries |
+| `all_keys()` | Sorted list of all stored keys |
+| `total_value_bytes()` | Sum of byte lengths of all stored values |
+| `avg_value_bytes()` | Mean byte length of stored values |
+| `max_value_bytes()` | Byte length of the longest stored value |
+| `min_value_bytes()` | Byte length of the shortest stored value |
+| `tag_count()` | Number of distinct tags across all entries |
+| `entry_count_with_embedding()` | Entries with an associated embedding vector |
+
+### `GraphStore` query methods
+
+Beyond graph construction and traversal:
+
+| Method | Description |
+|---|---|
+| `relationship_kinds()` | Sorted list of distinct relationship kind strings |
+| `relationship_kind_count()` | Number of distinct relationship kinds |
+| `relationship_count_between(a, b)` | Directed relationships from `a` to `b` |
+| `edges_from(id)` | All `Relationship` objects originating from an entity |
+| `neighbors_of(id)` | Sorted `EntityId`s reachable in one hop |
+| `entities_with_self_loops()` | Entities where `from == to` |
+| `bidirectional_count()` | Pairs with edges in both directions |
+| `isolated_entity_count()` | Entities with no incoming or outgoing edges |
+| `total_in_degree()` | Sum of in-degrees (equals relationship count) |
+| `avg_relationship_weight()` | Mean weight of all relationships |
+| `avg_out_degree()` | Mean number of outgoing relationships per entity |
+| `avg_in_degree()` | Mean number of incoming relationships per entity |
+
 ### `ToolRegistry`
 
 ```rust
-// Check and remove tools at runtime
+// Check, remove, and query tools at runtime
 if registry.contains("old-tool") {
     let removed: Option<ToolSpec> = registry.remove("old-tool");
 }
+
+// Introspect the registry
+let sorted   = registry.tool_names_sorted();           // Vec<&str>
+let avg_len  = registry.avg_description_length();      // f64
+let shortest = registry.shortest_description();        // Option<&str>
+let longest  = registry.longest_description();         // Option<&str>
+let count    = registry.description_contains_count("search"); // usize
+let matching = registry.names_containing("calc");      // Vec<&str>
 ```
 
 ### `FilePersistenceBackend`
@@ -388,7 +506,7 @@ if !backend.exists("agent-1-session").await? {
 All public APIs return `Result<T, AgentRuntimeError>`. Match only the variants you care about:
 
 ```rust
-use agent_runtime::prelude::*;
+use llm_agent_runtime::prelude::*;
 
 fn handle(err: AgentRuntimeError) {
     match err {
@@ -448,8 +566,8 @@ cargo build --release --all-features
 ## Contributing
 
 1. Fork the repository and create a descriptive feature branch.
-2. Add tests for every new public function, struct, and trait. The project targets a minimum
-   1:1 test-to-production line ratio.
+2. Add tests for every new public function, struct, and trait. The project maintains over
+   1,460 tests across all modules and targets a minimum 1:1 test-to-production line ratio.
 3. All production paths must be panic-free. Use `Result` for every fallible operation.
    Clippy denies `unwrap_used`, `expect_used`, `panic`, and `todo` in `src/`.
 4. Run `cargo test --all-features` and `cargo clippy --all-features -- -D warnings` with
