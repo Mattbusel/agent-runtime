@@ -425,6 +425,11 @@ impl AgentConfig {
         !self.stop_sequences.is_empty()
     }
 
+    /// Return the number of configured stop sequences.
+    pub fn stop_sequence_count(&self) -> usize {
+        self.stop_sequences.len()
+    }
+
     /// Return `true` if the agent runs at most one iteration.
     ///
     /// A single-shot agent executes exactly one Thought-Action-Observation
@@ -3290,5 +3295,58 @@ mod tests {
     fn test_agent_config_has_temperature_true_after_setting() {
         let cfg = AgentConfig::new(5, "m").with_temperature(0.7);
         assert!(cfg.has_temperature());
+    }
+
+    // ── Round 26: ToolSpec builders ───────────────────────────────────────────
+
+    #[test]
+    fn test_tool_spec_new_fallible_returns_ok_value() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tool = ToolSpec::new_fallible(
+            "add",
+            "adds numbers",
+            |_args| Ok(serde_json::json!({"result": 42})),
+        );
+        let result = rt.block_on(tool.call(serde_json::json!({})));
+        assert_eq!(result["result"], 42);
+    }
+
+    #[test]
+    fn test_tool_spec_new_fallible_wraps_error_as_json() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tool = ToolSpec::new_fallible(
+            "fail",
+            "always fails",
+            |_| Err("bad input".to_string()),
+        );
+        let result = rt.block_on(tool.call(serde_json::json!({})));
+        assert_eq!(result["error"], "bad input");
+        assert_eq!(result["ok"], false);
+    }
+
+    #[test]
+    fn test_tool_spec_new_async_fallible_wraps_error() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tool = ToolSpec::new_async_fallible(
+            "async_fail",
+            "async error",
+            |_| Box::pin(async { Err("async bad".to_string()) }),
+        );
+        let result = rt.block_on(tool.call(serde_json::json!({})));
+        assert_eq!(result["error"], "async bad");
+    }
+
+    #[test]
+    fn test_tool_spec_with_required_fields_sets_fields() {
+        let tool = ToolSpec::new("t", "d", |_| serde_json::json!({}))
+            .with_required_fields(["name", "value"]);
+        assert_eq!(tool.required_field_count(), 2);
+    }
+
+    #[test]
+    fn test_tool_spec_with_description_overrides_description() {
+        let tool = ToolSpec::new("t", "original", |_| serde_json::json!({}))
+            .with_description("updated description");
+        assert_eq!(tool.description, "updated description");
     }
 }

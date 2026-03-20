@@ -6005,4 +6005,29 @@ mod tests {
         mem.set("k2", "much longer value").unwrap();
         assert_eq!(mem.longest_value().unwrap().as_deref(), Some("much longer value"));
     }
+
+    // ── Round 26: SemanticStore::store_with_embedding ─────────────────────────
+
+    #[test]
+    fn test_semantic_store_with_embedding_rejects_empty_vector() {
+        let store = SemanticStore::new();
+        let result = store.store_with_embedding("k", "v", vec![], vec![]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_semantic_store_with_embedding_stores_and_retrievable() {
+        let store = SemanticStore::new();
+        store.store_with_embedding("k", "v", vec![], vec![1.0, 0.0]).unwrap();
+        let entry = store.retrieve_by_key("k").unwrap();
+        assert_eq!(entry.map(|(val, _)| val), Some("v".to_string()));
+    }
+
+    #[test]
+    fn test_semantic_store_with_embedding_dimension_mismatch_errors() {
+        let store = SemanticStore::new();
+        store.store_with_embedding("k1", "v1", vec![], vec![1.0, 0.0]).unwrap();
+        let result = store.store_with_embedding("k2", "v2", vec![], vec![1.0, 0.0, 0.0]);
+        assert!(result.is_err());
+    }
 }
