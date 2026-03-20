@@ -3042,4 +3042,45 @@ mod tests {
         let spec = ToolSpec::new("t", "d", |_| serde_json::json!({}));
         assert!(!spec.has_validators());
     }
+
+    // ── Round 14: ToolRegistry::contains, descriptions, tool_count ───────────
+
+    #[test]
+    fn test_tool_registry_contains_true_for_registered_tool() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("search", "d", |_| serde_json::json!({})));
+        assert!(reg.contains("search"));
+    }
+
+    #[test]
+    fn test_tool_registry_contains_false_for_unknown_tool() {
+        let reg = ToolRegistry::new();
+        assert!(!reg.contains("missing"));
+    }
+
+    #[test]
+    fn test_tool_registry_descriptions_sorted_by_name() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("zebra", "z-desc", |_| serde_json::json!({})));
+        reg.register(ToolSpec::new("apple", "a-desc", |_| serde_json::json!({})));
+        let descs = reg.descriptions();
+        assert_eq!(descs[0], ("apple", "a-desc"));
+        assert_eq!(descs[1], ("zebra", "z-desc"));
+    }
+
+    #[test]
+    fn test_tool_registry_descriptions_empty_when_no_tools() {
+        let reg = ToolRegistry::new();
+        assert!(reg.descriptions().is_empty());
+    }
+
+    #[test]
+    fn test_tool_registry_tool_count_increments_on_register() {
+        let mut reg = ToolRegistry::new();
+        assert_eq!(reg.tool_count(), 0);
+        reg.register(ToolSpec::new("t1", "d", |_| serde_json::json!({})));
+        assert_eq!(reg.tool_count(), 1);
+        reg.register(ToolSpec::new("t2", "d", |_| serde_json::json!({})));
+        assert_eq!(reg.tool_count(), 2);
+    }
 }

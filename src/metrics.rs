@@ -203,6 +203,17 @@ impl LatencyHistogram {
         Some(self.max_ms()?.saturating_sub(self.min_ms()?))
     }
 
+    /// Return the interquartile range (p75 − p25) in milliseconds.
+    ///
+    /// A measure of dispersion that is less sensitive to outliers than
+    /// [`range_ms`].  Returns `0` when fewer than two samples have been
+    /// recorded (p25 == p75 == 0).
+    ///
+    /// [`range_ms`]: LatencyHistogram::range_ms
+    pub fn interquartile_range_ms(&self) -> u64 {
+        self.p75().saturating_sub(self.p25())
+    }
+
     /// Return the 50th-percentile (median) latency in milliseconds.
     pub fn p50(&self) -> u64 {
         self.percentile(0.50)
@@ -409,6 +420,18 @@ impl MetricsSnapshot {
             && self.backpressure_shed_count == 0
             && self.memory_recall_count == 0
             && self.checkpoint_errors == 0
+    }
+
+    /// Return the average number of ReAct steps per completed session.
+    ///
+    /// Returns `0.0` when no sessions have been recorded, to avoid
+    /// division by zero.
+    pub fn avg_steps_per_session(&self) -> f64 {
+        if self.total_sessions == 0 {
+            0.0
+        } else {
+            self.total_steps as f64 / self.total_sessions as f64
+        }
     }
 }
 

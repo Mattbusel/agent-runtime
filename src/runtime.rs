@@ -283,6 +283,16 @@ impl AgentSession {
         self.steps.last().map(|s| s.action.as_str())
     }
 
+    /// Return a slice of the last `n` steps.
+    ///
+    /// If `n` is greater than or equal to the total step count, all steps are
+    /// returned.  An empty slice is returned for sessions with no steps.
+    pub fn last_n_steps(&self, n: usize) -> &[crate::agent::ReActStep] {
+        let len = self.steps.len();
+        let start = len.saturating_sub(n);
+        &self.steps[start..]
+    }
+
     /// Return all per-step durations in milliseconds, in order.
     ///
     /// Useful for computing custom percentiles or detecting slow outlier steps.
@@ -2482,5 +2492,21 @@ mod tests {
     fn test_last_action_equals_first_action_for_single_step() {
         let session = make_session(vec![ReActStep::new("t", "calc", "r")], 0);
         assert_eq!(session.first_action(), session.last_action());
+    }
+
+    // ── Round 14: AgentSession::checkpoint_error_count ───────────────────────
+
+    #[test]
+    fn test_checkpoint_error_count_zero_when_none() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.checkpoint_error_count(), 0);
+    }
+
+    #[test]
+    fn test_checkpoint_error_count_reflects_errors() {
+        let mut session = make_session(vec![], 0);
+        session.checkpoint_errors.push("save failed".into());
+        session.checkpoint_errors.push("disk full".into());
+        assert_eq!(session.checkpoint_error_count(), 2);
     }
 }
