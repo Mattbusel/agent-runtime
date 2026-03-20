@@ -191,7 +191,12 @@ pub struct GraphStore {
 #[derive(Debug)]
 struct GraphInner {
     entities: HashMap<EntityId, Entity>,
+    /// Flat list kept for full-edge iteration (degree/betweenness/label-propagation).
     relationships: Vec<Relationship>,
+    /// Adjacency index: entity → outgoing relationships.
+    /// Kept in sync with `relationships` to give O(degree) neighbour lookup
+    /// in BFS/DFS/shortest-path without a full linear scan.
+    adjacency: HashMap<EntityId, Vec<Relationship>>,
     /// Cached result of cycle detection. Invalidated on any mutation.
     cycle_cache: Option<bool>,
 }
@@ -203,6 +208,7 @@ impl GraphStore {
             inner: Arc::new(Mutex::new(GraphInner {
                 entities: HashMap::new(),
                 relationships: Vec::new(),
+                adjacency: HashMap::new(),
                 cycle_cache: None,
             })),
         }
@@ -214,6 +220,8 @@ impl GraphStore {
     pub fn add_entity(&self, entity: Entity) -> Result<(), AgentRuntimeError> {
         let mut inner = recover_lock(self.inner.lock(), "add_entity");
         inner.cycle_cache = None;
+        // Ensure an adjacency entry exists even if the entity has no outgoing edges.
+        inner.adjacency.entry(entity.id.clone()).or_default();
         inner.entities.insert(entity.id.clone(), entity);
         Ok(())
     }
@@ -266,7 +274,44 @@ impl GraphStore {
         }
 
         inner.cycle_cache = None;
+        // Keep adjacency in sync: add to outgoing list for rel.from.
+        inner
+            .adjacency
+            .entry(rel.from.clone())
+            .or_default()
+            .push(rel.clone());
         inner.relationships.push(rel);
+        Ok(())
+    }
+
+    /// Remove a specific relationship by (from, to, kind).
+    ///
+    /// Returns `Err` if no matching relationship exists.
+    pub fn remove_relationship(
+        &self,
+        from: &EntityId,
+        to: &EntityId,
+        kind: &str,
+    ) -> Result<(), AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "remove_relationship");
+
+        let before = inner.relationships.len();
+        inner
+            .relationships
+            .retain(|r| !(&r.from == from && &r.to == to && r.kind == kind));
+        if inner.relationships.len() == before {
+            return Err(AgentRuntimeError::Graph(format!(
+                "relationship '{kind}' from '{}' to '{}' not found",
+                from.0, to.0
+            )));
+        }
+
+        // Keep adjacency in sync.
+        if let Some(adj) = inner.adjacency.get_mut(from) {
+            adj.retain(|r| !(&r.to == to && r.kind == kind));
+        }
+
+        inner.cycle_cache = None;
         Ok(())
     }
 
@@ -282,16 +327,22 @@ impl GraphStore {
         }
         inner.cycle_cache = None;
         inner.relationships.retain(|r| &r.from != id && &r.to != id);
+        // Remove outgoing edges for this entity and scrub it from others' lists.
+        inner.adjacency.remove(id);
+        for adj in inner.adjacency.values_mut() {
+            adj.retain(|r| &r.to != id);
+        }
         Ok(())
     }
 
-    /// Return all direct neighbours of the given entity (BFS layer 1).
-    fn neighbours(relationships: &[Relationship], id: &EntityId) -> Vec<EntityId> {
-        relationships
-            .iter()
-            .filter(|r| &r.from == id)
-            .map(|r| r.to.clone())
-            .collect()
+    /// Return all direct outgoing neighbours of the given entity (BFS layer 1).
+    ///
+    /// Uses the adjacency index for O(degree) lookup instead of O(|edges|).
+    fn neighbours(adjacency: &HashMap<EntityId, Vec<Relationship>>, id: &EntityId) -> Vec<EntityId> {
+        adjacency
+            .get(id)
+            .map(|rels| rels.iter().map(|r| r.to.clone()).collect())
+            .unwrap_or_default()
     }
 
     /// Breadth-first search starting from `start`.
@@ -316,7 +367,7 @@ impl GraphStore {
         queue.push_back(start.clone());
 
         while let Some(current) = queue.pop_front() {
-            let neighbours: Vec<EntityId> = Self::neighbours(&inner.relationships, &current);
+            let neighbours: Vec<EntityId> = Self::neighbours(&inner.adjacency, &current);
             for neighbour in neighbours {
                 if visited.insert(neighbour.clone()) {
                     result.push(neighbour.clone());
@@ -351,7 +402,7 @@ impl GraphStore {
         stack.push(start.clone());
 
         while let Some(current) = stack.pop() {
-            let neighbours: Vec<EntityId> = Self::neighbours(&inner.relationships, &current);
+            let neighbours: Vec<EntityId> = Self::neighbours(&inner.adjacency, &current);
             for neighbour in neighbours {
                 if visited.insert(neighbour.clone()) {
                     result.push(neighbour.clone());
@@ -403,7 +454,7 @@ impl GraphStore {
         queue.push_back(from.clone());
 
         while let Some(current) = queue.pop_front() {
-            for neighbour in Self::neighbours(&inner.relationships, &current) {
+            for neighbour in Self::neighbours(&inner.adjacency, &current) {
                 if &neighbour == to {
                     // Reconstruct path by following prev back from current.
                     let mut path = vec![neighbour, current.clone()];
@@ -524,7 +575,7 @@ impl GraphStore {
         visited.insert(start.clone());
         queue.push_back(start.clone());
         while let Some(current) = queue.pop_front() {
-            for neighbour in Self::neighbours(&inner.relationships, &current) {
+            for neighbour in Self::neighbours(&inner.adjacency, &current) {
                 if visited.insert(neighbour.clone()) {
                     queue.push_back(neighbour);
                 }
@@ -863,7 +914,7 @@ impl GraphStore {
             if depth >= max_depth {
                 continue;
             }
-            for neighbour in Self::neighbours(&inner.relationships, &current) {
+            for neighbour in Self::neighbours(&inner.adjacency, &current) {
                 if !visited.contains_key(&neighbour) {
                     let new_depth = depth + 1;
                     visited.insert(neighbour.clone(), new_depth);
@@ -911,7 +962,7 @@ impl GraphStore {
             if depth >= max_depth {
                 continue;
             }
-            for neighbour in Self::neighbours(&inner.relationships, &current) {
+            for neighbour in Self::neighbours(&inner.adjacency, &current) {
                 if visited.insert(neighbour.clone()) {
                     result.push(neighbour.clone());
                     if result.len() >= max_nodes {
@@ -948,6 +999,12 @@ impl GraphStore {
             if id_set.contains(&rel.from) && id_set.contains(&rel.to) {
                 let mut new_inner =
                     recover_lock(new_store.inner.lock(), "subgraph:add_relationship");
+                // Keep adjacency index in sync with relationships.
+                new_inner
+                    .adjacency
+                    .entry(rel.from.clone())
+                    .or_default()
+                    .push(rel.clone());
                 new_inner.relationships.push(rel.clone());
             }
         }

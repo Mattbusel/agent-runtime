@@ -15,8 +15,10 @@
 use crate::error::AgentRuntimeError;
 use crate::util::djb2;
 use async_trait::async_trait;
+use futures::future::try_join_all;
 use std::path::PathBuf;
 use std::sync::Arc;
+use uuid::Uuid;
 
 // ── PersistenceBackend ────────────────────────────────────────────────────────
 
@@ -37,22 +39,24 @@ pub trait PersistenceBackend: Send + Sync {
     /// Delete the entry for the given key. No-op if the key does not exist.
     async fn delete(&self, key: &str) -> Result<(), AgentRuntimeError>;
 
-    /// Save multiple key-value pairs. Default impl calls `save` for each.
+    /// Save multiple key-value pairs concurrently.
+    ///
+    /// The default implementation issues all `save` calls concurrently using
+    /// [`futures::future::try_join_all`] so backends that incur per-call I/O
+    /// latency benefit without any additional code.  Backends with their own
+    /// native batch API should override this method.
     async fn batch_save(&self, items: &[(&str, &[u8])]) -> Result<(), AgentRuntimeError> {
-        for (key, value) in items {
-            self.save(key, value).await?;
-        }
+        try_join_all(items.iter().map(|(key, value)| self.save(key, value))).await?;
         Ok(())
     }
 
-    /// Load multiple keys. Returns a vec of `Option<Vec<u8>>` in the same order.
-    /// Default impl calls `load` for each.
+    /// Load multiple keys concurrently. Returns a vec of `Option<Vec<u8>>` in the same order.
+    ///
+    /// The default implementation issues all `load` calls concurrently using
+    /// [`futures::future::try_join_all`].  Backends with a native multi-get
+    /// API should override this method.
     async fn batch_load(&self, keys: &[&str]) -> Result<Vec<Option<Vec<u8>>>, AgentRuntimeError> {
-        let mut results = Vec::with_capacity(keys.len());
-        for key in keys {
-            results.push(self.load(key).await?);
-        }
-        Ok(results)
+        try_join_all(keys.iter().map(|key| self.load(key))).await
     }
 }
 
@@ -74,9 +78,14 @@ pub trait PersistenceBackend: Send + Sync {
 ///
 /// `FilePersistenceBackend` is `Clone` and `Send + Sync`. Each clone
 /// shares the same `base_dir` via `Arc` and can be used from multiple
-/// async tasks simultaneously. Concurrent writes to the **same key**
-/// are safe at the Rust level but are not serialized — the final file
-/// content is determined by the OS.
+/// async tasks simultaneously.
+///
+/// Writes are atomic at the OS level: data is written to a uniquely-named
+/// temporary file in the same directory and then renamed into place, so a
+/// reader never observes a half-written file even if the process crashes.
+/// Concurrent writes to the **same key** from multiple tasks are safe but
+/// are not serialized — the final file content is determined by whichever
+/// rename completes last.
 #[derive(Debug, Clone)]
 pub struct FilePersistenceBackend {
     /// Absolute path to the directory where `<key>.bin` files are stored.
@@ -111,9 +120,18 @@ impl FilePersistenceBackend {
 impl PersistenceBackend for FilePersistenceBackend {
     async fn save(&self, key: &str, value: &[u8]) -> Result<(), AgentRuntimeError> {
         let path = self.path_for(key);
-        tokio::fs::write(&path, value)
+        // Write to a unique temp file then atomically rename to the target path.
+        // This prevents a reader from observing a half-written file if the
+        // process crashes mid-write.
+        let tmp_path = path.with_extension(format!("tmp-{}", Uuid::new_v4().simple()));
+        tokio::fs::write(&tmp_path, value)
             .await
-            .map_err(|e| AgentRuntimeError::Persistence(format!("write {path:?}: {e}")))?;
+            .map_err(|e| AgentRuntimeError::Persistence(format!("write tmp {tmp_path:?}: {e}")))?;
+        tokio::fs::rename(&tmp_path, &path).await.map_err(|e| {
+            AgentRuntimeError::Persistence(format!(
+                "rename {tmp_path:?} -> {path:?}: {e}"
+            ))
+        })?;
         Ok(())
     }
 
@@ -137,6 +155,25 @@ impl PersistenceBackend for FilePersistenceBackend {
                 "delete {path:?}: {e}"
             ))),
         }
+    }
+
+    /// Save multiple key-value pairs concurrently.
+    ///
+    /// All writes are issued simultaneously using `try_join_all` instead of
+    /// the default sequential loop, so throughput scales with disk/OS concurrency.
+    async fn batch_save(&self, items: &[(&str, &[u8])]) -> Result<(), AgentRuntimeError> {
+        let futs: Vec<_> = items.iter().map(|(key, value)| self.save(key, value)).collect();
+        try_join_all(futs).await?;
+        Ok(())
+    }
+
+    /// Load multiple keys concurrently.
+    ///
+    /// All reads are issued simultaneously using `try_join_all`.
+    /// Returns results in the same order as `keys`.
+    async fn batch_load(&self, keys: &[&str]) -> Result<Vec<Option<Vec<u8>>>, AgentRuntimeError> {
+        let futs: Vec<_> = keys.iter().map(|key| self.load(key)).collect();
+        try_join_all(futs).await
     }
 }
 

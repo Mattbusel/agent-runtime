@@ -133,6 +133,7 @@ impl AgentSession {
     ///
     /// [`load_checkpoint_at_step`]: AgentSession::load_checkpoint_at_step
     #[cfg(feature = "persistence")]
+    #[deprecated(since = "1.1.0", note = "Use load_checkpoint_at_step instead")]
     pub async fn load_step_checkpoint(
         backend: &dyn crate::persistence::PersistenceBackend,
         session_id: &str,
@@ -194,31 +195,40 @@ pub struct AgentRuntimeBuilder<S = NeedsConfig> {
     _state: PhantomData<S>,
 }
 
-impl std::fmt::Debug for AgentRuntimeBuilder<NeedsConfig> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut s = f.debug_struct("AgentRuntimeBuilder<NeedsConfig>");
-        s.field("memory", &self.memory.is_some())
-            .field("working", &self.working.is_some());
-        #[cfg(feature = "graph")]
-        s.field("graph", &self.graph.is_some());
-        #[cfg(feature = "orchestrator")]
-        s.field("backpressure", &self.backpressure.is_some());
-        s.field("tools", &self.tools.len()).finish()
-    }
+// ── DebugBuilderState sealed trait ────────────────────────────────────────────
+
+/// Private trait used to drive the single generic `Debug` impl for
+/// `AgentRuntimeBuilder<S>`.  Only `NeedsConfig` and `HasConfig` implement it.
+trait DebugBuilderState {
+    /// Name shown in the debug output.
+    const NAME: &'static str;
+    /// Whether to emit the `agent_config` field (only `HasConfig` has one).
+    const HAS_CONFIG: bool;
 }
 
-impl std::fmt::Debug for AgentRuntimeBuilder<HasConfig> {
+impl DebugBuilderState for NeedsConfig {
+    const NAME: &'static str = "AgentRuntimeBuilder<NeedsConfig>";
+    const HAS_CONFIG: bool = false;
+}
+
+impl DebugBuilderState for HasConfig {
+    const NAME: &'static str = "AgentRuntimeBuilder<HasConfig>";
+    const HAS_CONFIG: bool = true;
+}
+
+impl<S: DebugBuilderState> std::fmt::Debug for AgentRuntimeBuilder<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut s = f.debug_struct("AgentRuntimeBuilder<HasConfig>");
+        let mut s = f.debug_struct(S::NAME);
         s.field("memory", &self.memory.is_some())
             .field("working", &self.working.is_some());
         #[cfg(feature = "graph")]
         s.field("graph", &self.graph.is_some());
         #[cfg(feature = "orchestrator")]
         s.field("backpressure", &self.backpressure.is_some());
-        s.field("agent_config", &self.agent_config.is_some())
-            .field("tools", &self.tools.len())
-            .finish()
+        if S::HAS_CONFIG {
+            s.field("agent_config", &self.agent_config.is_some());
+        }
+        s.field("tools", &self.tools.len()).finish()
     }
 }
 
@@ -311,10 +321,6 @@ impl AgentRuntimeBuilder<NeedsConfig> {
         Self::default()
     }
 
-    /// Set the agent loop configuration.
-    ///
-    /// After this call the builder transitions to `AgentRuntimeBuilder<HasConfig>`,
-    /// making `build()` available.
     /// Set the agent loop configuration.
     ///
     /// After this call the builder transitions to `AgentRuntimeBuilder<HasConfig>`,

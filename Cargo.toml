@@ -1,6 +1,6 @@
 [package]
 name = "llm-agent-runtime"
-version = "1.0.2"
+version = "1.1.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["Matt Busel <mattbusel@users.noreply.github.com>"]
@@ -12,7 +12,7 @@ repository = "https://github.com/Mattbusel/agent-runtime"
 homepage = "https://github.com/Mattbusel/agent-runtime"
 documentation = "https://docs.rs/llm-agent-runtime"
 readme = "README.md"
-exclude = [".github/", "CHANGELOG.md"]
+exclude = [".github/"]
 
 [features]
 default = ["orchestrator", "memory", "graph", "wasm"]
@@ -52,6 +52,9 @@ tracing = "0.1"
 # async-trait: object-safe async trait methods (persistence, providers, circuit breaker backends)
 async-trait = "0.1"
 
+# futures: combinators for async primitives (join_all for parallel batch ops)
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
+
 # reqwest: HTTP client for built-in LLM providers (optional)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], optional = true }
 
@@ -90,6 +93,10 @@ required-features = ["graph"]
 name = "orchestrator_composition"
 required-features = ["orchestrator"]
 
+[[example]]
+name = "anthropic_provider"
+required-features = ["anthropic", "memory"]
+
 [[bench]]
 name = "memory"
 harness = false
@@ -105,6 +112,10 @@ tokio-test = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # criterion: benchmarking framework
 criterion = { version = "0.5", features = ["html_reports"] }
+# proptest: property-based testing
+proptest = "1"
+# wiremock: mock HTTP server for provider integration tests
+wiremock = "0.6"
 
 # ── Release profile (production) ────────────────────────────────────────────────
 [profile.release]

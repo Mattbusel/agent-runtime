@@ -395,6 +395,120 @@ impl CircuitBreaker {
     pub fn failure_count(&self) -> Result<u32, AgentRuntimeError> {
         Ok(self.backend.get_failures(&self.service))
     }
+
+    /// Execute an async fallible operation under the circuit breaker using an
+    /// [`AsyncCircuitBreakerBackend`].
+    ///
+    /// This is the async counterpart of [`call`] and is intended for backends
+    /// that perform genuine async I/O (e.g. Redis, etcd, distributed stores).
+    /// The in-process default can be used via [`InMemoryCircuitBreakerBackend`]
+    /// which trivially implements `AsyncCircuitBreakerBackend`.
+    ///
+    /// [`call`]: CircuitBreaker::call
+    #[tracing::instrument(skip(self, backend, f))]
+    pub async fn async_call<T, E, F, Fut>(
+        &self,
+        backend: &dyn AsyncCircuitBreakerBackend,
+        f: F,
+    ) -> Result<T, AgentRuntimeError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+        E: std::fmt::Display,
+    {
+        // Determine effective state via async backend.
+        let effective_state = match backend.get_open_at(&self.service).await {
+            Some(opened_at) => {
+                if opened_at.elapsed() >= self.recovery_window {
+                    backend.clear_open_at(&self.service).await;
+                    tracing::info!("circuit async moved to half-open for {}", self.service);
+                    CircuitState::HalfOpen
+                } else {
+                    CircuitState::Open { opened_at }
+                }
+            }
+            None => {
+                let failures = backend.get_failures(&self.service).await;
+                if failures >= self.threshold {
+                    CircuitState::HalfOpen
+                } else {
+                    CircuitState::Closed
+                }
+            }
+        };
+
+        if let CircuitState::Open { .. } = effective_state {
+            return Err(AgentRuntimeError::CircuitOpen {
+                service: self.service.clone(),
+            });
+        }
+
+        match f().await {
+            Ok(val) => {
+                backend.reset_failures(&self.service).await;
+                backend.clear_open_at(&self.service).await;
+                Ok(val)
+            }
+            Err(e) => {
+                let failures = backend.increment_failures(&self.service).await;
+                if failures >= self.threshold {
+                    backend
+                        .set_open_at(&self.service, Instant::now())
+                        .await;
+                    tracing::info!("circuit async opened for {}", self.service);
+                }
+                Err(AgentRuntimeError::Orchestration(e.to_string()))
+            }
+        }
+    }
+}
+
+// ── AsyncCircuitBreakerBackend ────────────────────────────────────────────────
+
+/// Async counterpart of [`CircuitBreakerBackend`] for distributed backends.
+///
+/// Implement this trait for backends that require genuine async I/O — e.g. Redis,
+/// etcd, or any network-based store — so they don't need to embed their own
+/// blocking runtime.
+///
+/// [`InMemoryCircuitBreakerBackend`] implements this trait with trivially-async
+/// wrappers for use in testing and single-process deployments.
+#[async_trait::async_trait]
+pub trait AsyncCircuitBreakerBackend: Send + Sync {
+    /// Increment the consecutive failure count and return the new count.
+    async fn increment_failures(&self, service: &str) -> u32;
+    /// Reset the consecutive failure count to zero.
+    async fn reset_failures(&self, service: &str);
+    /// Return the current consecutive failure count.
+    async fn get_failures(&self, service: &str) -> u32;
+    /// Record the instant at which the circuit was opened.
+    async fn set_open_at(&self, service: &str, at: Instant);
+    /// Clear the open-at timestamp.
+    async fn clear_open_at(&self, service: &str);
+    /// Return the instant at which the circuit was opened, or `None`.
+    async fn get_open_at(&self, service: &str) -> Option<Instant>;
+}
+
+#[async_trait::async_trait]
+impl AsyncCircuitBreakerBackend for InMemoryCircuitBreakerBackend {
+    async fn increment_failures(&self, service: &str) -> u32 {
+        <Self as CircuitBreakerBackend>::increment_failures(self, service)
+    }
+    async fn reset_failures(&self, service: &str) {
+        <Self as CircuitBreakerBackend>::reset_failures(self, service);
+    }
+    async fn get_failures(&self, service: &str) -> u32 {
+        <Self as CircuitBreakerBackend>::get_failures(self, service)
+    }
+    async fn set_open_at(&self, service: &str, at: Instant) {
+        <Self as CircuitBreakerBackend>::set_open_at(self, service, at);
+    }
+    async fn clear_open_at(&self, service: &str) {
+        <Self as CircuitBreakerBackend>::clear_open_at(self, service);
+    }
+    async fn get_open_at(&self, service: &str) -> Option<Instant> {
+        <Self as CircuitBreakerBackend>::get_open_at(self, service)
+    }
 }
 
 // ── DeduplicationResult ───────────────────────────────────────────────────────
@@ -416,9 +530,14 @@ pub enum DeduplicationResult {
 /// - Deterministic: same key always maps to the same result
 /// - Thread-safe via `Arc<Mutex<_>>`
 /// - Entries expire after `ttl`
+/// - Optional `max_entries` cap bounds memory independently of TTL
 #[derive(Debug, Clone)]
 pub struct Deduplicator {
     ttl: Duration,
+    /// Optional hard cap on cached entries. When exceeded the oldest entry is
+    /// evicted before inserting the new one, bounding memory growth even when
+    /// all keys are unique and none have expired yet.
+    max_entries: Option<usize>,
     inner: Arc<Mutex<DeduplicatorInner>>,
 }
 
@@ -433,11 +552,30 @@ impl Deduplicator {
     pub fn new(ttl: Duration) -> Self {
         Self {
             ttl,
+            max_entries: None,
             inner: Arc::new(Mutex::new(DeduplicatorInner {
                 cache: HashMap::new(),
                 in_flight: HashMap::new(),
             })),
         }
+    }
+
+    /// Set a hard cap on the number of cached (completed) entries.
+    ///
+    /// When the cache is full the oldest entry (by insertion time) is evicted
+    /// before the new entry is stored.  This bounds memory growth for workloads
+    /// where all request keys are unique and the TTL has not yet expired.
+    ///
+    /// # Returns
+    /// - `Err(AgentRuntimeError::Orchestration)` if `max == 0`
+    pub fn with_max_entries(mut self, max: usize) -> Result<Self, AgentRuntimeError> {
+        if max == 0 {
+            return Err(AgentRuntimeError::Orchestration(
+                "Deduplicator max_entries must be >= 1".into(),
+            ));
+        }
+        self.max_entries = Some(max);
+        Ok(self)
     }
 
     /// Check whether `key` is new, cached, or in-flight.
@@ -506,9 +644,28 @@ impl Deduplicator {
     }
 
     /// Complete a request: move from in-flight to cached with the given result.
+    ///
+    /// If `max_entries` is configured and the cache is full, the oldest cached
+    /// entry (by insertion time) is evicted before the new one is stored.
     pub fn complete(&self, key: &str, result: impl Into<String>) -> Result<(), AgentRuntimeError> {
         let mut inner = timed_lock(&self.inner, "Deduplicator::complete");
         inner.in_flight.remove(key);
+
+        // Enforce max_entries cap: evict the oldest entry when full.
+        if let Some(max) = self.max_entries {
+            if inner.cache.len() >= max {
+                // Find and remove the entry with the earliest insertion time.
+                if let Some(oldest_key) = inner
+                    .cache
+                    .iter()
+                    .min_by_key(|(_, (_, ts))| *ts)
+                    .map(|(k, _)| k.clone())
+                {
+                    inner.cache.remove(&oldest_key);
+                }
+            }
+        }
+
         inner
             .cache
             .insert(key.to_owned(), (result.into(), Instant::now()));
@@ -905,26 +1062,27 @@ mod tests {
 
     #[test]
     fn test_in_memory_backend_increments_and_resets() {
+        use super::CircuitBreakerBackend as CB;
         let backend = InMemoryCircuitBreakerBackend::new();
 
-        assert_eq!(backend.get_failures("svc"), 0);
+        assert_eq!(CB::get_failures(&backend, "svc"), 0);
 
-        let count = backend.increment_failures("svc");
+        let count = CB::increment_failures(&backend, "svc");
         assert_eq!(count, 1);
 
-        let count = backend.increment_failures("svc");
+        let count = CB::increment_failures(&backend, "svc");
         assert_eq!(count, 2);
 
-        backend.reset_failures("svc");
-        assert_eq!(backend.get_failures("svc"), 0);
+        CB::reset_failures(&backend, "svc");
+        assert_eq!(CB::get_failures(&backend, "svc"), 0);
 
         // open_at round-trip
-        assert!(backend.get_open_at("svc").is_none());
+        assert!(CB::get_open_at(&backend, "svc").is_none());
         let now = Instant::now();
-        backend.set_open_at("svc", now);
-        assert!(backend.get_open_at("svc").is_some());
-        backend.clear_open_at("svc");
-        assert!(backend.get_open_at("svc").is_none());
+        CB::set_open_at(&backend, "svc", now);
+        assert!(CB::get_open_at(&backend, "svc").is_some());
+        CB::clear_open_at(&backend, "svc");
+        assert!(CB::get_open_at(&backend, "svc").is_none());
     }
 
     // ── Deduplicator ──────────────────────────────────────────────────────────

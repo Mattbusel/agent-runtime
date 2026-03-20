@@ -190,6 +190,20 @@ impl AgentConfig {
         self
     }
 
+    /// Set a wall-clock timeout for the entire ReAct loop using seconds.
+    ///
+    /// Convenience wrapper around [`with_loop_timeout`](Self::with_loop_timeout).
+    pub fn with_loop_timeout_secs(self, secs: u64) -> Self {
+        self.with_loop_timeout(std::time::Duration::from_secs(secs))
+    }
+
+    /// Set a wall-clock timeout for the entire ReAct loop using milliseconds.
+    ///
+    /// Convenience wrapper around [`with_loop_timeout`](Self::with_loop_timeout).
+    pub fn with_loop_timeout_ms(self, ms: u64) -> Self {
+        self.with_loop_timeout(std::time::Duration::from_millis(ms))
+    }
+
     /// Set the model sampling temperature.
     pub fn with_temperature(mut self, t: f32) -> Self {
         self.temperature = Some(t);
@@ -206,6 +220,20 @@ impl AgentConfig {
     pub fn with_request_timeout(mut self, d: std::time::Duration) -> Self {
         self.request_timeout = Some(d);
         self
+    }
+
+    /// Set the per-inference timeout using seconds.
+    ///
+    /// Convenience wrapper around [`with_request_timeout`](Self::with_request_timeout).
+    pub fn with_request_timeout_secs(self, secs: u64) -> Self {
+        self.with_request_timeout(std::time::Duration::from_secs(secs))
+    }
+
+    /// Set the per-inference timeout using milliseconds.
+    ///
+    /// Convenience wrapper around [`with_request_timeout`](Self::with_request_timeout).
+    pub fn with_request_timeout_ms(self, ms: u64) -> Self {
+        self.with_request_timeout(std::time::Duration::from_millis(ms))
     }
 }
 
@@ -333,8 +361,15 @@ impl ToolSpec {
     }
 
     /// Set the required fields that must be present in the JSON args object.
-    pub fn with_required_fields(mut self, fields: Vec<String>) -> Self {
-        self.required_fields = fields;
+    ///
+    /// Accepts any iterable of string-like values so callers can pass
+    /// `&["field1", "field2"]`, `vec!["f".to_string()]`, or any other
+    /// `IntoIterator<Item: Into<String>>` without manual conversion.
+    pub fn with_required_fields(
+        mut self,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.required_fields = fields.into_iter().map(Into::into).collect();
         self
     }
 
@@ -691,8 +726,7 @@ impl ReActLoop {
     }
 
     /// Build the error observation JSON for a failed tool call.
-    fn error_observation(tool_name: &str, e: &AgentRuntimeError) -> String {
-        let _ = tool_name;
+    fn error_observation(_tool_name: &str, e: &AgentRuntimeError) -> String {
         let kind = match e {
             AgentRuntimeError::AgentLoop(msg) if msg.contains("not found") => "not_found",
             #[cfg(feature = "orchestrator")]
@@ -740,6 +774,13 @@ impl ReActLoop {
         }
 
         for iteration in 0..self.config.max_iterations {
+            let iter_span = tracing::info_span!(
+                "react_iteration",
+                iteration = iteration,
+                model = %self.config.model,
+            );
+            let _iter_guard = iter_span.enter();
+
             // Wall-clock timeout check.
             if let Some(dl) = deadline {
                 if std::time::Instant::now() >= dl {
@@ -832,6 +873,8 @@ impl ReActLoop {
             }
 
             // Structured error categorization in observation.
+            let tool_span = tracing::info_span!("tool_dispatch", tool = %tool_name);
+            let _tool_guard = tool_span.enter();
             let observation = match self.registry.call(&tool_name, args).await {
                 Ok(result) => serde_json::json!({ "ok": true, "data": result }).to_string(),
                 Err(e) => {

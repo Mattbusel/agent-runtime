@@ -11,6 +11,36 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.1.0] - 2026-03-20
+
+### Added
+
+- **`#[non_exhaustive]`** on `AgentRuntimeError` — new variants can be added in
+  future minor releases without breaking external `match` arms.
+- **`DebugBuilderState` sealed trait** (`runtime.rs`) — internal trait that drives
+  a single generic `Debug` impl for `AgentRuntimeBuilder<S>`, replacing two
+  near-identical manual implementations.
+
+### Changed
+
+- **`FilePersistenceBackend::save`** now writes data to a UUID-named temporary
+  file in the same directory and atomically renames it into place.  Readers no
+  longer observe half-written files if the process crashes mid-write.
+- **`ToolSpec::with_required_fields`** now accepts
+  `impl IntoIterator<Item = impl Into<String>>` instead of `Vec<String>`.
+  Callers can now pass `&["field1", "field2"]` or any other iterable directly.
+- **`ReActLoop::error_observation`** — silently-discarded `tool_name` parameter
+  renamed to `_tool_name` so the intent is clear at the call site.
+- **`AgentRuntimeBuilder::with_agent_config`** — removed duplicate doc-comment
+  block that appeared twice verbatim.
+
+### Deprecated
+
+- **`AgentSession::load_step_checkpoint`** — use `load_checkpoint_at_step`
+  instead (same semantics; the alias will be removed in 2.0).
+
+---
+
 ## [1.0.0] - 2026-03-18
 
 ### Added

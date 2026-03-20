@@ -11,6 +11,10 @@
 //! - Never panics
 
 /// Unified error type returned by all public `agent-runtime` APIs.
+///
+/// Marked `#[non_exhaustive]` so that adding new variants in future minor
+/// releases does not break external `match` arms.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum AgentRuntimeError {
     /// A memory subsystem operation failed (episodic, semantic, or working memory).
