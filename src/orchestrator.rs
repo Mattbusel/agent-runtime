@@ -1822,6 +1822,25 @@ impl Pipeline {
         self.stages.last().map_or(false, |s| s.name == name)
     }
 
+    /// Return the total byte length of all stage names combined.
+    ///
+    /// Returns `0` for an empty pipeline.
+    pub fn total_stage_name_bytes(&self) -> usize {
+        self.stages.iter().map(|s| s.name.len()).sum()
+    }
+
+    /// Return the names of all stages that appear before `name` in the pipeline.
+    ///
+    /// Returns an empty `Vec` if `name` is not present, is the first stage,
+    /// or the pipeline is empty.
+    pub fn stages_before(&self, name: &str) -> Vec<&str> {
+        let pos = self.stages.iter().position(|s| s.name == name);
+        match pos {
+            None | Some(0) => Vec::new(),
+            Some(idx) => self.stages[..idx].iter().map(|s| s.name.as_str()).collect(),
+        }
+    }
+
 }
 
 impl Default for Pipeline {
@@ -3622,5 +3641,43 @@ mod tests {
     fn test_shortest_stage_name_empty_pipeline_returns_none() {
         let p = Pipeline::new();
         assert_eq!(p.shortest_stage_name(), None);
+    }
+
+    // ── Round 42: Display impls ───────────────────────────────────────────────
+
+    #[test]
+    fn test_circuit_state_display_closed() {
+        let s = CircuitState::Closed;
+        assert_eq!(s.to_string(), "Closed");
+    }
+
+    #[test]
+    fn test_circuit_state_display_open() {
+        let s = CircuitState::Open { opened_at: std::time::Instant::now() };
+        assert_eq!(s.to_string(), "Open");
+    }
+
+    #[test]
+    fn test_circuit_state_display_half_open() {
+        let s = CircuitState::HalfOpen;
+        assert_eq!(s.to_string(), "HalfOpen");
+    }
+
+    #[test]
+    fn test_retry_policy_display_exponential() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        let s = p.to_string();
+        assert!(s.contains("Exponential"));
+        assert!(s.contains('3'));
+        assert!(s.contains("100ms"));
+    }
+
+    #[test]
+    fn test_retry_policy_display_constant() {
+        let p = RetryPolicy::constant(5, 50).unwrap();
+        let s = p.to_string();
+        assert!(s.contains("Constant"));
+        assert!(s.contains('5'));
+        assert!(s.contains("50ms"));
     }
 }

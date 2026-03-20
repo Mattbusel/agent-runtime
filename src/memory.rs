@@ -2084,6 +2084,47 @@ impl EpisodicStore {
         items.sort_unstable_by_key(|m| m.timestamp);
         Ok(items)
     }
+
+    /// Return a sorted, deduplicated list of all tags used by any episode
+    /// belonging to `agent_id`.
+    ///
+    /// Returns an empty `Vec` for unknown agents.
+    pub fn all_unique_tags(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::all_unique_tags");
+        let mut tags: Vec<String> = inner
+            .items
+            .get(agent_id)
+            .map_or_else(Vec::new, |items| {
+                items.iter().flat_map(|m| m.tags.iter().cloned()).collect()
+            });
+        tags.sort_unstable();
+        tags.dedup();
+        Ok(tags)
+    }
+
+    /// Return all episodes for `agent_id` that contain `tag` in their tag list.
+    ///
+    /// Returns an empty `Vec` for unknown agents or when no episode has the tag.
+    pub fn episodes_with_tag(
+        &self,
+        agent_id: &AgentId,
+        tag: &str,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episodes_with_tag");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or_else(Vec::new, |items| {
+                items
+                    .iter()
+                    .filter(|m| m.tags.iter().any(|t| t == tag))
+                    .cloned()
+                    .collect()
+            }))
+    }
 }
 
 impl Default for EpisodicStore {
@@ -7567,5 +7608,19 @@ mod tests {
     fn test_working_memory_value_for_longest_key_returns_none_when_empty() {
         let wm = WorkingMemory::new(10).unwrap();
         assert_eq!(wm.value_for_longest_key().unwrap(), None);
+    }
+
+    // ── Round 42: DecayPolicy Display ─────────────────────────────────────────
+
+    #[test]
+    fn test_decay_policy_display_format() {
+        let p = DecayPolicy::exponential(24.0).unwrap();
+        assert_eq!(p.to_string(), "Exponential(half_life=24.0h)");
+    }
+
+    #[test]
+    fn test_decay_policy_display_fractional_hours() {
+        let p = DecayPolicy::exponential(1.5).unwrap();
+        assert_eq!(p.to_string(), "Exponential(half_life=1.5h)");
     }
 }

@@ -3134,4 +3134,26 @@ mod tests {
         let snap = MetricsSnapshot::default();
         assert_eq!(snap.least_called_tool(), None);
     }
+
+    // ── Round 42: summary_line ────────────────────────────────────────────────
+
+    #[test]
+    fn test_metrics_snapshot_summary_line_format() {
+        let m = RuntimeMetrics::new();
+        let snap = m.snapshot();
+        let line = snap.summary_line();
+        assert!(line.contains("sessions="));
+        assert!(line.contains("steps="));
+        assert!(line.contains("tool_calls="));
+        assert!(line.contains("failures="));
+        assert!(line.contains("latency_mean="));
+    }
+
+    #[test]
+    fn test_metrics_snapshot_summary_line_reflects_zero_values() {
+        let snap = MetricsSnapshot::default();
+        let line = snap.summary_line();
+        assert!(line.contains("sessions=0"));
+        assert!(line.contains("failures=0"));
+    }
 }
