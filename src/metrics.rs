@@ -4389,14 +4389,12 @@ mod tests {
         m.record_tool_call("grep");
         m.record_tool_call("grep");
         m.record_tool_call("grep");
-        let snap = m.snapshot();
-        assert_eq!(snap.tool_call_count_for("grep"), 3);
+        assert_eq!(m.tool_call_count_for("grep"), 3);
     }
 
     #[test]
     fn test_tool_call_count_for_returns_zero_for_unknown_tool() {
         let m = RuntimeMetrics::new();
-        let snap = m.snapshot();
-        assert_eq!(snap.tool_call_count_for("nonexistent"), 0);
+        assert_eq!(m.tool_call_count_for("nonexistent"), 0);
     }
 }
