@@ -2664,4 +2664,61 @@ mod tests {
         let result = p.run("hello".to_string()).unwrap();
         assert_eq!(result, "HELLO");
     }
+
+    // ── Round 17: Pipeline first/last/stage_index, BackpressureGuard is_empty/available ──
+
+    #[test]
+    fn test_pipeline_first_stage_name_returns_first() {
+        let p = Pipeline::new()
+            .add_stage("alpha", |s| Ok(s))
+            .add_stage("beta", |s| Ok(s));
+        assert_eq!(p.first_stage_name(), Some("alpha"));
+    }
+
+    #[test]
+    fn test_pipeline_first_stage_name_none_when_empty() {
+        let p = Pipeline::new();
+        assert!(p.first_stage_name().is_none());
+    }
+
+    #[test]
+    fn test_pipeline_last_stage_name_returns_last() {
+        let p = Pipeline::new()
+            .add_stage("alpha", |s| Ok(s))
+            .add_stage("omega", |s| Ok(s));
+        assert_eq!(p.last_stage_name(), Some("omega"));
+    }
+
+    #[test]
+    fn test_pipeline_stage_index_returns_correct_position() {
+        let p = Pipeline::new()
+            .add_stage("first", |s| Ok(s))
+            .add_stage("second", |s| Ok(s))
+            .add_stage("third", |s| Ok(s));
+        assert_eq!(p.stage_index("first"), Some(0));
+        assert_eq!(p.stage_index("second"), Some(1));
+        assert_eq!(p.stage_index("third"), Some(2));
+        assert_eq!(p.stage_index("missing"), None);
+    }
+
+    #[test]
+    fn test_backpressure_is_empty_true_when_no_slots_acquired() {
+        let g = BackpressureGuard::new(10).unwrap();
+        assert!(g.is_empty().unwrap());
+    }
+
+    #[test]
+    fn test_backpressure_is_empty_false_after_acquire() {
+        let g = BackpressureGuard::new(10).unwrap();
+        g.try_acquire().unwrap();
+        assert!(!g.is_empty().unwrap());
+    }
+
+    #[test]
+    fn test_backpressure_available_capacity_decrements_on_acquire() {
+        let g = BackpressureGuard::new(5).unwrap();
+        assert_eq!(g.available_capacity().unwrap(), 5);
+        g.try_acquire().unwrap();
+        assert_eq!(g.available_capacity().unwrap(), 4);
+    }
 }
