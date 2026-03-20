@@ -1402,6 +1402,17 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Return references to all `ToolSpec`s that have no required fields.
+    ///
+    /// Returns an empty `Vec` when every registered tool declares at least one
+    /// required field, or when the registry is empty.
+    pub fn tools_without_required_fields(&self) -> Vec<&ToolSpec> {
+        self.tools
+            .values()
+            .filter(|s| s.required_fields.is_empty())
+            .collect()
+    }
+
     /// Return a reference to the `ToolSpec` with the most required fields.
     ///
     /// When multiple tools share the maximum required-field count, the one that
@@ -4306,5 +4317,35 @@ mod tests {
     fn test_tool_count_above_desc_bytes_zero_for_empty_registry() {
         let reg = ToolRegistry::new();
         assert_eq!(reg.tool_count_above_desc_bytes(0), 0);
+    }
+
+    // ── Round 44: tool_names_with_required_fields ──────────────────────────────
+
+    #[test]
+    fn test_tool_names_with_required_fields_returns_sorted_names() {
+        let mut reg = ToolRegistry::new();
+        reg.register(
+            ToolSpec::new("b", "desc", |_| serde_json::json!({}))
+                .with_required_fields(vec!["x".to_string()]),
+        );
+        reg.register(
+            ToolSpec::new("a", "desc", |_| serde_json::json!({}))
+                .with_required_fields(vec!["y".to_string()]),
+        );
+        reg.register(ToolSpec::new("c", "desc", |_| serde_json::json!({}))); // no required fields
+        assert_eq!(reg.tool_names_with_required_fields(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_tool_names_with_required_fields_empty_when_none_have_fields() {
+        let mut reg = ToolRegistry::new();
+        reg.register(ToolSpec::new("a", "desc", |_| serde_json::json!({})));
+        assert!(reg.tool_names_with_required_fields().is_empty());
+    }
+
+    #[test]
+    fn test_tool_names_with_required_fields_empty_for_empty_registry() {
+        let reg = ToolRegistry::new();
+        assert!(reg.tool_names_with_required_fields().is_empty());
     }
 }

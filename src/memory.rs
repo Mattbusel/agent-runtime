@@ -1876,6 +1876,50 @@ impl EpisodicStore {
         Ok(item)
     }
 
+    /// Return the episode with the lowest importance score for `agent_id`, or
+    /// `None` if the agent has no stored episodes.  Ties are broken in favour
+    /// of the later-inserted episode.
+    pub fn min_importance_episode(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::min_importance_episode");
+        let item = inner
+            .items
+            .get(agent_id)
+            .and_then(|v| {
+                v.iter().min_by(|a, b| {
+                    a.importance
+                        .partial_cmp(&b.importance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            })
+            .cloned();
+        Ok(item)
+    }
+
+    /// Return all episodes for `agent_id` sorted by importance descending
+    /// (highest first).
+    ///
+    /// Returns an empty `Vec` for an unknown agent.
+    pub fn episodes_sorted_by_importance(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episodes_sorted_by_importance");
+        let mut items: Vec<MemoryItem> = inner
+            .items
+            .get(agent_id)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default();
+        items.sort_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(items)
+    }
+
     /// Return the most recently inserted episode for `agent_id`, or `None`
     /// if the agent has no stored episodes.
     pub fn newest(
@@ -2221,6 +2265,24 @@ impl EpisodicStore {
             .items
             .get(agent_id)
             .map_or_else(Vec::new, |items| items.iter().map(|m| m.id.clone()).collect()))
+    }
+
+    /// Return all episodes for `agent_id` whose importance score is strictly
+    /// greater than `threshold`.
+    ///
+    /// Returns an empty `Vec` for unknown agents or when no episode qualifies.
+    pub fn episodes_above_importance(
+        &self,
+        agent_id: &AgentId,
+        threshold: f32,
+    ) -> Result<Vec<MemoryItem>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "EpisodicStore::episodes_above_importance");
+        Ok(inner
+            .items
+            .get(agent_id)
+            .map_or_else(Vec::new, |items| {
+                items.iter().filter(|m| m.importance > threshold).cloned().collect()
+            }))
     }
 }
 
@@ -3640,6 +3702,15 @@ impl WorkingMemory {
         Ok(inner.map.iter().map(|(k, v)| (k.len(), v.len())).collect())
     }
 
+    /// Return the total byte usage of the store — the sum of all key and value
+    /// byte lengths.
+    ///
+    /// Returns `0` for an empty store.
+    pub fn total_bytes(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "WorkingMemory::total_bytes");
+        Ok(inner.map.iter().map(|(k, v)| k.len() + v.len()).sum())
+    }
+
     /// Return the key whose value has the greatest byte length, or `None` if
     /// the store is empty.
     ///
@@ -3758,6 +3829,23 @@ impl WorkingMemory {
         }
         inner.map.insert(key, new_str);
         Ok(new_val)
+    }
+
+    /// Swap the values of `key_a` and `key_b`.
+    ///
+    /// Returns `Ok(())` when both keys exist and the swap succeeds.
+    /// Returns `Err` when either key is absent — the store is left unchanged.
+    pub fn swap(&self, key_a: &str, key_b: &str) -> Result<(), AgentRuntimeError> {
+        let mut inner = recover_lock(self.inner.lock(), "WorkingMemory::swap");
+        let a = inner.map.get(key_a).cloned().ok_or_else(|| {
+            AgentRuntimeError::Memory(format!("WorkingMemory::swap: key '{key_a}' not found"))
+        })?;
+        let b = inner.map.get(key_b).cloned().ok_or_else(|| {
+            AgentRuntimeError::Memory(format!("WorkingMemory::swap: key '{key_b}' not found"))
+        })?;
+        inner.map.insert(key_a.to_owned(), b);
+        inner.map.insert(key_b.to_owned(), a);
+        Ok(())
     }
 }
 
@@ -8072,6 +8160,32 @@ mod tests {
         assert_eq!(wm.key_with_longest_value().unwrap(), None);
     }
 
+    // ── Round 44: key_value_pairs_above_length ─────────────────────────────────
+
+    #[test]
+    fn test_key_value_pairs_above_length_returns_matching_pairs() {
+        let wm = WorkingMemory::new(100).unwrap();
+        wm.set("short", "hi").unwrap();
+        wm.set("long", "hello world").unwrap();
+        let pairs = wm.key_value_pairs_above_length(5).unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, "long");
+        assert_eq!(pairs[0].1, "hello world");
+    }
+
+    #[test]
+    fn test_key_value_pairs_above_length_empty_when_none_qualify() {
+        let wm = WorkingMemory::new(100).unwrap();
+        wm.set("a", "x").unwrap();
+        assert!(wm.key_value_pairs_above_length(100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_key_value_pairs_above_length_empty_for_empty_store() {
+        let wm = WorkingMemory::new(100).unwrap();
+        assert!(wm.key_value_pairs_above_length(0).unwrap().is_empty());
+    }
+
     // ── Round 45: episode_ids, total_key_bytes ─────────────────────────────────
 
     #[test]
@@ -8141,5 +8255,37 @@ mod tests {
         wm.set("n2-r45", "10").unwrap();
         let v = wm.increment("n2-r45", -4).unwrap();
         assert_eq!(v, 6);
+    }
+
+    // ── Round 46: episodes_above_importance, total_bytes ──────────────────────
+
+    #[test]
+    fn test_episodic_store_episodes_above_importance_filters_correctly() {
+        let store = EpisodicStore::new();
+        let agent = AgentId::new("r46-a");
+        store.add_episode(agent.clone(), "low", 0.3).unwrap();
+        store.add_episode(agent.clone(), "high", 0.9).unwrap();
+        let result = store.episodes_above_importance(&agent, 0.5).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content, "high");
+    }
+
+    #[test]
+    fn test_episodic_store_episodes_above_importance_empty_for_unknown_agent() {
+        let store = EpisodicStore::new();
+        assert!(store.episodes_above_importance(&AgentId::new("nobody-r46"), 0.5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_working_memory_total_bytes_sums_key_and_value_lengths() {
+        let wm = WorkingMemory::new(10).unwrap();
+        wm.set("ab", "xyz").unwrap(); // key=2, value=3 → total=5
+        assert_eq!(wm.total_bytes().unwrap(), 5);
+    }
+
+    #[test]
+    fn test_working_memory_total_bytes_zero_for_empty_store() {
+        let wm = WorkingMemory::new(10).unwrap();
+        assert_eq!(wm.total_bytes().unwrap(), 0);
     }
 }

@@ -1158,6 +1158,28 @@ impl AgentSession {
             .collect()
     }
 
+    /// Return the mean byte length of thought strings across all steps.
+    ///
+    /// Returns `0.0` for sessions with no steps.
+    pub fn avg_thought_bytes(&self) -> f64 {
+        if self.steps.is_empty() {
+            return 0.0;
+        }
+        let total: usize = self.steps.iter().map(|s| s.thought.len()).sum();
+        total as f64 / self.steps.len() as f64
+    }
+
+    /// Return references to steps whose action byte length exceeds `min_bytes`.
+    ///
+    /// Returns an empty `Vec` for sessions with no steps or when no step
+    /// action exceeds `min_bytes`.
+    pub fn steps_above_action_bytes(&self, min_bytes: usize) -> Vec<&ReActStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.action.len() > min_bytes)
+            .collect()
+    }
+
     /// Return the 0-based index of the first `FINAL_ANSWER` step, or `None` if
     /// no such step exists in the session.
     ///
@@ -1979,6 +2001,16 @@ impl AgentRuntime {
     #[cfg(feature = "memory")]
     pub fn has_working_memory(&self) -> bool {
         self.working.is_some()
+    }
+
+    /// Return `true` if there is at least one session currently in progress.
+    ///
+    /// Reads the `active_sessions` counter from the shared metrics.
+    pub fn has_active_sessions(&self) -> bool {
+        self.metrics
+            .active_sessions
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0
     }
 
     /// Gracefully shut down the runtime.
@@ -5240,5 +5272,40 @@ mod tests {
     fn test_total_thought_count_zero_for_empty_session() {
         let session = make_session(vec![], 0);
         assert_eq!(session.total_thought_count(), 0);
+    }
+
+    // ── Round 46: avg_thought_bytes, steps_above_action_bytes ─────────────────
+
+    #[test]
+    fn test_avg_thought_bytes_computes_mean() {
+        let steps = vec![
+            make_step("ab", "a", "o"),    // thought = 2
+            make_step("abcdef", "b", "o"), // thought = 6
+        ];
+        let session = make_session(steps, 0);
+        assert!((session.avg_thought_bytes() - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_thought_bytes_zero_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.avg_thought_bytes(), 0.0);
+    }
+
+    #[test]
+    fn test_steps_above_action_bytes_filters_correctly() {
+        let steps = vec![
+            make_step("t", "ab", "o"),       // len = 2
+            make_step("t", "abcdefgh", "o"), // len = 8
+            make_step("t", "abc", "o"),      // len = 3
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_above_action_bytes(3).len(), 1);
+    }
+
+    #[test]
+    fn test_steps_above_action_bytes_empty_for_empty_session() {
+        let session = make_session(vec![], 0);
+        assert!(session.steps_above_action_bytes(0).is_empty());
     }
 }

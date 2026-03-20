@@ -11,6 +11,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.63.0] - 2026-03-20
+
+### Added
+
+- **`AgentSession::steps_with_long_thoughts`** — steps whose thought exceeds a byte threshold.
+- **`AgentSession::action_count_containing`** — count of steps whose action contains a substring.
+- **`AgentSession::total_thought_count`** — count of steps with a non-empty thought.
+- **`GraphStore::edge_count_above_weight`** — count of edges with weight exceeding a threshold.
+- **`GraphStore::entities_with_label_prefix`** — entities whose label starts with a prefix.
+- **`GraphStore::bidirectional_pairs`** — deduplicated pairs of entities with edges in both directions.
+- **`EpisodicStore::episode_ids`** — all episode IDs for an agent.
+- **`WorkingMemory::key_value_pairs_above_length`** — key/value pairs where value exceeds a byte length.
+- **`ToolRegistry::tool_names_with_required_fields`** — sorted names of tools that declare required fields.
+- **`MetricsSnapshot::top_n_tools_by_calls`** — top N tools ranked by call count descending.
+
+---
+
 ## [1.62.0] - 2026-03-20
 
 ### Added

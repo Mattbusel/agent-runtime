@@ -1387,6 +1387,15 @@ impl RuntimeMetrics {
         self.failed_tool_calls.load(Ordering::Relaxed) as f64 / steps as f64
     }
 
+    /// Return the combined count of all error events: failed tool calls plus
+    /// checkpoint errors.
+    ///
+    /// Useful as a single "total errors" gauge for alerting.
+    pub fn total_errors(&self) -> u64 {
+        self.failed_tool_calls.load(Ordering::Relaxed)
+            + self.checkpoint_errors.load(Ordering::Relaxed)
+    }
+
     /// Return the top `n` tools by total call count, sorted descending.
     ///
     /// Returns fewer than `n` entries if fewer tools have been called.
@@ -3368,6 +3377,41 @@ mod tests {
     fn test_tool_call_ratio_returns_zero_when_no_calls_recorded() {
         let snap = MetricsSnapshot::default();
         assert_eq!(snap.tool_call_ratio("any"), 0.0);
+    }
+
+    // ── Round 44: top_n_tools_by_calls ────────────────────────────────────────
+
+    #[test]
+    fn test_top_n_tools_by_calls_returns_n_descending() {
+        let snap = MetricsSnapshot {
+            per_tool_calls: [
+                ("a".to_string(), 10),
+                ("b".to_string(), 5),
+                ("c".to_string(), 20),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let top = snap.top_n_tools_by_calls(2);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0], ("c", 20));
+        assert_eq!(top[1], ("a", 10));
+    }
+
+    #[test]
+    fn test_top_n_tools_by_calls_empty_for_empty_snapshot() {
+        let snap = MetricsSnapshot::default();
+        assert!(snap.top_n_tools_by_calls(5).is_empty());
+    }
+
+    #[test]
+    fn test_top_n_tools_by_calls_returns_all_when_n_exceeds_count() {
+        let snap = MetricsSnapshot {
+            per_tool_calls: [("only".to_string(), 3)].into_iter().collect(),
+            ..Default::default()
+        };
+        assert_eq!(snap.top_n_tools_by_calls(100).len(), 1);
     }
 
     // ── Round 45: step_error_rate ──────────────────────────────────────────────

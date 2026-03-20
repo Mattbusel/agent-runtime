@@ -2969,6 +2969,37 @@ impl GraphStore {
         Ok(rels)
     }
 
+    /// Return the entity with the most properties, or `None` for an empty graph.
+    ///
+    /// When multiple entities share the maximum property count the one whose
+    /// ID sorts first lexicographically is returned for deterministic output.
+    pub fn entity_with_most_properties(&self) -> Result<Option<Entity>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::entity_with_most_properties");
+        let entity = inner.entities.values().max_by(|a, b| {
+            a.properties
+                .len()
+                .cmp(&b.properties.len())
+                .then_with(|| b.id.0.cmp(&a.id.0))
+        });
+        Ok(entity.cloned())
+    }
+
+    /// Return the arithmetic mean weight across all relationships, or `None`
+    /// if the graph has no relationships.
+    pub fn avg_weight(&self) -> Result<Option<f64>, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::avg_weight");
+        let all: Vec<f32> = inner
+            .adjacency
+            .values()
+            .flat_map(|rels| rels.iter().map(|r| r.weight))
+            .collect();
+        if all.is_empty() {
+            return Ok(None);
+        }
+        let sum: f64 = all.iter().map(|&w| w as f64).sum();
+        Ok(Some(sum / all.len() as f64))
+    }
+
     /// Return the number of entities whose `label` matches `label` exactly.
     ///
     /// Returns `0` when no entities carry that label.
@@ -3029,6 +3060,31 @@ impl GraphStore {
             }
         }
         Ok(pairs)
+    }
+
+    /// Return the mean in-degree across all entities in the graph.
+    ///
+    /// Computed as `total_relationships / entity_count`.  Returns `0.0` when
+    /// the graph has no entities.
+    pub fn mean_in_degree(&self) -> Result<f64, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::mean_in_degree");
+        let entity_count = inner.entities.len();
+        if entity_count == 0 {
+            return Ok(0.0);
+        }
+        let total: usize = inner.reverse_adjacency.values().map(|v| v.len()).sum();
+        Ok(total as f64 / entity_count as f64)
+    }
+
+    /// Return the count of entities whose label starts with `prefix`.
+    ///
+    /// Returns `0` when no entities match or the graph is empty.
+    pub fn entity_count_by_label_prefix(&self, prefix: &str) -> Result<usize, AgentRuntimeError> {
+        let inner = recover_lock(
+            self.inner.lock(),
+            "GraphStore::entity_count_by_label_prefix",
+        );
+        Ok(inner.entities.values().filter(|e| e.label.starts_with(prefix)).count())
     }
 }
 
@@ -6154,5 +6210,60 @@ mod tests {
         let g = GraphStore::new();
         add(&g, "a");
         assert_eq!(g.entity_count_with_label("Alien").unwrap(), 0);
+    }
+
+    // ── Round 44: edge_count_above_weight, entities_with_label_prefix, bidirectional_pairs
+
+    #[test]
+    fn test_edge_count_above_weight_counts_heavy_edges() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        g.add_relationship(Relationship::new("a", "b", "K", 0.9)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "K", 0.3)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "K", 1.5)).unwrap();
+        assert_eq!(g.edge_count_above_weight(0.8).unwrap(), 2); // 0.9 and 1.5
+    }
+
+    #[test]
+    fn test_edge_count_above_weight_zero_for_empty_graph() {
+        let g = GraphStore::new();
+        assert_eq!(g.edge_count_above_weight(0.0).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_entities_with_label_prefix_returns_matching_entities() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "Person")).unwrap();
+        g.add_entity(Entity::new("b", "Pet")).unwrap();
+        g.add_entity(Entity::new("c", "Organization")).unwrap();
+        let result = g.entities_with_label_prefix("Pe").unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|e| e.label.starts_with("Pe")));
+    }
+
+    #[test]
+    fn test_entities_with_label_prefix_empty_when_no_match() {
+        let g = GraphStore::new();
+        add(&g, "a");
+        assert!(g.entities_with_label_prefix("XYZ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_bidirectional_pairs_returns_pairs_with_edges_in_both_directions() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        g.add_relationship(Relationship::new("a", "b", "K", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "a", "K", 1.0)).unwrap(); // bidirectional
+        g.add_relationship(Relationship::new("a", "c", "K", 1.0)).unwrap(); // one-way
+        let pairs = g.bidirectional_pairs().unwrap();
+        assert_eq!(pairs.len(), 1);
+    }
+
+    #[test]
+    fn test_bidirectional_pairs_empty_for_one_directional_graph() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b");
+        g.add_relationship(Relationship::new("a", "b", "K", 1.0)).unwrap();
+        assert!(g.bidirectional_pairs().unwrap().is_empty());
     }
 }
