@@ -105,9 +105,18 @@ pub struct MemoryId(pub String);
 
 impl MemoryId {
     /// Create a new `MemoryId` from any string-like value.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Triggers a `debug_assert!` if `id` is empty.  In release builds a
+    /// `tracing::warn!` is emitted instead so that the misconfiguration is
+    /// surfaced in production logs without aborting the process.
     pub fn new(id: impl Into<String>) -> Self {
         let id = id.into();
-        debug_assert!(!id.is_empty(), "MemoryId must not be empty");
+        if id.is_empty() {
+            debug_assert!(false, "MemoryId must not be empty");
+            tracing::warn!("MemoryId::new called with an empty string — memory IDs should be non-empty to avoid lookup ambiguity");
+        }
         Self(id)
     }
 
@@ -351,6 +360,26 @@ impl EpisodicStoreBuilder {
         self
     }
 
+    /// Set the per-agent capacity without panicking.
+    ///
+    /// Returns `Err` if `capacity == 0`. Prefer this over [`per_agent_capacity`]
+    /// in library/user-facing code where a misconfigured capacity should be
+    /// handled gracefully rather than aborting the process.
+    ///
+    /// [`per_agent_capacity`]: EpisodicStoreBuilder::per_agent_capacity
+    pub fn try_per_agent_capacity(
+        mut self,
+        capacity: usize,
+    ) -> Result<Self, crate::error::AgentRuntimeError> {
+        if capacity == 0 {
+            return Err(crate::error::AgentRuntimeError::Memory(
+                "per_agent_capacity must be > 0".into(),
+            ));
+        }
+        self.per_agent_capacity = Some(capacity);
+        Ok(self)
+    }
+
     /// Set the maximum memory age in hours. Returns `Err` if `max_age_hours <= 0`.
     pub fn max_age_hours(mut self, hours: f64) -> Result<Self, crate::error::AgentRuntimeError> {
         if hours <= 0.0 {
@@ -585,6 +614,33 @@ impl EpisodicStore {
         }
     }
 
+    /// Create a new episodic store with a per-agent capacity limit, without panicking.
+    ///
+    /// Returns `Err` if `capacity == 0`. Prefer this over [`with_per_agent_capacity`]
+    /// in user-facing code where a zero capacity should be a recoverable error
+    /// rather than a panic.
+    ///
+    /// [`with_per_agent_capacity`]: EpisodicStore::with_per_agent_capacity
+    pub fn try_with_per_agent_capacity(
+        capacity: usize,
+    ) -> Result<Self, AgentRuntimeError> {
+        if capacity == 0 {
+            return Err(AgentRuntimeError::Memory(
+                "per_agent_capacity must be > 0".into(),
+            ));
+        }
+        Ok(Self {
+            inner: Arc::new(Mutex::new(EpisodicInner {
+                items: HashMap::new(),
+                decay: None,
+                recall_policy: RecallPolicy::Importance,
+                per_agent_capacity: Some(capacity),
+                max_age_hours: None,
+                eviction_policy: EvictionPolicy::LowestImportance,
+            })),
+        })
+    }
+
     /// Create a new episodic store with an absolute age limit.
     ///
     /// Items older than `max_age_hours` are automatically purged on the next
@@ -733,16 +789,29 @@ impl EpisodicStore {
         }
 
         // Build a sorted index list (descending by score) without cloning all items first.
+        //
+        // When `limit < indices.len()` we use a two-phase partial sort:
+        //   1. `select_nth_unstable_by(limit - 1, cmp)` — O(n) — partitions the
+        //      slice so that indices[0..limit] are the top-limit elements (unordered)
+        //      and indices[limit..] are the remaining (discarded) elements.
+        //   2. Sort only indices[0..limit] — O(limit log limit).
+        // Total: O(n + limit log limit) vs O(n log n) for a full sort.
         let mut indices: Vec<usize> = (0..agent_items.len()).collect();
 
         match recall_policy {
             RecallPolicy::Importance => {
-                indices.sort_by(|&a, &b| {
+                let cmp = |&a: &usize, &b: &usize| {
                     agent_items[b]
                         .importance
                         .partial_cmp(&agent_items[a].importance)
                         .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                };
+                if limit > 0 && limit < indices.len() {
+                    indices.select_nth_unstable_by(limit - 1, cmp);
+                    indices[..limit].sort_by(cmp);
+                } else {
+                    indices.sort_by(cmp);
+                }
             }
             RecallPolicy::Hybrid {
                 recency_weight,
@@ -755,7 +824,7 @@ impl EpisodicStore {
                     .unwrap_or(1)
                     .max(1);
                 let now = Utc::now();
-                indices.sort_by(|&a, &b| {
+                let cmp = |&a: &usize, &b: &usize| {
                     let score_a = compute_hybrid_score(
                         &agent_items[a],
                         recency_weight,
@@ -773,7 +842,13 @@ impl EpisodicStore {
                     score_b
                         .partial_cmp(&score_a)
                         .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                };
+                if limit > 0 && limit < indices.len() {
+                    indices.select_nth_unstable_by(limit - 1, cmp);
+                    indices[..limit].sort_by(cmp);
+                } else {
+                    indices.sort_by(cmp);
+                }
             }
         }
 

@@ -19,6 +19,7 @@ use crate::metrics::RuntimeMetrics;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fmt::Write as FmtWrite;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -121,7 +122,7 @@ impl ReActStep {
 }
 
 /// Configuration for the ReAct agent loop.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     /// Maximum number of Thought-Action-Observation cycles.
     pub max_iterations: usize,
@@ -132,8 +133,14 @@ pub struct AgentConfig {
     /// Maximum number of episodic memories to inject into the prompt.
     /// Keeping this small prevents silent token-budget overruns.  Default: 3.
     pub max_memory_recalls: usize,
-    /// Maximum approximate token budget for injected memories.
-    /// Uses ~4 chars/token heuristic. None means no limit.
+    /// Maximum token budget for injected memories.
+    ///
+    /// Token counting is delegated to the [`TokenEstimator`] configured on
+    /// [`AgentRuntimeBuilder`] (default: 1 token ≈ 4 bytes).  `None` means
+    /// no limit.
+    ///
+    /// [`TokenEstimator`]: crate::runtime::TokenEstimator
+    /// [`AgentRuntimeBuilder`]: crate::runtime::AgentRuntimeBuilder
     pub max_memory_tokens: Option<usize>,
     /// Optional wall-clock timeout for the entire loop.
     /// If the loop runs longer than this duration, it returns
@@ -145,6 +152,13 @@ pub struct AgentConfig {
     pub max_tokens: Option<usize>,
     /// Per-inference timeout.
     pub request_timeout: Option<std::time::Duration>,
+    /// Maximum number of characters allowed in the running context string.
+    ///
+    /// When set, the oldest Thought/Action/Observation turns are trimmed from
+    /// the **beginning** of the context (after the system prompt) to keep the
+    /// total length below this limit.  This prevents silent context-window
+    /// overruns in long-running agents.  `None` (default) means no limit.
+    pub max_context_chars: Option<usize>,
 }
 
 impl AgentConfig {
@@ -160,6 +174,7 @@ impl AgentConfig {
             temperature: None,
             max_tokens: None,
             request_timeout: None,
+            max_context_chars: None,
         }
     }
 
@@ -234,6 +249,16 @@ impl AgentConfig {
     /// Convenience wrapper around [`with_request_timeout`](Self::with_request_timeout).
     pub fn with_request_timeout_ms(self, ms: u64) -> Self {
         self.with_request_timeout(std::time::Duration::from_millis(ms))
+    }
+
+    /// Set a maximum character limit for the running context string.
+    ///
+    /// When the context exceeds this length the oldest
+    /// Thought/Action/Observation turns are trimmed from the front (after the
+    /// initial system prompt + user turn) so the context stays under the limit.
+    pub fn with_max_context_chars(mut self, n: usize) -> Self {
+        self.max_context_chars = Some(n);
+        self
     }
 }
 
@@ -427,6 +452,116 @@ pub trait ToolCache: Send + Sync {
     fn set(&self, tool_name: &str, args: &serde_json::Value, result: serde_json::Value);
 }
 
+// ── InMemoryToolCache ─────────────────────────────────────────────────────────
+
+/// Inner state for [`InMemoryToolCache`], tracking insertion order for eviction.
+struct ToolCacheInner {
+    map: HashMap<(String, String), serde_json::Value>,
+    /// Insertion-ordered keys for FIFO eviction.
+    order: std::collections::VecDeque<(String, String)>,
+}
+
+/// A simple in-memory [`ToolCache`] backed by a `Mutex<HashMap>`.
+///
+/// Caches tool results keyed on `(tool_name, args_json_string)`.
+/// Optionally bounded by a maximum number of entries; the oldest entry is
+/// evicted once the cap is exceeded.
+///
+/// # Example
+/// ```rust,ignore
+/// use std::sync::Arc;
+/// use llm_agent_runtime::agent::{InMemoryToolCache, ToolRegistry};
+///
+/// let cache = Arc::new(InMemoryToolCache::new());
+/// let registry = ToolRegistry::new().with_cache(cache);
+/// ```
+pub struct InMemoryToolCache {
+    inner: std::sync::Mutex<ToolCacheInner>,
+    max_entries: Option<usize>,
+}
+
+impl std::fmt::Debug for InMemoryToolCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let len = self.len();
+        f.debug_struct("InMemoryToolCache")
+            .field("entries", &len)
+            .field("max_entries", &self.max_entries)
+            .finish()
+    }
+}
+
+impl InMemoryToolCache {
+    /// Create a new unbounded cache.
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(ToolCacheInner {
+                map: HashMap::new(),
+                order: std::collections::VecDeque::new(),
+            }),
+            max_entries: None,
+        }
+    }
+
+    /// Create a cache that evicts the oldest entry once `max` entries are reached.
+    pub fn with_max_entries(max: usize) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(ToolCacheInner {
+                map: HashMap::new(),
+                order: std::collections::VecDeque::new(),
+            }),
+            max_entries: Some(max),
+        }
+    }
+
+    /// Remove all cached entries.
+    pub fn clear(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.map.clear();
+            inner.order.clear();
+        }
+    }
+
+    /// Return the number of cached entries.
+    pub fn len(&self) -> usize {
+        self.inner.lock().map(|s| s.map.len()).unwrap_or(0)
+    }
+
+    /// Return `true` if the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Default for InMemoryToolCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ToolCache for InMemoryToolCache {
+    fn get(&self, tool_name: &str, args: &serde_json::Value) -> Option<serde_json::Value> {
+        let key = (tool_name.to_owned(), args.to_string());
+        self.inner.lock().ok()?.map.get(&key).cloned()
+    }
+
+    fn set(&self, tool_name: &str, args: &serde_json::Value, result: serde_json::Value) {
+        let key = (tool_name.to_owned(), args.to_string());
+        if let Ok(mut inner) = self.inner.lock() {
+            if !inner.map.contains_key(&key) {
+                inner.order.push_back(key.clone());
+            }
+            inner.map.insert(key, result);
+            if let Some(max) = self.max_entries {
+                while inner.map.len() > max {
+                    if let Some(oldest) = inner.order.pop_front() {
+                        inner.map.remove(&oldest);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ── ToolRegistry ──────────────────────────────────────────────────────────────
 
 /// Registry of available tools for the agent loop.
@@ -568,6 +703,22 @@ impl ToolRegistry {
 
         let result = spec.call(args.clone()).await;
 
+        // Update circuit breaker based on the tool's result.
+        // Tools that embed errors as JSON use {"ok": false}; treat those as
+        // circuit-breaker failures so the breaker can actually open.
+        #[cfg(feature = "orchestrator")]
+        if let Some(ref cb) = spec.circuit_breaker {
+            let is_failure = result
+                .get("ok")
+                .and_then(|v| v.as_bool())
+                .is_some_and(|ok| !ok);
+            if is_failure {
+                cb.record_failure();
+            } else {
+                cb.record_success();
+            }
+        }
+
         // Store result in cache.
         if let Some(ref cache) = self.cache {
             cache.set(name, &args, result.clone());
@@ -580,6 +731,19 @@ impl ToolRegistry {
     pub fn tool_names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()
     }
+
+    /// Return the number of registered tools.
+    pub fn tool_count(&self) -> usize {
+        self.tools.len()
+    }
+
+    /// Remove all registered tools.
+    ///
+    /// Useful for resetting the registry between test runs or for dynamic
+    /// agent reconfiguration.
+    pub fn clear(&mut self) {
+        self.tools.clear();
+    }
 }
 
 // ── ReActLoop ─────────────────────────────────────────────────────────────────
@@ -588,23 +752,57 @@ impl ToolRegistry {
 ///
 /// Case-insensitive; tolerates spaces around the colon.
 /// e.g. `Thought :`, `thought:`, `THOUGHT :` all match.
+///
+/// **Multi-line sections**: everything between a `Thought:` (or `Action:`)
+/// header and the next section header is included verbatim, so JSON arguments
+/// that span multiple lines are captured correctly.
 pub fn parse_react_step(text: &str) -> Result<ReActStep, AgentRuntimeError> {
-    let mut thought = String::new();
-    let mut action = String::new();
+    // Track which section we are currently appending into.
+    #[derive(PartialEq)]
+    enum Section { None, Thought, Action }
+
+    let mut thought_lines: Vec<&str> = Vec::new();
+    let mut action_lines: Vec<&str> = Vec::new();
+    let mut current = Section::None;
 
     for line in text.lines() {
         let trimmed = line.trim();
         let lower = trimmed.to_ascii_lowercase();
         if lower.starts_with("thought") {
             if let Some(colon_pos) = trimmed.find(':') {
-                thought = trimmed[colon_pos + 1..].trim().to_owned();
+                current = Section::Thought;
+                thought_lines.clear();
+                let first = trimmed[colon_pos + 1..].trim();
+                if !first.is_empty() {
+                    thought_lines.push(first);
+                }
+                continue;
             }
         } else if lower.starts_with("action") {
             if let Some(colon_pos) = trimmed.find(':') {
-                action = trimmed[colon_pos + 1..].trim().to_owned();
+                current = Section::Action;
+                action_lines.clear();
+                let first = trimmed[colon_pos + 1..].trim();
+                if !first.is_empty() {
+                    action_lines.push(first);
+                }
+                continue;
             }
+        } else if lower.starts_with("observation") {
+            // Stop accumulating when we hit Observation (model may include it).
+            current = Section::None;
+            continue;
+        }
+        // Continuation line — append to the current section.
+        match current {
+            Section::Thought => thought_lines.push(trimmed),
+            Section::Action => action_lines.push(trimmed),
+            Section::None => {}
         }
     }
+
+    let thought = thought_lines.join(" ");
+    let action = action_lines.join("\n").trim().to_owned();
 
     if thought.is_empty() && action.is_empty() {
         return Err(AgentRuntimeError::AgentLoop(
@@ -712,6 +910,29 @@ impl ReActLoop {
     pub fn register_tools(&mut self, specs: impl IntoIterator<Item = ToolSpec>) {
         for spec in specs {
             self.registry.register(spec);
+        }
+    }
+
+    /// Trim `context` to at most `max_chars` characters by dropping the oldest
+    /// Thought/Action/Observation turns from the **front** while preserving the
+    /// initial system-prompt + user-turn preamble.
+    ///
+    /// Turns are delineated by leading `\nThought:` markers.  If no second
+    /// turn boundary is found the context is left unchanged.
+    fn maybe_trim_context(context: &mut String, max_chars: usize) {
+        while context.len() > max_chars {
+            // Find the second occurrence of "\nThought:" so we preserve the
+            // preamble (everything up to the first turn) and drop only the
+            // oldest appended turn.
+            let first = context.find("\nThought:");
+            let second = first.and_then(|pos| {
+                context[pos + 1..].find("\nThought:").map(|p| pos + 1 + p)
+            });
+            if let Some(drop_until) = second {
+                context.drain(..drop_until);
+            } else {
+                break; // Only one turn (or none) — nothing safe to drop.
+            }
         }
     }
 
@@ -850,10 +1071,14 @@ impl ReActLoop {
                     if let Some(ref m) = self.metrics {
                         m.record_step_latency(step.step_duration_ms);
                     }
-                    context.push_str(&format!(
+                    let _ = write!(
+                        context,
                         "\nThought: {}\nAction: {}\nObservation: {}\n",
                         step.thought, step.action, step.observation
-                    ));
+                    );
+                    if let Some(max) = self.config.max_context_chars {
+                        Self::maybe_trim_context(&mut context, max);
+                    }
                     if let Some(ref obs) = self.observer {
                         obs.on_step(iteration, &step);
                     }
@@ -891,10 +1116,14 @@ impl ReActLoop {
             if let Some(ref m) = self.metrics {
                 m.record_step_latency(step.step_duration_ms);
             }
-            context.push_str(&format!(
+            let _ = write!(
+                context,
                 "\nThought: {}\nAction: {}\nObservation: {}\n",
                 step.thought, step.action, observation
-            ));
+            );
+            if let Some(max) = self.config.max_context_chars {
+                Self::maybe_trim_context(&mut context, max);
+            }
             if let Some(ref obs) = self.observer {
                 obs.on_step(iteration, &step);
             }

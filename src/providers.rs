@@ -149,6 +149,9 @@ pub struct AnthropicProvider {
     client: reqwest::Client,
     /// Semaphore bounding concurrent SSE background tasks.
     stream_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Maximum output tokens for `stream_complete`. Falls back to `MAX_TOKENS`
+    /// when `None`.
+    stream_max_tokens: Option<u32>,
 }
 
 #[cfg(feature = "anthropic")]
@@ -168,6 +171,7 @@ impl AnthropicProvider {
             stream_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(
                 Self::DEFAULT_STREAM_CONCURRENCY,
             )),
+            stream_max_tokens: None,
         }
     }
 
@@ -182,6 +186,7 @@ impl AnthropicProvider {
             stream_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(
                 Self::DEFAULT_STREAM_CONCURRENCY,
             )),
+            stream_max_tokens: None,
         }
     }
 
@@ -195,7 +200,20 @@ impl AnthropicProvider {
             api_url: Self::DEFAULT_API_URL.to_owned(),
             client: reqwest::Client::new(),
             stream_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(max)),
+            stream_max_tokens: None,
         }
+    }
+
+    /// Set the maximum output tokens used by [`stream_complete`].
+    ///
+    /// By default `stream_complete` uses the hard-coded `MAX_TOKENS` constant
+    /// (1024).  Call this method to override that value, e.g. when a task
+    /// requires longer streamed responses.
+    ///
+    /// [`stream_complete`]: AnthropicProvider::stream_complete
+    pub fn with_stream_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.stream_max_tokens = Some(max_tokens);
+        self
     }
 }
 
@@ -275,9 +293,10 @@ impl LlmProvider for AnthropicProvider {
         model: &str,
     ) -> Result<tokio::sync::mpsc::Receiver<Result<String, AgentRuntimeError>>, AgentRuntimeError>
     {
+        let max_tokens = self.stream_max_tokens.unwrap_or(Self::MAX_TOKENS);
         let body = serde_json::json!({
             "model": model,
-            "max_tokens": Self::MAX_TOKENS,
+            "max_tokens": max_tokens,
             "stream": true,
             "messages": [{ "role": "user", "content": prompt }]
         });

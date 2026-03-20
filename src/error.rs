@@ -80,6 +80,18 @@ pub enum AgentRuntimeError {
     },
 }
 
+impl From<serde_json::Error> for AgentRuntimeError {
+    fn from(e: serde_json::Error) -> Self {
+        AgentRuntimeError::AgentLoop(format!("JSON error: {e}"))
+    }
+}
+
+impl From<std::io::Error> for AgentRuntimeError {
+    fn from(e: std::io::Error) -> Self {
+        AgentRuntimeError::Persistence(format!("I/O error: {e}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

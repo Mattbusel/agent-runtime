@@ -11,6 +11,36 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.2.0] - 2026-03-20
+
+### Added
+
+- **`EpisodicStoreBuilder::try_per_agent_capacity`** (`memory.rs`) — non-panicking
+  alternative to `per_agent_capacity`; returns `Err(AgentRuntimeError::Memory)` when
+  `capacity == 0` instead of calling `assert!`.
+- **`EpisodicStore::try_with_per_agent_capacity`** (`memory.rs`) — non-panicking
+  alternative to `with_per_agent_capacity` for use in user-facing / library code.
+- **`AnthropicProvider::with_stream_max_tokens`** (`providers.rs`) — builder method to
+  override the hard-coded 1 024-token cap used by `stream_complete`.
+
+### Changed
+
+- **`MemoryId::new`** (`memory.rs`) — bare `debug_assert!` replaced with the same
+  `if id.is_empty() { debug_assert!(false, ...); tracing::warn!(...) }` pattern already
+  used by `AgentId::new`, so release builds emit a log warning instead of silently
+  proceeding.
+- **`EpisodicStore::recall`** (`memory.rs`) — replaced full O(n log n) sort with a
+  two-phase partial sort: `select_nth_unstable_by` (O(n)) followed by a sort of only
+  the top-`limit` elements (O(limit log limit)).  Reduces CPU work significantly when
+  `limit << n`.
+- **`ReActLoop` context formatting** (`agent.rs`) — replaced `context.push_str(&format!())`
+  with `write!(context, ...)` to avoid allocating a temporary `String` on every step.
+- **`AnthropicProvider::stream_complete`** (`providers.rs`) — `max_tokens` in the SSE
+  request body now uses `self.stream_max_tokens.unwrap_or(Self::MAX_TOKENS)` instead of
+  the hard-coded constant, honouring any value set via `with_stream_max_tokens`.
+
+---
+
 ## [1.1.0] - 2026-03-20
 
 ### Added

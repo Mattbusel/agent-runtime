@@ -396,6 +396,26 @@ impl CircuitBreaker {
         Ok(self.backend.get_failures(&self.service))
     }
 
+    /// Record a successful call, resetting the consecutive failure counter.
+    ///
+    /// Call this when a protected operation succeeds so the circuit can
+    /// transition back to `Closed` after a `HalfOpen` probe.
+    pub fn record_success(&self) {
+        self.backend.reset_failures(&self.service);
+        self.backend.clear_open_at(&self.service);
+    }
+
+    /// Record a failed call, incrementing the consecutive failure counter.
+    ///
+    /// Opens the circuit when the failure count reaches `threshold`.
+    pub fn record_failure(&self) {
+        let failures = self.backend.increment_failures(&self.service);
+        if failures >= self.threshold {
+            self.backend.set_open_at(&self.service, Instant::now());
+            tracing::info!("circuit opened for {} (manual record)", self.service);
+        }
+    }
+
     /// Execute an async fallible operation under the circuit breaker using an
     /// [`AsyncCircuitBreakerBackend`].
     ///
