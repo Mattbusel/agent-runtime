@@ -93,6 +93,11 @@ impl LatencyHistogram {
         self.total_count.load(Ordering::Relaxed)
     }
 
+    /// Return `true` if at least one sample has been recorded.
+    pub fn has_data(&self) -> bool {
+        self.count() > 0
+    }
+
     /// Estimate the p-th percentile latency in milliseconds from the histogram.
     ///
     /// `p` must be in `[0.0, 1.0]`.  Returns the **upper bound** of the first
@@ -1270,5 +1275,61 @@ mod tests {
         m.record_tool_failure("t");
         let snap = m.snapshot();
         assert!((snap.failure_rate() - 0.5).abs() < 1e-9);
+    }
+
+    // ── Round 20: success_rate / is_active / checkpoint_errors ────────────────
+
+    #[test]
+    fn test_success_rate_one_when_no_failures() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("x");
+        assert!((m.success_rate() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_success_rate_half_when_half_failed() {
+        let m = RuntimeMetrics::new();
+        m.record_tool_call("x");
+        m.record_tool_call("x");
+        m.record_tool_failure("x");
+        assert!((m.success_rate() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_success_rate_one_when_no_calls() {
+        let m = RuntimeMetrics::new();
+        // Vacuously all succeeded — no calls means success_rate = 1.0
+        assert!((m.success_rate() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_is_active_false_when_no_sessions() {
+        let m = RuntimeMetrics::new();
+        assert!(!m.is_active());
+    }
+
+    #[test]
+    fn test_is_active_true_when_session_active() {
+        let m = RuntimeMetrics::new();
+        m.active_sessions.fetch_add(1, Ordering::Relaxed);
+        assert!(m.is_active());
+        m.active_sessions.fetch_sub(1, Ordering::Relaxed);
+        assert!(!m.is_active());
+    }
+
+    #[test]
+    fn test_checkpoint_errors_increments() {
+        let m = RuntimeMetrics::new();
+        assert_eq!(m.checkpoint_errors(), 0);
+        m.checkpoint_errors.fetch_add(3, Ordering::Relaxed);
+        assert_eq!(m.checkpoint_errors(), 3);
+    }
+
+    #[test]
+    fn test_checkpoint_errors_reset_to_zero() {
+        let m = RuntimeMetrics::new();
+        m.checkpoint_errors.fetch_add(5, Ordering::Relaxed);
+        m.reset();
+        assert_eq!(m.checkpoint_errors(), 0);
     }
 }

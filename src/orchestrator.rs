@@ -569,6 +569,14 @@ impl CircuitBreaker {
         matches!(self.state(), Ok(CircuitState::HalfOpen))
     }
 
+    /// Return `true` if the circuit is in a state that allows calls to proceed.
+    ///
+    /// Calls are allowed in both `Closed` and `HalfOpen` states; only `Open`
+    /// fast-fails.
+    pub fn is_healthy(&self) -> bool {
+        !self.is_open()
+    }
+
     /// Return the configured consecutive-failure threshold.
     ///
     /// The circuit opens when `failure_count()` reaches this value.
@@ -974,6 +982,12 @@ impl Deduplicator {
     /// [`with_max_entries`]: Deduplicator::with_max_entries
     pub fn max_entries(&self) -> Option<usize> {
         self.max_entries
+    }
+
+    /// Return `true` if there are no in-flight requests.
+    pub fn is_idle(&self) -> Result<bool, AgentRuntimeError> {
+        let inner = timed_lock(&self.inner, "Deduplicator::is_idle");
+        Ok(inner.in_flight.is_empty())
     }
 
     /// Remove all in-flight entries and cached results.
@@ -2308,5 +2322,37 @@ mod tests {
     fn test_pipeline_has_stage_false_for_empty_pipeline() {
         let p = Pipeline::new();
         assert!(!p.has_stage("anything"));
+    }
+
+    // ── Round 20: Deduplicator::max_entries / RetryPolicy::delay_for ─────────
+
+    #[test]
+    fn test_deduplicator_max_entries_none_by_default() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        assert_eq!(d.max_entries(), None);
+    }
+
+    #[test]
+    fn test_deduplicator_max_entries_set_via_builder() {
+        let d = Deduplicator::new(Duration::from_secs(60))
+            .with_max_entries(50)
+            .unwrap();
+        assert_eq!(d.max_entries(), Some(50));
+    }
+
+    #[test]
+    fn test_retry_policy_delay_for_exponential_grows() {
+        let p = RetryPolicy::exponential(5, 100).unwrap();
+        // delay_for uses saturating_sub(1): attempt 1 => multiplier 1, attempt 2 => multiplier 2
+        let d1 = p.delay_for(1);
+        let d2 = p.delay_for(2);
+        assert!(d2 > d1, "exponential delay should grow: attempt 2 > attempt 1");
+    }
+
+    #[test]
+    fn test_retry_policy_delay_for_constant_stays_same() {
+        let p = RetryPolicy::constant(5, 200).unwrap();
+        assert_eq!(p.delay_for(0), p.delay_for(1));
+        assert_eq!(p.delay_for(1), p.delay_for(3));
     }
 }

@@ -11,6 +11,27 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.19.0] - 2026-03-20
+
+### Added
+
+- **`LatencyHistogram::has_data`** (`metrics.rs`) — `true` when at least one
+  sample has been recorded; guards percentile calls after a reset.
+- **`MetricsSnapshot::success_rate`** (`metrics.rs`) — `1.0 - failure_rate()`
+  convenience complement (also present in `RuntimeMetrics`).
+- **`MetricsSnapshot::tool_success_count`** (`metrics.rs`) — successful calls
+  for a named tool (`calls - failures`) with `saturating_sub` guard.
+- **`MetricsSnapshot::tool_failure_rate`** (`metrics.rs`) — per-tool failure
+  fraction; returns `0.0` if the tool has no recorded calls.
+- **`RuntimeMetrics::is_active`** (`metrics.rs`) — `true` when
+  `active_sessions > 0`; useful for health-check endpoints.
+- **`Deduplicator::is_idle`** (`orchestrator.rs`) — `true` when there are no
+  in-flight requests; convenient for test teardown and drain-wait loops.
+- **`CircuitBreaker::is_healthy`** (`orchestrator.rs`) — `true` in both
+  `Closed` and `HalfOpen` states (calls are allowed); `false` only when `Open`.
+
+---
+
 ## [1.18.0] - 2026-03-20
 
 ### Added
