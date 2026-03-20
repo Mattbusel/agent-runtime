@@ -544,6 +544,25 @@ impl GraphStore {
             .unwrap_or_default())
     }
 
+    /// Return `true` if there is at least one directed edge from `from` to `to`.
+    ///
+    /// Returns `false` when either entity does not exist or when no direct
+    /// relationship exists between the two.  To test reachability over multiple
+    /// hops use [`reachable_from`].
+    ///
+    /// [`reachable_from`]: GraphStore::reachable_from
+    pub fn has_edge(
+        &self,
+        from: &EntityId,
+        to: &EntityId,
+    ) -> Result<bool, AgentRuntimeError> {
+        let inner = recover_lock(self.inner.lock(), "GraphStore::has_edge");
+        Ok(inner
+            .adjacency
+            .get(from)
+            .map_or(false, |rels| rels.iter().any(|r| &r.to == to)))
+    }
+
     /// Return the `EntityId`s reachable from `id` in a single hop, sorted.
     ///
     /// Returns an empty `Vec` if the entity has no outgoing relationships or does not exist.
@@ -5409,5 +5428,41 @@ mod tests {
         g.add_relationship(Relationship::new("x", "z", "SAME", 0.5)).unwrap();
         let kinds = g.relationship_kinds_from(&EntityId::new("x")).unwrap();
         assert_eq!(kinds, vec!["SAME"]);
+    }
+
+    // ── Round 41 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_unique_relationship_types_returns_sorted_deduped_types() {
+        let g = GraphStore::new();
+        add(&g, "a"); add(&g, "b"); add(&g, "c");
+        g.add_relationship(Relationship::new("a", "b", "KNOWS", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("b", "c", "LIKES", 1.0)).unwrap();
+        g.add_relationship(Relationship::new("a", "c", "KNOWS", 0.5)).unwrap();
+        let types = g.unique_relationship_types().unwrap();
+        assert_eq!(types, vec!["KNOWS", "LIKES"]);
+    }
+
+    #[test]
+    fn test_unique_relationship_types_empty_graph_returns_empty() {
+        let g = GraphStore::new();
+        assert!(g.unique_relationship_types().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_avg_property_count_returns_correct_average() {
+        let g = GraphStore::new();
+        g.add_entity(Entity::new("a", "N")
+            .with_property("x", serde_json::json!(1))
+            .with_property("y", serde_json::json!(2))).unwrap();
+        g.add_entity(Entity::new("b", "N")).unwrap(); // 0 properties
+        // average = (2 + 0) / 2 = 1.0
+        assert!((g.avg_property_count().unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_property_count_empty_graph_returns_zero() {
+        let g = GraphStore::new();
+        assert_eq!(g.avg_property_count().unwrap(), 0.0);
     }
 }

@@ -4498,4 +4498,60 @@ mod tests {
         let session = make_session(vec![], 0);
         assert_eq!(session.step_count_above_duration_ms(0), 0);
     }
+
+    // ── Round 41 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_total_action_bytes_sums_action_lengths() {
+        let steps = vec![
+            make_step("t", "ab", "o"),    // 2
+            make_step("t", "cde", "o"),   // 3
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.total_action_bytes(), 5);
+    }
+
+    #[test]
+    fn test_total_action_bytes_empty_session_returns_zero() {
+        let session = make_session(vec![], 0);
+        assert_eq!(session.total_action_bytes(), 0);
+    }
+
+    #[test]
+    fn test_step_duration_variance_ms_computed_correctly() {
+        let mut steps = vec![
+            make_step("t", "a", "o"),
+            make_step("t", "b", "o"),
+        ];
+        steps[0].step_duration_ms = 10;
+        steps[1].step_duration_ms = 20;
+        let session = make_session(steps, 0);
+        // mean = 15, variance = ((10-15)^2 + (20-15)^2) / 2 = 25
+        assert!((session.step_duration_variance_ms() - 25.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_step_duration_variance_ms_zero_for_single_step() {
+        let session = make_session(vec![make_step("t", "a", "o")], 0);
+        assert_eq!(session.step_duration_variance_ms(), 0.0);
+    }
+
+    #[test]
+    fn test_steps_with_errors_returns_steps_containing_error() {
+        let steps = vec![
+            make_step("t", "a", "success"),
+            make_step("t", "b", "error: timeout"),
+            make_step("t", "c", "ok"),
+            make_step("t", "d", "Error: not found"),
+        ];
+        let session = make_session(steps, 0);
+        assert_eq!(session.steps_with_errors().len(), 2);
+    }
+
+    #[test]
+    fn test_steps_with_errors_empty_when_no_errors() {
+        let steps = vec![make_step("t", "a", "ok"), make_step("t", "b", "done")];
+        let session = make_session(steps, 0);
+        assert!(session.steps_with_errors().is_empty());
+    }
 }
