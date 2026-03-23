@@ -426,3 +426,9 @@ pub mod workflow_engine;
 
 /// Agent execution profiler for bottleneck detection: sliding windows, percentiles, global summaries.
 pub mod agent_profiler;
+
+/// Agent capability advertising, discovery, and matching: versioned capabilities, kind-based registry, query engine.
+pub mod capability_registry;
+
+/// Event store with projections and replay: append-only log, snapshots, CountProjection, TimelineProjection.
+pub mod event_sourcing;
