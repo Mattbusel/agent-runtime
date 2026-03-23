@@ -457,6 +457,12 @@ pub mod workflow_engine;
 /// Agent execution profiler for bottleneck detection: sliding windows, percentiles, global summaries.
 pub mod agent_profiler;
 
+/// Hot-loadable plugin interface with manifest parsing and lifecycle hooks.
+pub mod plugin_system;
+
+/// Distributed tracing spans and metrics aggregation.
+pub mod telemetry_collector;
+
 /// Agent capability advertising, discovery, and matching: versioned capabilities, kind-based registry, query engine.
 pub mod capability_registry;
 
