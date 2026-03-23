@@ -8,7 +8,7 @@
 [![Multi-Agent](https://img.shields.io/badge/multi--agent-bus%20%7C%20teams-blueviolet)](#multi-agent-message-bus)
 [![Streaming](https://img.shields.io/badge/inference-streaming-brightgreen)](#streaming-inference)
 
-`agent-runtime` is a batteries-included, async-first Rust crate for building production LLM agents. It unifies a ReAct (Thought-Action-Observation) loop, episodic and semantic memory with decay and cosine-similarity recall, a directed knowledge graph with centrality and community detection, an orchestration layer with circuit breakers and retry/backpressure, pluggable LLM providers with SSE streaming, optional file-based session checkpointing, intelligent memory compression for long-running agents, a peer-discovery registry, a **multi-agent message bus** with role-based routing, **agent teams** with Star/Mesh/Ring topologies and Majority/Pipeline/Parallel consensus, and **token-by-token streaming inference** with real-time callbacks — all in a single crate, driven by a compile-time typestate builder that makes misconfiguration a compiler error rather than a runtime panic.
+`agent-runtime` is a batteries-included, async-first Rust crate for building production LLM agents. It unifies a ReAct (Thought-Action-Observation) loop, a **Plan-Execute-Verify** structured agent loop, episodic and semantic memory with decay and cosine-similarity recall, **automatic background memory consolidation** via TF-IDF k-means clustering, a directed knowledge graph with centrality and community detection, an orchestration layer with circuit breakers and retry/backpressure, pluggable LLM providers with SSE streaming, optional file-based session checkpointing, intelligent memory compression for long-running agents, a peer-discovery registry, a **multi-agent message bus** with role-based routing, **agent teams** with Star/Mesh/Ring topologies and Majority/Pipeline/Parallel consensus, and **token-by-token streaming inference** with real-time callbacks — all in a single crate, driven by a compile-time typestate builder that makes misconfiguration a compiler error rather than a runtime panic.
 
 ---
 
@@ -458,6 +458,152 @@ async fn main() -> Result<(), AgentRuntimeError> {
 6. Per-tool `CircuitBreaker` (optional) fast-fails unhealthy tools and records structured error observations with `kind` classification (`not_found`, `transient`, `permanent`).
 7. On completion an `AgentSession` is returned; if a `PersistenceBackend` is configured, the final session and every per-step snapshot are saved atomically.
 8. `RuntimeMetrics` counters are updated atomically throughout.
+
+---
+
+## Plan-Execute-Verify Loop
+
+The `plan_execute` module provides a **structured three-phase agent loop** as a production-grade alternative to open-ended ReAct for well-defined multi-step workflows:
+
+```
+  Goal
+   |
+   v
++------------------+
+|  Plan Phase      |  LLM produces a numbered step list:
+|  (1 LLM call)    |  "1. Search web | tool:web_search | expected:results"
++--------+---------+  "2. Summarise  | tool:none       | expected:summary"
+         |
+         v
++------------------+
+|  Execute Phase   |  Steps run in sequence.
+|  (1 call/step)   |  Named tools are dispatched directly.
+|                  |  Unknown tools fall back to inference.
+|  StepStatus:     |
+|    Pending       |
+|    Running       |
+|    Completed(o)  |
+|    Failed(e)     |
+|    Skipped       |
++--------+---------+
+         |
+         v
++------------------+
+|  Verify Phase    |  LLM receives the full plan + all outputs.
+|  (1 LLM call)    |  Returns VerificationResult { achieved, confidence,
+|                  |  issues, raw_response }.
++------------------+
+```
+
+### Usage
+
+```rust
+use llm_agent_runtime::prelude::*;
+
+#[tokio::main]
+async fn main() -> Result<(), AgentRuntimeError> {
+    let runtime = AgentRuntime::builder()
+        .with_agent_config(AgentConfig::new(5, "claude-sonnet-4-6"))
+        .build();
+
+    let mut n = 0usize;
+    let (plan, verification) = runtime
+        .run_plan_execute(
+            AgentId::new("researcher"),
+            "Research the latest Rust async developments",
+            move |ctx: String| {
+                n += 1;
+                let step = n;
+                async move {
+                    if step == 1 {
+                        // Planning response — numbered steps.
+                        "1. Search Rust blog | tool:web_search | expected:recent posts\n\
+                         2. Summarise findings | tool:none | expected:summary\n"
+                            .to_string()
+                    } else if step == 2 {
+                        // Step 1 output (tool not registered → inference fallback).
+                        "Found: tokio 1.37, async-std 2.0, new stabilisations.".to_string()
+                    } else if step == 3 {
+                        // Step 2 output.
+                        "Summary: Rust async has matured significantly in 2025.".to_string()
+                    } else {
+                        // Verification.
+                        "ACHIEVED 0.92\nBoth steps completed with good output.".to_string()
+                    }
+                }
+            },
+        )
+        .await?;
+
+    println!("Plan: {} steps, {} succeeded", plan.step_count(), plan.completed_count());
+    println!("Goal achieved: {} (confidence: {:.0}%)", verification.achieved,
+             verification.confidence * 100.0);
+    Ok(())
+}
+```
+
+### `PlanExecuteConfig` options
+
+| Field | Default | Description |
+|---|---|---|
+| `max_steps` | `20` | Maximum steps to execute; extras are `Skipped` |
+| `stop_on_failure` | `true` | Halt on first failed step |
+| `system_prompt` | _see source_ | Injected into the planning prompt |
+
+---
+
+## Memory Consolidation
+
+Long-running agents accumulate hundreds of episodic memories that gradually become redundant.  The `consolidation` module provides a background Tokio task that automatically merges similar memories using **TF-IDF k-means clustering**.
+
+### How it works
+
+1. Every `run_interval_secs` (default: 5 minutes) the consolidator wakes up.
+2. For each tracked agent it fetches all episodic memories and computes a bag-of-words **TF-IDF embedding** for each one.
+3. It runs **k-means clustering** (deterministic farthest-point initialisation) to group similar memories.
+4. Clusters that meet the `min_cluster_size` threshold and whose older members exceed `max_age_secs` have their redundant entries merged into a single `ConsolidatedMemory` summary.
+5. The most-recent `keep_recent_per_cluster` items in each cluster are always preserved verbatim.
+
+### Metrics
+
+| Counter | Description |
+|---|---|
+| `consolidation_runs_total` | Total number of consolidation passes completed |
+| `memories_consolidated_total` | Total memories merged or archived |
+
+### Usage
+
+```rust
+use llm_agent_runtime::consolidation::{ConsolidationPolicy, MemoryConsolidator};
+use llm_agent_runtime::memory::EpisodicStore;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() {
+    let store = Arc::new(EpisodicStore::new());
+    // … populate the store …
+
+    let policy = ConsolidationPolicy {
+        min_cluster_size: 3,
+        max_age_secs: 3600,       // archive memories older than 1 hour
+        similarity_threshold: 0.65,
+        run_interval_secs: 300,   // run every 5 minutes
+        k_clusters: 8,
+        kmeans_iterations: 10,
+        keep_recent_per_cluster: 2,
+    };
+
+    let consolidator = MemoryConsolidator::new(Arc::clone(&store), policy);
+    let metrics = consolidator.metrics();
+
+    // Spawn as a background task — runs indefinitely.
+    tokio::spawn(consolidator.run());
+
+    // Periodically inspect consolidated summaries.
+    // let summaries = consolidator.take_consolidated();
+    println!("Runs: {}", metrics.runs());
+}
+```
 
 ---
 
