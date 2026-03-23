@@ -408,3 +408,9 @@ pub mod error_recovery;
 
 /// Topological task dependency resolution: Kahn's algorithm, critical path, parallelism factor, resource conflicts.
 pub mod dependency_resolver;
+
+/// Agent health monitoring, resource snapshots, performance metrics, and anomaly detection.
+pub mod agent_monitor;
+
+/// Structured inter-agent communication protocol: typed messages, CRC-32 checksums, sequence tracking.
+pub mod communication_protocol;
