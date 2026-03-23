@@ -3177,6 +3177,95 @@ impl AgentRuntime {
         let orchestrator = crate::team::TeamOrchestrator::new(config);
         orchestrator.run(infer).await
     }
+
+    // ── Plan-Execute-Verify ────────────────────────────────────────────────────
+
+    /// Run a full **Plan → Execute → Verify** loop for `goal`.
+    ///
+    /// Unlike [`run_agent`], which uses an open-ended ReAct loop, this method
+    /// first asks the LLM to produce a numbered multi-step plan, executes each
+    /// step in sequence (dispatching to registered tools when named), and
+    /// finally calls the LLM once more to verify whether the goal was achieved.
+    ///
+    /// The `infer` closure is called:
+    /// 1. Once for the planning phase (planning prompt → numbered step list).
+    /// 2. Once per step that references no registered tool (step prompt → output).
+    /// 3. Once for the verification phase (verification prompt → judgement).
+    ///
+    /// Registered tools are matched by name against the tool names in each plan
+    /// step.  Unknown tool names fall back to inference.
+    ///
+    /// # Arguments
+    ///
+    /// * `agent_id` — identifier for this agent (used in logs and traces).
+    /// * `goal`     — the high-level goal the plan should achieve.
+    /// * `infer`    — async inference closure; same signature as [`run_agent`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentRuntimeError`] if the LLM returns an empty plan (no
+    /// parseable numbered steps).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use llm_agent_runtime::prelude::*;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), AgentRuntimeError> {
+    /// let runtime = AgentRuntime::builder()
+    ///     .with_agent_config(AgentConfig::new(5, "stub"))
+    ///     .build();
+    ///
+    /// let mut n = 0usize;
+    /// let (plan, verification) = runtime
+    ///     .run_plan_execute(
+    ///         AgentId::new("planner"),
+    ///         "Double the number 21",
+    ///         move |_ctx: String| {
+    ///             n += 1;
+    ///             let step = n;
+    ///             async move {
+    ///                 if step == 1 {
+    ///                     "1. Use the double tool | tool:none | expected:42\n".to_string()
+    ///                 } else if step == 2 {
+    ///                     "42".to_string()
+    ///                 } else {
+    ///                     "ACHIEVED 0.99".to_string()
+    ///                 }
+    ///             }
+    ///         },
+    ///     )
+    ///     .await?;
+    ///
+    /// println!("Steps: {}, achieved: {}", plan.step_count(), verification.achieved);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// [`run_agent`]: AgentRuntime::run_agent
+    pub async fn run_plan_execute<F, Fut>(
+        &self,
+        agent_id: AgentId,
+        goal: &str,
+        infer: F,
+    ) -> Result<
+        (
+            crate::plan_execute::Plan,
+            crate::plan_execute::VerificationResult,
+        ),
+        AgentRuntimeError,
+    >
+    where
+        F: Fn(String) -> Fut,
+        Fut: std::future::Future<Output = String>,
+    {
+        let agent = crate::plan_execute::PlanExecuteAgent::new(
+            agent_id,
+            crate::plan_execute::PlanExecuteConfig::default(),
+        );
+        agent.run(goal, infer, &self.tools).await
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

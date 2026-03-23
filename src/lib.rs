@@ -73,6 +73,15 @@ pub mod types;
 pub mod memory_compression;
 pub mod discovery;
 
+/// High-level memory compression: temporal windowing, semantic dedup, importance filter.
+pub mod memory_compress;
+
+/// Agent swarm coordination v2: subtask decomposition, convergence threshold, result synthesis.
+pub mod swarm_v2;
+
+/// Skill marketplace: global registry, filesystem loader, task-based matcher, pipeline composer.
+pub mod marketplace;
+
 /// Multi-turn conversation history with automatic summarisation.
 pub mod conversation;
 
@@ -234,6 +243,26 @@ pub use bus::{
 // Team orchestration re-exports.
 pub use team::{
     AgentTeam, CommunicationTopology, ConsensusStrategy, TeamConfig, TeamOrchestrator, TeamResult,
+};
+
+// Swarm coordination v2 re-exports.
+pub use swarm_v2::{
+    AgentSwarm, SubTask, SubTaskResult, SubTaskStatus, SwarmConfig as SwarmConfigV2,
+    SwarmOrchestrator, SwarmResult as SwarmResultV2, TaskSplitStrategy,
+    converge_results,
+};
+
+// High-level memory compression re-exports.
+pub use memory_compress::{
+    CompressedEpisode, CompressorConfig,
+    ImportanceFilter, MemoryCompressor as HighLevelMemoryCompressor,
+    SemanticDedup, TemporalCompression,
+};
+
+// Marketplace re-exports.
+pub use marketplace::{
+    Skill as MarketplaceSkill, SkillComposer, SkillLoader, SkillMatch, SkillMatcher,
+    SkillPipeline, SkillRegistry,
 };
 
 // World model re-exports.

@@ -85,6 +85,11 @@ pub enum AgentRuntimeError {
 }
 
 impl AgentRuntimeError {
+    /// Return `true` if this is an `Internal` error.
+    pub fn is_internal(&self) -> bool {
+        matches!(self, Self::Internal(_))
+    }
+
     /// Return `true` if this is a `CircuitOpen` error.
     pub fn is_circuit_open(&self) -> bool {
         matches!(self, Self::CircuitOpen { .. })
