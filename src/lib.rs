@@ -372,3 +372,12 @@ pub mod consensus;
 
 /// Agent state snapshotting and restoration: CRC-32-verified snapshots, bounded deque store, Snapshottable trait.
 pub mod snapshot;
+
+/// Shadow traffic duplicator: deterministic sampling, divergence scoring, aggregated reports.
+pub mod shadow_traffic;
+
+/// Resource budget manager: per-task token/tool-call/time/memory limits with Prometheus-style metrics.
+pub mod resource_manager;
+
+/// Agent-to-agent negotiation protocol: Greedy, FairShare, PriorityBased, and Vickrey auction allocation.
+pub mod negotiation;
