@@ -211,6 +211,12 @@ pub mod persistence;
 #[cfg(feature = "providers")]
 pub mod providers;
 
+/// Optimistic distributed locking with versioning and TTL-based lease management.
+pub mod distributed_lock;
+
+/// Fault-tolerant agent supervisor tree: OneForOne/OneForAll/RestForOne restart strategies.
+pub mod agent_supervisor;
+
 // ── Top-level re-exports ────────────────────────────────────────────────────
 
 pub use error::AgentRuntimeError;
