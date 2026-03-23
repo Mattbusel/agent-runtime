@@ -384,3 +384,9 @@ pub mod resource_manager;
 
 /// Agent-to-agent negotiation protocol: Greedy, FairShare, PriorityBased, and Vickrey auction allocation.
 pub mod negotiation;
+
+/// Rule-based goal decomposition: conjunctions, iterative patterns, topological subtask ordering.
+pub mod goal_decomposer;
+
+/// BM25 full-text retrieval over agent memory entries with tag-based filtering.
+pub mod memory_retrieval;
