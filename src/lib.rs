@@ -456,3 +456,9 @@ pub mod state_machine;
 
 /// Peer-to-peer agent mesh with gossip protocol: join/leave, directed/broadcast messaging, version-based state merge.
 pub mod agent_mesh;
+
+/// DAG-based task dependency system: cycle detection, topological sort, critical path, and parallel execution grouping.
+pub mod task_dependency_graph;
+
+/// Multi-agent coordination primitives: barriers, shared counters, and priority-based leader election.
+pub mod agent_coordinator;
