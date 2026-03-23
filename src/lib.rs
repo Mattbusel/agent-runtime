@@ -120,6 +120,12 @@ pub mod planner;
 pub mod runtime;
 pub mod sandbox;
 
+/// Finite state machine for agent lifecycle management: guarded transitions, history, error recovery.
+pub mod fsm;
+
+/// Sandboxed process execution environment: resource limits, timeout enforcement, MockSandbox for testing.
+pub mod exec_sandbox;
+
 /// Agent workflow engine: declarative step graphs with branching, parallelism, and loops.
 pub mod workflow;
 
