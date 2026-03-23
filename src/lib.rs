@@ -126,6 +126,12 @@ pub mod planner;
 pub mod runtime;
 pub mod sandbox;
 
+/// Tool registration and execution tracking: schemas, invocation history, stats, and keyword-based discovery.
+pub mod tool_registry;
+
+/// Agent execution sandbox with resource limits: memory, CPU, output, file-read, and network-call budgets.
+pub mod agent_sandbox;
+
 /// Finite state machine for agent lifecycle management: guarded transitions, history, error recovery.
 pub mod fsm;
 
