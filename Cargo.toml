@@ -128,6 +128,8 @@ criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1"
 # wiremock: mock HTTP server for provider integration tests
 wiremock = "0.6"
+# tempfile: temporary directories/files for checkpoint and persistence tests
+tempfile = "3"
 
 # ── Release profile (production) ────────────────────────────────────────────────
 [profile.release]

@@ -1217,6 +1217,113 @@ with no meaningful overlap.
 
 ---
 
+---
+
+## Tool Validation
+
+The `tool_validator` module provides JSON-schema-like validation of tool call
+arguments before execution, helping catch malformed inputs at the boundary
+rather than inside handler logic.
+
+### Key Types
+
+| Type | Role |
+|---|---|
+| `ToolSchema` | Describes one tool: name, description, and a list of `ParameterSpec`s |
+| `ParameterSpec` | One parameter: name, `ParameterTypeHint`, required flag, description |
+| `ParameterTypeHint` | `String`, `Number`, `Boolean`, `Array`, `Object`, or `Any` |
+| `ToolCall` | A concrete invocation: `tool_name` + JSON `arguments` |
+| `SchemaValidator` | Registry of schemas; validates a `ToolCall` against the matching schema |
+| `ValidationError` | `MissingRequired(String)`, `TypeMismatch { param, expected, got }`, `UnknownTool(String)` |
+
+### Validation Rules
+
+1. `tool_name` must match a registered schema (`UnknownTool` otherwise).
+2. Every required parameter must be present (`MissingRequired` otherwise).
+3. Parameters that are present are type-checked against their `ParameterTypeHint` (`TypeMismatch` otherwise).
+4. Extra keys not declared in the schema are silently ignored.
+
+### Example
+
+```rust
+use llm_agent_runtime::tool_validator::{
+    ParameterSpec, ParameterTypeHint, SchemaValidator, ToolCall, ToolSchema,
+};
+use serde_json::json;
+
+// Declare the schema once.
+let schema = ToolSchema::new("search", "Web search")
+    .with_param(ParameterSpec::required("query", ParameterTypeHint::String, "Search query"))
+    .with_param(ParameterSpec::optional("limit", ParameterTypeHint::Number, "Max results"));
+
+let mut validator = SchemaValidator::new();
+validator.register(schema);
+
+// Validate before dispatching.
+let call = ToolCall::new("search", json!({ "query": "rust async", "limit": 10 }));
+validator.validate(&call).expect("valid call");
+
+// Collect all errors at once (does not short-circuit).
+let errors = validator.validate_all(&call);
+assert!(errors.is_empty());
+```
+
+---
+
+## Agent Metrics
+
+The `agent_metrics` module provides structured, per-agent metrics tracking for
+multi-agent systems.  Unlike the crate-level `RuntimeMetrics` (which aggregates
+across all sessions), `AgentMetrics` tracks each agent independently.
+
+### Key Types
+
+| Type | Role |
+|---|---|
+| `AgentMetrics` | Mutable live counters for one agent: steps, tokens, tool calls, latency, memory |
+| `AgentMetricsSnapshot` | Serialisable (`serde`) point-in-time capture of `AgentMetrics` |
+| `AgentMetricsRegistry` | `Arc<Mutex<HashMap<String, AgentMetrics>>>` — thread-safe multi-agent registry |
+
+### Tracked Fields
+
+| Field | Description |
+|---|---|
+| `total_steps` | ReAct / plan-execute steps completed |
+| `total_tokens_in` | Input tokens consumed across all LLM calls |
+| `total_tokens_out` | Output tokens produced across all LLM calls |
+| `tool_calls_made` | Tool calls dispatched (successful + failed) |
+| `tool_call_failures` | Tool calls that returned an error |
+| `avg_step_latency_ms` | Running incremental mean of per-step latency |
+| `peak_memory_kb` | Highest memory sample observed, in KB |
+| `session_start` | `Instant` at which the metrics object was created |
+
+### Example
+
+```rust
+use llm_agent_runtime::agent_metrics::AgentMetricsRegistry;
+
+// Registry is Arc-backed: cheap to clone, safe to share across tasks.
+let registry = AgentMetricsRegistry::new();
+let r2 = registry.clone(); // shares the same data
+
+// Record activity from any task.
+registry.record_step("agent-1", 45 /* ms */);
+registry.record_step_with_memory("agent-1", 30, 2048 /* KB */);
+registry.record_tool_call("agent-1", false /* success */);
+registry.record_tool_call("agent-1", true  /* failure */);
+registry.record_tokens("agent-1", 512, 128);
+
+// Snapshot is Serialize/Deserialize — log it, store it, or send it over the wire.
+let snap = registry.snapshot("agent-1").expect("agent was registered");
+println!("steps={} failure_rate={:.2}", snap.total_steps, snap.failure_rate);
+
+// Aggregate view across all agents.
+let all = registry.snapshot_all();
+println!("{} agents tracked", all.len());
+```
+
+---
+
 ## Contributing
 
 Contributions are welcome. Please follow these guidelines:
@@ -1235,3 +1342,165 @@ Contributions are welcome. Please follow these guidelines:
 7. **Changelog** — add a line to `CHANGELOG.md` under the `Unreleased` section (create the file if it does not exist).
 
 For bug reports, please include the `cargo --version`, `rustc --version`, your `Cargo.toml` feature flags, and a minimal reproducible example.
+
+---
+
+## Tool Registry
+
+The built-in `ToolRegistry` lets you register named async tools and call them by name.
+Three tools ship out of the box: `echo`, `calculator`, and `timestamp`.
+
+```
+  ┌──────────────────────────────────────────────────────────┐
+  │                     ToolRegistry                         │
+  │                                                          │
+  │  register(Arc<dyn Tool>)                                 │
+  │  ┌──────────┐  ┌──────────────┐  ┌──────────────────┐   │
+  │  │   echo   │  │  calculator  │  │   timestamp      │   │
+  │  └──────────┘  └──────────────┘  └──────────────────┘   │
+  │                                                          │
+  │  call(name, input) ──► Result<String, ToolError>         │
+  │  list()            ──► Vec<ToolInfo>                     │
+  │  with_timeout(dur) ──► wraps every call                  │
+  └──────────────────────────────────────────────────────────┘
+```
+
+### Usage
+
+```rust
+use std::sync::Arc;
+use llm_agent_runtime::tools::{ToolRegistry, EchoTool, CalculatorTool, TimestampTool};
+
+let mut registry = ToolRegistry::new();
+registry.register(Arc::new(EchoTool));
+registry.register(Arc::new(CalculatorTool));
+registry.register(Arc::new(TimestampTool));
+
+// Add a timeout
+let registry = registry.with_timeout(std::time::Duration::from_secs(5));
+
+// Call a tool
+tokio::runtime::Runtime::new().unwrap().block_on(async {
+    let result = registry.call("echo", "hello").await.unwrap();
+    assert_eq!(result, "hello");
+
+    let sum = registry.call("calculator", "(2 + 3) * 4").await.unwrap();
+    assert_eq!(sum, "20");
+
+    let ts = registry.call("timestamp", "").await.unwrap();
+    println!("Current UTC: {ts}"); // e.g. "2026-03-22T10:00:00Z"
+
+    // Inspect per-tool stats
+    for info in registry.list().await {
+        println!("{}: {} calls, {} errors, {:.2}ms avg",
+            info.name, info.call_count, info.error_count, info.avg_latency_ms);
+    }
+});
+```
+
+### Custom tools
+
+```rust
+use llm_agent_runtime::tools::{Tool, ToolError};
+use async_trait::async_trait;
+
+struct UppercaseTool;
+
+#[async_trait]
+impl Tool for UppercaseTool {
+    fn name(&self) -> &str { "uppercase" }
+    fn description(&self) -> &str { "Converts input to uppercase." }
+    async fn call(&self, input: &str) -> Result<String, ToolError> {
+        Ok(input.to_uppercase())
+    }
+}
+```
+
+### Accessing the registry from AgentRuntime
+
+```rust
+use llm_agent_runtime::{AgentRuntime, AgentConfig};
+use std::sync::Arc;
+
+let runtime = AgentRuntime::builder()
+    .with_agent_config(AgentConfig::new(5, "my-model"))
+    .build();
+
+// Access the registry
+let registry = runtime.tool_registry();
+```
+
+---
+
+## Agent Checkpointing
+
+`CheckpointManager` wraps a pluggable `CheckpointStore` with auto-checkpointing
+and per-agent rotation of old checkpoints.
+
+```
+  ┌─────────────────────────────────────────────────────────────┐
+  │                   CheckpointManager                         │
+  │                                                             │
+  │  maybe_checkpoint(agent_id, step, memory, ctx, force)       │
+  │       │                                                     │
+  │       ▼  (every N steps, or force=true)                     │
+  │  ┌──────────────────────────┐                               │
+  │  │     CheckpointStore      │◄──── InMemoryCheckpointStore  │
+  │  │  save / load / list /    │◄──── FileCheckpointStore      │
+  │  │  delete                  │◄──── (custom implementation)  │
+  │  └──────────────────────────┘                               │
+  │                                                             │
+  │  Rotation: keeps ≤ max_checkpoints per agent                │
+  │  (oldest by created_at deleted automatically)               │
+  └─────────────────────────────────────────────────────────────┘
+```
+
+### In-memory store (testing)
+
+```rust
+use std::sync::Arc;
+use llm_agent_runtime::checkpoint::{
+    CheckpointManager, InMemoryCheckpointStore, MemoryEntry,
+};
+
+let store = Arc::new(InMemoryCheckpointStore::new());
+let mgr = CheckpointManager::new(store, /* interval_steps */ 5, /* max_checkpoints */ 10);
+
+tokio::runtime::Runtime::new().unwrap().block_on(async {
+    // Auto-checkpoint at steps 5, 10, 15, ...
+    mgr.maybe_checkpoint(
+        "agent-1", 5,
+        vec![MemoryEntry { key: "task".into(), value: "summarise doc".into() }],
+        "step 5 context",
+        false, // not forced
+    ).await.unwrap();
+
+    // Load the latest checkpoint
+    if let Some(cp) = mgr.load_latest("agent-1").await.unwrap() {
+        println!("Restored step {} for {}", cp.step, cp.agent_id);
+    }
+});
+```
+
+### File store (production)
+
+```rust
+use std::sync::Arc;
+use llm_agent_runtime::checkpoint::{CheckpointManager, FileCheckpointStore};
+
+let store = Arc::new(FileCheckpointStore::new("/var/lib/my-agent/checkpoints"));
+let mgr = CheckpointManager::new(store, 10, 5);
+```
+
+### Accessing the checkpoint manager from AgentRuntime
+
+```rust
+use llm_agent_runtime::{AgentRuntime, AgentConfig};
+
+let runtime = AgentRuntime::builder()
+    .with_agent_config(AgentConfig::new(5, "my-model"))
+    .build();
+
+// Access the checkpoint manager
+let mgr = runtime.checkpoint();
+```

@@ -2513,6 +2513,18 @@ impl AgentRuntimeBuilder<HasConfig> {
         #[allow(clippy::unwrap_used)]
         let agent_config = self.agent_config.unwrap();
 
+        // Build a default tool registry pre-loaded with the three built-in tools.
+        let mut tool_registry = crate::tools::ToolRegistry::new();
+        tool_registry.register(Arc::new(crate::tools::EchoTool));
+        tool_registry.register(Arc::new(crate::tools::CalculatorTool));
+        tool_registry.register(Arc::new(crate::tools::TimestampTool));
+
+        // Build a default checkpoint manager backed by an in-memory store,
+        // checkpointing every 10 steps, keeping up to 5 per agent.
+        let cp_store: Arc<dyn crate::checkpoint::CheckpointStore> =
+            Arc::new(crate::checkpoint::InMemoryCheckpointStore::new());
+        let checkpoint_manager = crate::checkpoint::CheckpointManager::new(cp_store, 10, 5);
+
         AgentRuntime {
             #[cfg(feature = "memory")]
             memory: self.memory,
@@ -2530,6 +2542,8 @@ impl AgentRuntimeBuilder<HasConfig> {
                 .unwrap_or_else(|| Arc::new(CharDivTokenEstimator)),
             #[cfg(feature = "persistence")]
             checkpoint_backend: self.checkpoint_backend,
+            tool_registry,
+            checkpoint_manager,
         }
     }
 }
@@ -2582,6 +2596,10 @@ pub struct AgentRuntime {
     #[cfg(feature = "persistence")]
     checkpoint_backend: Option<Arc<dyn crate::persistence::PersistenceBackend>>,
     token_estimator: Arc<dyn TokenEstimator>,
+    /// Tool registry for looking up and calling named tools.
+    tool_registry: crate::tools::ToolRegistry,
+    /// Checkpoint manager for auto-saving and loading agent state.
+    checkpoint_manager: crate::checkpoint::CheckpointManager,
 }
 
 impl std::fmt::Debug for AgentRuntime {
@@ -2596,6 +2614,8 @@ impl std::fmt::Debug for AgentRuntime {
         s.field("tools", &self.tools.len());
         #[cfg(feature = "persistence")]
         s.field("checkpoint_backend", &self.checkpoint_backend.is_some());
+        s.field("tool_registry", &self.tool_registry);
+        s.field("checkpoint_manager", &self.checkpoint_manager);
         s.finish()
     }
 }
@@ -2616,6 +2636,20 @@ impl AgentRuntime {
     /// Return a shared reference to the runtime metrics.
     pub fn metrics(&self) -> Arc<RuntimeMetrics> {
         Arc::clone(&self.metrics)
+    }
+
+    /// Return a reference to the tool registry.
+    ///
+    /// Use this to call registered tools or inspect per-tool statistics.
+    pub fn tool_registry(&self) -> &crate::tools::ToolRegistry {
+        &self.tool_registry
+    }
+
+    /// Return a reference to the checkpoint manager.
+    ///
+    /// Use this to save and restore agent state, or to configure auto-checkpointing.
+    pub fn checkpoint(&self) -> &crate::checkpoint::CheckpointManager {
+        &self.checkpoint_manager
     }
 
     /// Run the agent loop for the given prompt.

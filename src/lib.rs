@@ -119,6 +119,12 @@ pub mod metrics;
 pub mod planner;
 pub mod runtime;
 pub mod sandbox;
+
+/// Tool registry: named async tools with call-count, error-count, and latency tracking.
+pub mod tools;
+
+/// Agent checkpointing: save and restore agent state via in-memory or file-backed stores.
+pub mod checkpoint;
 pub mod streaming;
 /// Multi-agent team orchestration with configurable topology and consensus.
 pub mod team;
@@ -153,6 +159,12 @@ pub mod goals;
 
 /// Cognitive load monitor: tracks active goals, reasoning depth, and memory pressure.
 pub mod cognitive_load;
+
+/// JSON-schema-like validation of tool call arguments before execution.
+pub mod tool_validator;
+
+/// Structured per-agent metrics tracking for multi-agent systems.
+pub mod agent_metrics;
 
 #[cfg(feature = "persistence")]
 pub mod persistence;
@@ -286,4 +298,23 @@ pub use goals::{Goal, GoalId, GoalPriority, GoalStatus, GoalStore};
 // Cognitive load monitor re-exports.
 pub use cognitive_load::{
     CognitiveLoadConfig, CognitiveLoadMonitor, CognitiveLoadSnapshot, LoadAction,
+};
+
+// Tool validator re-exports.
+pub use tool_validator::{
+    ParameterSpec, ParameterTypeHint, SchemaValidator, ToolCall, ToolSchema, ValidationError,
+};
+
+// Agent metrics re-exports.
+pub use agent_metrics::{AgentMetrics, AgentMetricsRegistry, AgentMetricsSnapshot};
+
+// Tool registry re-exports.
+pub use tools::{
+    CalculatorTool, EchoTool, TimestampTool, Tool, ToolError, ToolInfo, ToolRegistry,
+};
+
+// Checkpoint re-exports.
+pub use checkpoint::{
+    AgentCheckpoint, CheckpointError, CheckpointManager, CheckpointStore,
+    FileCheckpointStore, InMemoryCheckpointStore, MemoryEntry,
 };
