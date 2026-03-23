@@ -70,6 +70,12 @@ pub mod error;
 pub mod prelude;
 pub mod types;
 
+/// Typed publish/subscribe event bus for inter-agent communication: topics, wildcard subscriptions, filtered streams.
+pub mod event_bus;
+
+/// Agent capability registry and negotiation: versioned capabilities, registry, set intersection.
+pub mod capability;
+
 pub mod memory_compression;
 pub mod discovery;
 
