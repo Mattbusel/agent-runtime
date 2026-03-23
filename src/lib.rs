@@ -396,3 +396,9 @@ pub mod plan_executor;
 
 /// Context builder: multi-source chunk aggregation, relevance filtering, dedup, and token-budgeted selection.
 pub mod context_builder;
+
+/// Capability-based registry of available agents with heartbeat tracking and task matching.
+pub mod agent_registry;
+
+/// Lightweight in-process pub/sub message bus with topic wildcards, TTL, and dead-letter queue.
+pub mod message_bus;
