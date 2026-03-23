@@ -153,6 +153,9 @@ pub mod parallel_tools;
 /// Agent self-reflection: score reasoning after each ReAct cycle and retry on low scores.
 pub mod reflection;
 
+/// Compose simple tools into higher-order compound tools with Sequential, Parallel, Conditional, and Pipeline strategies.
+pub mod tool_composer;
+
 /// Named, parameterised skill sequences definable in TOML.
 pub mod skills;
 
