@@ -366,3 +366,9 @@ pub mod policy;
 
 /// Distributed tracing context propagation: W3C Trace Context headers, task-local storage, timed spans.
 pub mod tracing_context;
+
+/// Multi-agent voting and consensus: proposals, weighted rules, tally, and outcome resolution.
+pub mod consensus;
+
+/// Agent state snapshotting and restoration: CRC-32-verified snapshots, bounded deque store, Snapshottable trait.
+pub mod snapshot;
