@@ -223,6 +223,12 @@ pub mod plan_validator;
 /// Entity-relationship knowledge graph with BFS traversal, transitive closure, IsA inference, and connected-component stats.
 pub mod knowledge_graph;
 
+/// Circuit breaker for service call protection: rolling window, Closed/Open/HalfOpen state machine.
+pub mod circuit_breaker;
+
+/// In-memory bounded message queue with priority ordering and optional TTL expiry.
+pub mod message_queue;
+
 // ── Top-level re-exports ────────────────────────────────────────────────────
 
 pub use error::AgentRuntimeError;
