@@ -402,3 +402,9 @@ pub mod agent_registry;
 
 /// Lightweight in-process pub/sub message bus with topic wildcards, TTL, and dead-letter queue.
 pub mod message_bus;
+
+/// Intelligent error recovery strategies: typed policies, retry/fallback/circuit-break/escalate outcomes, rate caps.
+pub mod error_recovery;
+
+/// Topological task dependency resolution: Kahn's algorithm, critical path, parallelism factor, resource conflicts.
+pub mod dependency_resolver;
