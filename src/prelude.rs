@@ -55,3 +55,14 @@ pub use crate::distributed::{CoordinatorConfig, DistributedCoordinator, WorkItem
 
 #[cfg(feature = "otel")]
 pub use crate::telemetry::{OtelTracer, ToolCallSpan};
+
+pub use crate::bus::{AgentBus, AgentMessage, AgentRole, AgentTarget, BusError, BusStats, MessageId};
+
+pub use crate::team::{
+    AgentTeam, CommunicationTopology, ConsensusStrategy, TeamConfig, TeamOrchestrator, TeamResult,
+};
+
+pub use crate::streaming::{
+    AgentEvent, AgentEventStream, InferenceToken, StreamBroadcaster, StreamingCallbacks,
+    StreamingInference, StreamingReActLoop, StreamingSession, StreamingStep, TokenStream,
+};

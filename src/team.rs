@@ -471,7 +471,7 @@ impl TeamOrchestrator {
         let mut handles = Vec::with_capacity(all.len());
         for agent_id in &all {
             let id = (*agent_id).clone();
-            let prompt = format!("[Team task] {task}\n[Your role] {}", self.config.role_for(id));
+            let prompt = format!("[Team task] {task}\n[Your role] {}", self.config.role_for(&id));
             let infer_clone = infer.clone();
             handles.push(tokio::spawn(async move {
                 let answer = infer_clone(id.clone(), prompt).await;
@@ -539,13 +539,13 @@ impl TeamOrchestrator {
             let id = (*agent_id).clone();
             let prompt = format!(
                 "[Team task] {task}\n[Previous context] {context}\n[Your role] {}",
-                self.config.role_for(id)
+                self.config.role_for(&id)
             );
             let infer_clone = infer.clone();
             let answer = infer_clone(id.clone(), prompt).await;
 
             // Route to next agents via the bus.
-            let targets = self.targets_for_topology(team, id);
+            let targets = self.targets_for_topology(team, &id);
             for target in targets {
                 let msg = AgentMessage::new(id.clone(), target, answer.clone());
                 let _ = bus.send(msg);

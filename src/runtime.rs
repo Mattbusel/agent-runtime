@@ -3080,6 +3080,103 @@ impl AgentRuntime {
         })
         .await
     }
+
+    // ── Multi-agent bus ────────────────────────────────────────────────────────
+
+    /// Create a new [`AgentBus`] scoped to this runtime's configuration.
+    ///
+    /// The returned bus is independent — call [`AgentBus::subscribe`] on it to
+    /// add agents, then [`AgentBus::send`] to route messages.  The runtime
+    /// does not hold a reference to the bus; share it yourself via `Arc` or by
+    /// passing it directly to tasks.
+    ///
+    /// # Arguments
+    /// * `capacity` — broadcast channel buffer size (messages held before slow
+    ///   receivers start lagging).  A value of `256` is a good starting point.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use llm_agent_runtime::prelude::*;
+    /// use llm_agent_runtime::bus::{AgentMessage, AgentTarget};
+    ///
+    /// let runtime = AgentRuntime::builder()
+    ///     .with_agent_config(AgentConfig::new(5, "stub"))
+    ///     .build();
+    ///
+    /// let bus = runtime.bus(256);
+    /// let mut sub = bus.subscribe(AgentId::new("worker"), None);
+    /// bus.send(AgentMessage::new(
+    ///     AgentId::new("planner"),
+    ///     AgentTarget::Broadcast,
+    ///     "start",
+    /// )).unwrap();
+    /// ```
+    pub fn bus(&self, capacity: usize) -> crate::bus::AgentBus {
+        crate::bus::AgentBus::new(capacity)
+    }
+
+    // ── Team orchestration ─────────────────────────────────────────────────────
+
+    /// Run a multi-agent team to completion and return a [`TeamResult`].
+    ///
+    /// Spawns the team defined in `config`, routes messages between agents via
+    /// an internal [`AgentBus`], and applies the configured
+    /// [`ConsensusStrategy`] to produce a final answer.
+    ///
+    /// The `infer` closure acts as the model for every agent in the team.  It
+    /// receives the agent's [`AgentId`] and context prompt and must return a
+    /// `Future<Output = String>` — the agent's answer.
+    ///
+    /// # Arguments
+    /// * `config` — team configuration including the [`AgentTeam`] declaration,
+    ///   topology, consensus strategy, and bus capacity.
+    /// * `infer` — async inference function called once per agent.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`AgentRuntimeError`] returned by the
+    /// [`TeamOrchestrator`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use llm_agent_runtime::prelude::*;
+    /// use llm_agent_runtime::team::{AgentTeam, TeamConfig, ConsensusStrategy};
+    ///
+    /// # tokio_test::block_on(async {
+    /// let runtime = AgentRuntime::builder()
+    ///     .with_agent_config(AgentConfig::new(5, "stub"))
+    ///     .build();
+    ///
+    /// let team = AgentTeam::new(
+    ///     AgentId::new("leader"),
+    ///     vec![AgentId::new("worker-1"), AgentId::new("worker-2")],
+    ///     "Summarise the quarterly report",
+    /// );
+    /// let config = TeamConfig::new(team)
+    ///     .with_consensus(ConsensusStrategy::Parallel);
+    ///
+    /// let result = runtime
+    ///     .run_team(config, |_agent_id, _prompt| async { "done".to_string() })
+    ///     .await
+    ///     .unwrap();
+    ///
+    /// println!("Answer: {}", result.final_answer);
+    /// # });
+    /// ```
+    pub async fn run_team<F, Fut>(
+        &self,
+        config: crate::team::TeamConfig,
+        infer: F,
+    ) -> Result<crate::team::TeamResult, AgentRuntimeError>
+    where
+        F: Fn(AgentId, String) -> Fut + Send + Sync + Clone + 'static,
+        Fut: std::future::Future<Output = String> + Send + 'static,
+    {
+        let orchestrator = crate::team::TeamOrchestrator::new(config);
+        orchestrator.run(infer).await
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

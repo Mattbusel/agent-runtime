@@ -64,12 +64,10 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, RwLock,
     },
     time::Instant,
 };
-
-use parking_lot::RwLock;
 
 // ---------------------------------------------------------------------------
 // Capability
@@ -248,13 +246,13 @@ impl Sandbox {
 
     /// Grant a capability token.  Returns `self` for chaining.
     pub fn grant(self, cap: ToolPermission) -> Self {
-        self.inner.write().grants.insert(cap);
+        self.inner.write().unwrap_or_else(|e| e.into_inner()).grants.insert(cap);
         self
     }
 
     /// Grant multiple capability tokens at once.
     pub fn grant_all(&self, caps: impl IntoIterator<Item = ToolPermission>) {
-        let mut inner = self.inner.write();
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         for cap in caps {
             inner.grants.insert(cap);
         }
@@ -262,13 +260,13 @@ impl Sandbox {
 
     /// Revoke a previously granted capability.
     pub fn revoke(&self, cap: &ToolPermission) {
-        self.inner.write().grants.remove(cap);
+        self.inner.write().unwrap_or_else(|e| e.into_inner()).grants.remove(cap);
     }
 
     /// Register a tool manifest.  Overwrites any existing manifest with the
     /// same name.
     pub fn register_tool(&self, manifest: ToolManifest) {
-        self.inner.write().tools.insert(manifest.name.clone(), manifest);
+        self.inner.write().unwrap_or_else(|e| e.into_inner()).tools.insert(manifest.name.clone(), manifest);
     }
 
     // ------------------------------------------------------------------
@@ -283,7 +281,7 @@ impl Sandbox {
         self.checks_total.fetch_add(1, Ordering::Relaxed);
 
         let (result, entry) = {
-            let inner = self.inner.read();
+            let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
 
             match inner.tools.get(tool_name) {
                 None if self.config.deny_unknown_tools => {
@@ -343,7 +341,7 @@ impl Sandbox {
 
         // Record in audit log (write lock, brief).
         {
-            let mut inner = self.inner.write();
+            let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
             if inner.audit.len() >= self.config.max_audit_entries {
                 inner.audit.remove(0);
             }
@@ -363,17 +361,17 @@ impl Sandbox {
 
     /// Return a snapshot of the audit log (oldest first).
     pub fn audit_log(&self) -> Vec<AuditEntry> {
-        self.inner.read().audit.clone()
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).audit.clone()
     }
 
     /// Return the set of currently granted capabilities.
     pub fn granted_capabilities(&self) -> Vec<ToolPermission> {
-        self.inner.read().grants.iter().cloned().collect()
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).grants.iter().cloned().collect()
     }
 
     /// Return the names of all registered tools.
     pub fn registered_tools(&self) -> Vec<String> {
-        self.inner.read().tools.keys().cloned().collect()
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).tools.keys().cloned().collect()
     }
 
     /// Aggregate statistics.
