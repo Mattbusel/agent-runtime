@@ -1504,3 +1504,152 @@ let runtime = AgentRuntime::builder()
 // Access the checkpoint manager
 let mgr = runtime.checkpoint();
 ```
+
+---
+
+## Vector Similarity Memory
+
+`agent-runtime` includes a full vector similarity memory subsystem in `src/vector_memory.rs`.
+
+```
+Text Input
+    │
+    ▼
+┌──────────────────────┐
+│  BagOfWordsEmbedder  │  tokenise → TF-IDF → L2-normalise → Embedding
+│  (stopword filter,   │
+│   TF-IDF weights,    │
+│   IDF = log(1+N/df)) │
+└──────────┬───────────┘
+           │  Embedding (Vec<f32>, unit norm)
+           ▼
+┌──────────────────────┐
+│    VectorMemory<T>   │  insert(embedding, value)
+│    brute-force cosine│  search(query, top_k) → Vec<(f32, &T)>
+│    via dot-product   │  (O(n·d) linear scan on normalised vectors)
+│    on unit vectors   │
+└──────────────────────┘
+           │
+           ▼
+┌──────────────────────┐
+│   SemanticMemory<T>  │  high-level wrapper
+│   .remember(text, v) │
+│   .recall_similar(q) │
+└──────────────────────┘
+```
+
+### Quick start
+
+```rust,no_run
+use llm_agent_runtime::vector_memory::SemanticMemory;
+
+let mut mem: SemanticMemory<String> = SemanticMemory::new();
+mem.remember("cats are fluffy animals", "cat_fact".to_string());
+mem.remember("quantum mechanics uncertainty principle", "physics".to_string());
+
+let results = mem.recall_similar("fluffy pets", 2);
+// results[0] == (similarity_score, &"cat_fact")
+```
+
+### Via AgentRuntime
+
+```rust,no_run
+use llm_agent_runtime::{AgentRuntime, AgentConfig};
+
+let runtime = AgentRuntime::quick(5, "my-model");
+let mem_handle = runtime.semantic_memory();
+
+// In an async context:
+// let mut guard = mem_handle.lock().await;
+// guard.remember("Rust is fast and safe", "rust_fact".to_string());
+// let hits = guard.recall_similar("memory-safe systems language", 3);
+```
+
+### Cosine similarity
+
+Pre-normalised embeddings make similarity search O(d) per entry:
+
+```
+sim(a, b) = dot(a/|a|, b/|b|)  =  Σ aᵢbᵢ   (since |a|=|b|=1)
+```
+
+---
+
+## Agent Supervisor Tree
+
+`agent-runtime` includes an Erlang-style supervisor in `src/supervisor.rs`.
+
+```
+Supervisor::start(children, strategy)
+         │
+         │  spawns background monitor loop
+         ▼
+┌────────────────────────────────────────────────────────┐
+│  SupervisorLoop  (tokio::task::JoinSet)                │
+│                                                        │
+│  child exits ──► check RestartPolicy                   │
+│                       │                                │
+│            ┌──────────┼──────────────┐                 │
+│            ▼          ▼              ▼                 │
+│         Always    OnFailure        Never               │
+│            │       (Err only)        │                 │
+│            └──────────┬─────────────┘                  │
+│                       ▼                                │
+│                 within max_restarts?                   │
+│                  Yes ──► apply strategy                │
+│                  No  ──► mark Failed                   │
+│                                                        │
+│  Strategies:                                           │
+│    OneForOne  → restart only the failed child          │
+│    OneForAll  → restart ALL children                   │
+│    RestForOne → restart failed + all children          │
+│                 started after it (by start_order)      │
+└────────────────────────────────────────────────────────┘
+         │
+         ▼
+  SupervisorHandle
+   .stats()     → SupervisorStats { total_restarts, children: [ChildStats] }
+   .shutdown()  → graceful stop (signals loop, drains JoinSet)
+```
+
+### Quick start
+
+```rust,no_run
+use std::{sync::Arc, time::Duration};
+use llm_agent_runtime::supervisor::{
+    ChildSpec, RestartPolicy, Supervisor, SupervisorStrategy,
+};
+
+#[tokio::main]
+async fn main() {
+    let spec = ChildSpec::new(
+        "worker",
+        Arc::new(|| Box::pin(async {
+            // do work …
+            Ok(())
+        })),
+        RestartPolicy::OnFailure,
+        3,
+        Duration::from_secs(5),
+    );
+
+    let handle = Supervisor::start(vec![spec], SupervisorStrategy::OneForOne).await;
+
+    // … later …
+    let stats = handle.stats().await;
+    println!("total restarts: {}", stats.total_restarts);
+    handle.shutdown().await;
+}
+```
+
+### Via AgentRuntime
+
+```rust,no_run
+use std::{sync::Arc, time::Duration};
+use llm_agent_runtime::{AgentRuntime, AgentConfig};
+use llm_agent_runtime::supervisor::{ChildSpec, RestartPolicy, SupervisorStrategy};
+
+let runtime = AgentRuntime::quick(5, "my-model");
+// In an async context:
+// let handle = runtime.spawn_supervised(vec![spec], SupervisorStrategy::OneForOne).await;
+```

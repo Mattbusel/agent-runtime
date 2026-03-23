@@ -148,6 +148,12 @@ pub mod swarm;
 pub mod world_model;
 pub mod debate;
 
+/// Vector similarity memory search: embeddings, cosine search, TF-IDF bag-of-words, semantic memory.
+pub mod vector_memory;
+
+/// Erlang-style agent supervisor tree: OneForOne/OneForAll/RestForOne strategies with typed restart policies.
+pub mod supervisor;
+
 /// STRIPS-style backward-chaining planner for goal-directed action sequencing.
 pub mod strips;
 

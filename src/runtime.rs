@@ -2544,6 +2544,9 @@ impl AgentRuntimeBuilder<HasConfig> {
             checkpoint_backend: self.checkpoint_backend,
             tool_registry,
             checkpoint_manager,
+            semantic_memory_store: Arc::new(tokio::sync::Mutex::new(
+                crate::vector_memory::SemanticMemory::new(),
+            )),
         }
     }
 }
@@ -2600,11 +2603,14 @@ pub struct AgentRuntime {
     tool_registry: crate::tools::ToolRegistry,
     /// Checkpoint manager for auto-saving and loading agent state.
     checkpoint_manager: crate::checkpoint::CheckpointManager,
+    /// Vector similarity semantic memory store.
+    semantic_memory_store: Arc<tokio::sync::Mutex<crate::vector_memory::SemanticMemory<String>>>,
 }
 
 impl std::fmt::Debug for AgentRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("AgentRuntime");
+        #[cfg(feature = "memory")]
         s.field("memory", &self.memory.is_some())
             .field("working", &self.working.is_some());
         #[cfg(feature = "graph")]
@@ -2616,6 +2622,7 @@ impl std::fmt::Debug for AgentRuntime {
         s.field("checkpoint_backend", &self.checkpoint_backend.is_some());
         s.field("tool_registry", &self.tool_registry);
         s.field("checkpoint_manager", &self.checkpoint_manager);
+        s.field("semantic_memory_store", &"SemanticMemory<String>");
         s.finish()
     }
 }
@@ -2650,6 +2657,57 @@ impl AgentRuntime {
     /// Use this to save and restore agent state, or to configure auto-checkpointing.
     pub fn checkpoint(&self) -> &crate::checkpoint::CheckpointManager {
         &self.checkpoint_manager
+    }
+
+    /// Return a shared handle to the runtime's semantic memory store.
+    ///
+    /// The returned [`Arc`] wraps a [`tokio::sync::Mutex`] around a
+    /// [`crate::vector_memory::SemanticMemory<String>`] instance that persists
+    /// for the lifetime of the runtime.  Use `remember` to store text-keyed
+    /// string values and `recall_similar` to retrieve them by semantic similarity.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let runtime = AgentRuntime::quick(5, "my-model");
+    /// let mem = runtime.semantic_memory();
+    /// let mut guard = mem.lock().await;
+    /// guard.remember("cats are fluffy", "cat fact".to_string());
+    /// let hits = guard.recall_similar("fluffy pets", 3);
+    /// ```
+    pub fn semantic_memory(
+        &self,
+    ) -> Arc<tokio::sync::Mutex<crate::vector_memory::SemanticMemory<String>>> {
+        self.semantic_memory_store.clone()
+    }
+
+    /// Spawn a supervised group of child tasks under the given [`SupervisorStrategy`].
+    ///
+    /// Delegates to [`crate::supervisor::Supervisor::start`] and returns a
+    /// [`crate::supervisor::SupervisorHandle`] for shutdown and stats queries.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use std::{sync::Arc, time::Duration};
+    /// use llm_agent_runtime::supervisor::{ChildSpec, RestartPolicy, SupervisorStrategy};
+    ///
+    /// let runtime = AgentRuntime::quick(5, "my-model");
+    /// let spec = ChildSpec::new(
+    ///     "worker",
+    ///     Arc::new(|| Box::pin(async { Ok(()) })),
+    ///     RestartPolicy::OnFailure,
+    ///     3,
+    ///     Duration::from_secs(5),
+    /// );
+    /// let handle = runtime
+    ///     .spawn_supervised(vec![spec], SupervisorStrategy::OneForOne)
+    ///     .await;
+    /// ```
+    pub async fn spawn_supervised(
+        &self,
+        children: Vec<crate::supervisor::ChildSpec>,
+        strategy: crate::supervisor::SupervisorStrategy,
+    ) -> crate::supervisor::SupervisorHandle {
+        crate::supervisor::Supervisor::start(children, strategy).await
     }
 
     /// Run the agent loop for the given prompt.
