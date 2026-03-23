@@ -468,3 +468,9 @@ pub mod task_dependency_graph;
 
 /// Multi-agent coordination primitives: barriers, shared counters, and priority-based leader election.
 pub mod agent_coordinator;
+
+/// Cron expression parser and job scheduler: 5-field cron syntax, CronJob lifecycle, and SchedulerStats.
+pub mod cron_scheduler;
+
+/// Agent pool with work stealing: PooledAgent CAS transitions, priority work queue, dynamic scaling.
+pub mod agent_pool;
