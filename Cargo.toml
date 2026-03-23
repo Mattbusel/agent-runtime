@@ -1,6 +1,6 @@
 [package]
 name = "llm-agent-runtime"
-version = "1.74.0"
+version = "1.75.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["Matt Busel <mattbusel@users.noreply.github.com>"]
@@ -25,7 +25,9 @@ providers = []          # LlmProvider trait
 anthropic = ["reqwest", "providers"]   # built-in Anthropic provider
 openai = ["reqwest", "providers"]      # built-in OpenAI provider
 redis-circuit-breaker = ["redis"]      # distributed circuit breaker backend
-full = ["orchestrator", "memory", "graph", "wasm", "persistence", "providers", "anthropic", "openai"]
+distributed = ["redis"]               # distributed agent coordination via Redis
+otel = ["opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp"]  # OpenTelemetry tracing
+full = ["orchestrator", "memory", "graph", "wasm", "persistence", "providers", "anthropic", "openai", "distributed", "otel"]
 
 [dependencies]
 # tokio: async runtime -- core dependency, never remove
@@ -58,8 +60,13 @@ futures = { version = "0.3", default-features = false, features = ["alloc"] }
 # reqwest: HTTP client for built-in LLM providers (optional)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], optional = true }
 
-# redis: distributed circuit breaker backend (optional)
-redis = { version = "0.26", features = ["tokio-comp"], optional = true }
+# redis: distributed circuit breaker backend and distributed coordinator (optional)
+redis = { version = "0.26", features = ["tokio-comp", "json"], optional = true }
+
+# opentelemetry: tracing instrumentation for tool calls (optional)
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic"], optional = true }
 
 [[example]]
 name = "custom_persistence"

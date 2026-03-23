@@ -581,6 +581,113 @@ if !backend.exists("agent-1-session").await? {
 
 ---
 
+## Multi-turn Dialogue Memory
+
+The `dialogue` module provides a lightweight conversation-history layer that
+sits alongside episodic memory.  Where `EpisodicStore` tracks long-term agent
+memories keyed by importance, `DialogueSession` tracks the exact sequence of
+turns in an ongoing conversation.
+
+### Key types
+
+| Type | Description |
+|---|---|
+| `Role` | Speaker role — `User`, `Assistant`, or `System` |
+| `DialogueTurn` | A single (role, content) pair |
+| `DialogueSession` | Ordered turn history for one conversation session |
+| `DialogueStore` | Concurrent `Arc<Mutex<HashMap>>` store of named sessions |
+| `DialogueContext` | Fully assembled prompt string combining episodic + dialogue history |
+
+### Usage
+
+```rust,no_run
+use llm_agent_runtime::dialogue::{DialogueStore, DialogueContext, Role};
+
+// Create a shared store (cheap to clone — all clones share the same map).
+let store = DialogueStore::new();
+
+// Append turns — creates the session automatically if it does not exist.
+store.append_turn("session-1", Role::User, "What is 6 × 7?").unwrap();
+store.append_turn("session-1", Role::Assistant, "42.").unwrap();
+
+// Retrieve and inspect the session.
+let session = store.get("session-1").unwrap().unwrap();
+println!("turns: {}", session.turn_count());
+
+// Truncate long histories (keeps last N turns + inserts a summary line).
+let mut session = session;
+session.summarize_if_long(20).unwrap();
+
+// Assemble a prompt-ready context that prepends recalled episodic memory.
+let ctx = DialogueContext::build(&session, Some("Rust is a systems language."));
+println!("{}", ctx.prompt);
+```
+
+Sessions and turns are fully serialisable with `serde`, making them easy to
+checkpoint alongside `AgentSession` data.
+
+---
+
+## SSE Streaming
+
+The `streaming` module publishes agent reasoning events as Server-Sent Events
+(SSE) over a `tokio::sync::broadcast` channel.  Any number of HTTP clients can
+subscribe; the broadcaster is never blocked by slow consumers.
+
+### Key types
+
+| Type | Description |
+|---|---|
+| `AgentEvent` | Enum of `Thought`, `Action`, `Observation`, `Result`, `Error` |
+| `StreamBroadcaster` | Thin wrapper around `broadcast::Sender<String>` |
+| `AgentEventStream` | Owned stream with typed `emit_*` helpers |
+
+### SSE wire format
+
+Each event is a JSON object tagged with a `"type"` field, wrapped in the SSE
+`data: …\n\n` envelope:
+
+```
+data: {"type":"thought","content":"I should search the web."}\n\n
+data: {"type":"action","tool":"search","input":"{\"q\":\"Rust\"}"}\n\n
+data: {"type":"observation","content":"Rust is a systems language."}\n\n
+data: {"type":"result","content":"The answer is: Rust."}\n\n
+```
+
+### Usage
+
+```rust,no_run
+use llm_agent_runtime::streaming::AgentEventStream;
+
+#[tokio::main]
+async fn main() -> Result<(), llm_agent_runtime::AgentRuntimeError> {
+    // Create a stream with a 64-message ring buffer.
+    let stream = AgentEventStream::new(64)?;
+
+    // Subscribe *before* emitting so no messages are missed.
+    let mut rx = stream.broadcaster().subscribe();
+
+    // Emit events from the agent loop (these would typically live inside
+    // run_agent / run_agent_with_provider callbacks).
+    stream.emit_thought("I should look this up.")?;
+    stream.emit_action("search", r#"{"q":"Rust"}"#)?;
+    stream.emit_observation("Rust is fast and memory-safe.")?;
+    stream.emit_result("Rust is the answer.")?;
+
+    // Each subscriber reads raw SSE strings ready to forward over HTTP.
+    while let Ok(sse_line) = rx.try_recv() {
+        print!("{sse_line}");
+    }
+    Ok(())
+}
+```
+
+`StreamBroadcaster` and `AgentEventStream` are `Clone + Send + Sync`, so they
+can be passed into async tasks and across thread boundaries without an `Arc`
+wrapper.
+
+---
+
 ## Error Handling
 
 All public APIs return `Result<T, AgentRuntimeError>`. Match only the variants you care about:

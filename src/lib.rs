@@ -80,8 +80,10 @@ pub mod graph;
 pub mod orchestrator;
 
 pub mod agent;
+pub mod dialogue;
 pub mod metrics;
 pub mod runtime;
+pub mod streaming;
 
 #[cfg(feature = "persistence")]
 pub mod persistence;
