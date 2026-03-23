@@ -617,6 +617,226 @@ Thought-Action-Observation cycle.
 
 ---
 
+## Agent Swarm Coordination
+
+`SwarmOrchestrator` decomposes a complex task into parallelisable subtasks,
+dispatches each to a registered worker agent, and synthesises the results into
+one coherent answer.  A configurable convergence threshold lets the orchestrator
+short-circuit as soon as enough results arrive, avoiding unnecessary latency
+when a partial answer is sufficient.
+
+```rust,no_run
+use llm_agent_runtime::swarm_v2::{SwarmConfig, SwarmOrchestrator, TaskSplitStrategy};
+use llm_agent_runtime::types::AgentId;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = SwarmConfig {
+        max_agents: 4,
+        task_split_strategy: TaskSplitStrategy::Breadth,
+        // Stop once 80 % of subtasks have completed successfully.
+        convergence_threshold: 0.8,
+    };
+
+    let mut orchestrator = SwarmOrchestrator::new(config);
+    orchestrator.add_agent(AgentId::new("worker-1"));
+    orchestrator.add_agent(AgentId::new("worker-2"));
+    orchestrator.add_agent(AgentId::new("worker-3"));
+
+    // The `inference_fn` is called concurrently for every subtask.
+    let result = orchestrator
+        .run_swarm(
+            "Research Rust async runtimes, compare with C++ coroutines, and summarise tradeoffs",
+            |agent_id, subtask_prompt| async move {
+                // Replace with a real provider call in production.
+                format!("[{agent_id}] completed: {subtask_prompt}")
+            },
+        )
+        .await?;
+
+    println!("Threshold met: {}", result.threshold_met);
+    println!("Failures:      {}", result.failure_count);
+    println!("\n{}", result.converged_answer);
+    Ok(())
+}
+```
+
+### `SwarmConfig`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `max_agents` | `usize` | `0` | Maximum concurrently active agents (`0` = unlimited) |
+| `task_split_strategy` | `TaskSplitStrategy` | `Breadth` | How the task is decomposed into subtasks |
+| `convergence_threshold` | `f64` | `1.0` | Fraction of successful subtasks required before early exit |
+
+### `TaskSplitStrategy`
+
+| Variant | Behaviour |
+|---|---|
+| `Breadth` | Split on commas, semicolons, and ` and ` — produces a flat parallel list |
+| `Depth` | Recursively split on sequencing connectors (` then `, ` next `, …) for DFS ordering |
+
+---
+
+## High-Level Memory Compression
+
+`memory_compress` builds on the low-level `memory_compression` module with
+three composable strategies that can be chained in sequence.
+
+| Strategy | What it does |
+|---|---|
+| `TemporalCompression` | Keeps the N most-recent turns verbatim; merges older turns into `CompressedEpisode` windows |
+| `SemanticDedup` | Removes near-duplicate turns using Jaccard similarity on word sets |
+| `ImportanceFilter` | Re-inserts turns tagged `"important"` or with a high importance score that were removed by other strategies |
+
+The async `MemoryCompressor::run_if_needed` method is designed to be called
+from a `tokio::spawn` background task so compression never blocks the agent loop.
+
+```rust
+use llm_agent_runtime::memory_compress::{CompressorConfig, MemoryCompressor};
+use llm_agent_runtime::memory_compression::{MemoryTurn, Role};
+use std::time::SystemTime;
+
+# tokio_test::block_on(async {
+let config = CompressorConfig {
+    max_turns: 50,          // trigger when buffer exceeds 50 turns
+    recency_keep: 10,       // always keep the 10 most-recent turns verbatim
+    jaccard_dedup_threshold: 0.85, // remove near-duplicates with ≥ 85 % word overlap
+    importance_tag: "important".to_string(),
+};
+
+let compressor = MemoryCompressor::new(config);
+
+let turns: Vec<MemoryTurn> = (0..60).map(|i| MemoryTurn {
+    id: format!("t{i}"),
+    role: Role::User,
+    content: format!("message {i}"),
+    timestamp: SystemTime::now(),
+    importance_score: if i == 5 { 0.95 } else { 0.1 },
+    token_count: 8,
+    tags: if i == 5 { vec!["important".into()] } else { vec![] },
+}).collect();
+
+let (kept, episodes, triggered) = compressor.run_if_needed(turns).await;
+println!("Triggered: {triggered}");
+println!("Kept {} turns, {} compressed episodes", kept.len(), episodes.len());
+
+for ep in &episodes {
+    println!(
+        "Episode '{}': {} → {} turns over {:?}",
+        ep.id, ep.original_count, ep.compressed_to, ep.time_range
+    );
+}
+# });
+```
+
+### `CompressedEpisode` fields
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `String` | Unique identifier for this compressed block |
+| `original_count` | `usize` | Number of turns before compression |
+| `compressed_to` | `usize` | Number of representative turns kept |
+| `summary` | `String` | Prose description of what was in the window |
+| `time_range` | `(u64, u64)` | Unix-epoch seconds of earliest/latest compressed turn |
+| `common_tags` | `Vec<String>` | Tags present in ≥ 50 % of the compressed turns |
+
+---
+
+## Skill Marketplace
+
+The `marketplace` module provides a runtime-discoverable registry of named
+skills, a filesystem loader, a task-description-based matcher, and a pipeline
+composer.
+
+```rust,no_run
+use llm_agent_runtime::marketplace::{Skill, SkillRegistry, SkillMatcher, SkillComposer};
+use std::sync::Arc;
+
+fn main() {
+    // Build a shared registry — wrap in Arc for multi-task sharing.
+    let registry = Arc::new(SkillRegistry::new());
+
+    // Register skills.
+    registry.register(Skill::new(
+        "web_search",
+        "Search the web for up-to-date information",
+        "1.0.0",
+        "core-team",
+        vec!["search".into(), "web".into(), "retrieval".into()],
+    ));
+    registry.register(Skill::new(
+        "summarise",
+        "Condense long text into a concise summary",
+        "1.2.0",
+        "core-team",
+        vec!["nlp".into(), "summarise".into(), "text".into()],
+    ));
+    registry.register(Skill::new(
+        "translate",
+        "Translate text between languages",
+        "1.0.0",
+        "i18n-team",
+        vec!["nlp".into(), "translation".into(), "language".into()],
+    ));
+
+    // --- SkillLoader: discover skills from ~/.agent-runtime/skills/*.toml ---
+    // use llm_agent_runtime::marketplace::SkillLoader;
+    // let loader = SkillLoader::default();
+    // let n = loader.load_into(&registry);
+    // println!("Loaded {n} skills from disk");
+
+    // --- SkillMatcher: find relevant skills for a task ---
+    let matcher = SkillMatcher::new(Arc::clone(&registry));
+    let matches = matcher.match_skills(
+        "I need to search the web for recent news and summarise it",
+        3,
+    );
+    for m in &matches {
+        println!("  {:<20} score={:.2f}", m.skill.name, m.score);
+    }
+
+    // --- SkillComposer: build a multi-skill pipeline ---
+    let composer = SkillComposer::new(Arc::clone(&registry));
+    let pipeline = composer.compose(vec!["web_search".into(), "summarise".into()]);
+    println!("Pipeline: {}", pipeline.description);
+    println!("Stages:   {:?}", pipeline.stage_names());
+
+    // Auto-compose from task description.
+    let auto_pipeline = composer.compose_for_task("translate and summarise a document", 2);
+    println!("Auto pipeline: {}", auto_pipeline.description);
+}
+```
+
+### Skill manifest TOML (`~/.agent-runtime/skills/my_skill.toml`)
+
+```toml
+name         = "sentiment_analysis"
+description  = "Classify the sentiment of a text passage"
+version      = "0.3.1"
+author       = "ml-team"
+capabilities = ["nlp", "sentiment", "classification", "text"]
+```
+
+`SkillLoader::default()` scans `~/.agent-runtime/skills/` for `*.toml` files
+and registers each as a `Skill` in the registry.  Malformed files are logged
+and skipped without aborting the load.
+
+### Scoring details (SkillMatcher)
+
+The score for each skill against a task description is:
+
+```
+score = 0.5 × (capability_overlap / capability_count)
+      + 0.5 × (description_word_overlap / description_word_count)
+```
+
+Common stop-words are stripped before comparison.  Results are returned sorted
+by score descending; a `min_score` filter (default `0.1`) suppresses skills
+with no meaningful overlap.
+
+---
+
 ## Contributing
 
 Contributions are welcome. Please follow these guidelines:
