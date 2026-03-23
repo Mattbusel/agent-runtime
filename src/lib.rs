@@ -70,6 +70,23 @@ pub mod error;
 pub mod prelude;
 pub mod types;
 
+pub mod memory_compression;
+pub mod discovery;
+
+/// Multi-turn conversation history with automatic summarisation.
+pub mod conversation;
+
+/// Token budget tracking and cost estimation.
+pub mod budget;
+
+#[cfg(feature = "distributed")]
+/// Distributed agent coordination via Redis (work queue and leader election).
+pub mod distributed;
+
+#[cfg(feature = "otel")]
+/// OpenTelemetry tracing integration for tool call spans.
+pub mod telemetry;
+
 #[cfg(feature = "memory")]
 pub mod memory;
 
@@ -118,3 +135,23 @@ pub use persistence::{FilePersistenceBackend, PersistenceBackend};
 
 #[cfg(feature = "providers")]
 pub use providers::LlmProvider;
+
+// Memory compression re-exports.
+pub use memory_compression::{
+    ImportanceStrategy, MemoryCompressor, MemorySummary, MemoryTurn, Role as MemoryRole,
+};
+
+// Discovery re-exports.
+pub use discovery::{
+    AgentAdvertisement, AgentHealth, AgentRegistry, Capability, CapabilityMatch, CapabilityQuery,
+};
+
+// Conversation history re-exports.
+pub use conversation::{ConversationHistory, SummaryEntry, Turn};
+
+// Budget tracking re-exports.
+pub use budget::{BudgetConfig, BudgetReport, BudgetTracker, ModelPrice, PriceTable, UsageRecord};
+
+// Distributed coordination re-exports (feature-gated).
+#[cfg(feature = "distributed")]
+pub use distributed::{CoordinatorConfig, DistributedCoordinator, WorkItem};

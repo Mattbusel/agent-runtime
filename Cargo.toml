@@ -27,7 +27,9 @@ openai = ["reqwest", "providers"]      # built-in OpenAI provider
 redis-circuit-breaker = ["redis"]      # distributed circuit breaker backend
 distributed = ["redis"]               # distributed agent coordination via Redis
 otel = ["opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp"]  # OpenTelemetry tracing
-full = ["orchestrator", "memory", "graph", "wasm", "persistence", "providers", "anthropic", "openai", "distributed", "otel"]
+compression = []                # memory compression system (MemoryCompressor, ImportanceStrategy)
+discovery = []                  # agent capability advertisement and peer discovery (AgentRegistry)
+full = ["orchestrator", "memory", "graph", "wasm", "persistence", "providers", "anthropic", "openai", "distributed", "otel", "compression", "discovery"]
 
 [dependencies]
 # tokio: async runtime -- core dependency, never remove

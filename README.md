@@ -6,157 +6,64 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
-**agent-runtime** is a unified Tokio async agent runtime for Rust. It combines orchestration
-primitives, episodic and semantic memory, an in-memory knowledge graph, and a ReAct
-(Thought-Action-Observation) agent loop in a single crate.
-
-The library consolidates the public APIs of `tokio-prompt-orchestrator`, `tokio-agent-memory`,
-`mem-graph`, and `wasm-agent`, and extends them with pluggable LLM providers, optional
-file-based persistence with per-step checkpointing, lock-free runtime metrics, and a
-compile-time typestate builder that prevents misconfiguration at zero runtime cost.
+`agent-runtime` is a batteries-included, async-first Rust crate for building production LLM agents. It unifies a ReAct (Thought-Action-Observation) loop, episodic and semantic memory with decay and cosine-similarity recall, a directed knowledge graph with centrality and community detection, an orchestration layer with circuit breakers and retry/backpressure, pluggable LLM providers with SSE streaming, optional file-based session checkpointing, intelligent memory compression for long-running agents, and a peer-discovery registry for multi-agent systems — all in a single crate, driven by a compile-time typestate builder that makes misconfiguration a compiler error rather than a runtime panic.
 
 ---
 
-## What it does
+## Feature Matrix
 
-- **ReAct agent loop** — runs Thought → Action → Observation cycles with a pluggable tool
-  registry. Terminates on `FINAL_ANSWER` or `max_iterations`, whichever comes first.
-- **Episodic memory** — per-agent event store with configurable decay, hybrid recall scoring,
-  per-agent capacity limits, and recall-count tracking.
-- **Semantic memory** — key-value store with tag-based retrieval and cosine-similarity vector
-  search.
-- **Working memory** — bounded LRU key-value store injected into the agent prompt.
-- **Knowledge graph** — directed in-memory graph with BFS, DFS, Dijkstra shortest-path,
-  transitive closure, degree and betweenness centrality, community detection, cycle detection,
-  and subgraph extraction.
-- **Circuit breaker** — configurable failure threshold and recovery window with a pluggable
-  backend trait for distributed state (e.g., Redis).
-- **Retry policy** — exponential backoff capped at 60 s.
-- **Deduplicator** — TTL-based request deduplication with in-flight tracking.
-- **Backpressure guard** — hard and soft capacity limits with tracing warnings.
-- **Pipeline** — composable string-transform stage chain.
-- **LLM providers** — built-in `AnthropicProvider` and `OpenAiProvider` with SSE streaming
-  (behind feature flags).
-- **Persistence** — async `PersistenceBackend` trait and `FilePersistenceBackend` for
-  session and per-step checkpointing.
-- **Metrics** — atomic counters for active/total sessions, steps, tool calls, backpressure
-  sheds, memory recalls, and checkpoint errors.
-- **`types` module** — `AgentId` and `MemoryId` are always available without enabling the
-  `memory` feature, allowing the runtime to compile in minimal configurations.
+| Feature | Default | What you get |
+|---|:---:|---|
+| `orchestrator` | yes | `CircuitBreaker` (pluggable backends), `RetryPolicy` (exp. backoff), `Deduplicator` (TTL), `BackpressureGuard` (hard + soft limits), `Pipeline` |
+| `memory` | yes | `EpisodicStore` (`DecayPolicy`, `RecallPolicy::Hybrid`, per-agent capacity), `SemanticStore` (cosine-similarity vector search, tag recall), `WorkingMemory` (bounded LRU) |
+| `graph` | yes | `GraphStore` — BFS, DFS, Dijkstra shortest-path, transitive closure, degree/betweenness centrality, community detection, cycle detection, subgraph extraction |
+| `wasm` | yes | `ReActLoop` with sync + streaming inference, `ToolRegistry`, `ToolSpec`, `parse_react_step`, `AgentConfig`, observer callbacks, step-level metrics |
+| `persistence` | no | `PersistenceBackend` async trait + `FilePersistenceBackend`; per-session and per-step checkpointing to disk |
+| `providers` | no | `LlmProvider` async trait |
+| `anthropic` | no | Built-in Anthropic Messages API provider with SSE streaming (implies `providers` + `reqwest`) |
+| `openai` | no | Built-in OpenAI Chat Completions provider with SSE streaming and custom base-URL support (implies `providers` + `reqwest`) |
+| `redis-circuit-breaker` | no | Distributed `CircuitBreakerBackend` state via Redis |
+| `distributed` | no | Distributed agent coordination via Redis: work queue and leader election |
+| `otel` | no | OpenTelemetry tracing spans for tool calls (implies `opentelemetry` + `opentelemetry_sdk` + `opentelemetry-otlp`) |
+| `compression` | no | `MemoryCompressor`, `ImportanceStrategy`, `MemorySummary` — token-budget-aware compression of episodic memory |
+| `discovery` | no | `AgentRegistry`, `CapabilityQuery`, `CapabilityMatch` — TTL-based peer capability advertisement and tag-overlap matching |
+| `full` | no | All of the above simultaneously |
 
 ---
 
-## How it works
-
-```
-  User Code
-     |
-     v
-+--------------------+      compile-time typestate
-|  AgentRuntime      |<---- AgentRuntimeBuilder<NeedsConfig>
-|  runtime.rs        |          .with_agent_config()  -->
-+----+----+----+-----+      AgentRuntimeBuilder<HasConfig>
-     |    |    |                  .build()             (infallible)
-     |    |    |
-     |    |    +--------------------------------------------+
-     |    |                                                 |
-     |    +-------------------+                            |
-     |                        |                            |
-     v                        v                            v
-+--------------------+  +---------------------+  +--------------------+
-|  memory.rs         |  |  graph.rs           |  |  orchestrator.rs   |
-|                    |  |                     |  |                    |
-|  EpisodicStore     |  |  GraphStore         |  |  CircuitBreaker    |
-|    DecayPolicy     |  |    BFS / DFS        |  |  RetryPolicy       |
-|    RecallPolicy    |  |    Dijkstra         |  |  Deduplicator      |
-|    per-agent cap   |  |    transitive close |  |  BackpressureGuard |
-|  SemanticStore     |  |    centrality       |  |  Pipeline          |
-|    cosine search   |  |    community detect |  +--------------------+
-|  WorkingMemory     |  |    cycle detection  |
-|    LRU eviction    |  +---------------------+
-+--------------------+
-     |
-     v
-+--------------------+
-|  agent.rs          |
-|                    |
-|  ReActLoop         |<--- ToolRegistry (ToolSpec, per-tool CircuitBreaker)
-|  AgentConfig       |
-|  AgentSession      |
-+--------------------+
-     |
-     +---------------------------+
-     |                           |
-     v                           v
-+--------------------+  +--------------------+
-|  providers.rs      |  |  persistence.rs    |
-|  LlmProvider trait |  |  PersistenceBackend|
-|  AnthropicProvider |  |  FilePersistence   |
-|  OpenAiProvider    |  |  session checkpoint|
-+--------------------+  |  per-step snapshot |
-                         +--------------------+
-                                  |
-                        +---------+
-                        v
-              +--------------------+
-              |  metrics.rs        |
-              |  RuntimeMetrics    |
-              |  (atomic counters) |
-              +--------------------+
-```
-
-### Data flow inside `run_agent`
-
-1. `BackpressureGuard` is checked; sessions exceeding capacity are rejected immediately with
-   `AgentRuntimeError::BackpressureShed`.
-2. `EpisodicStore` is recalled for the agent; matching items are injected into the prompt,
-   subject to `max_memory_recalls` and the optional `max_memory_tokens` token budget.
-3. `WorkingMemory` key-value pairs are appended to the enriched prompt.
-4. `GraphStore` entity count is captured for session metadata.
-5. `ReActLoop` runs Thought-Action-Observation cycles, dispatching tool calls through
-   `ToolRegistry`.
-6. Per-tool `CircuitBreaker` (optional) fast-fails unhealthy tools and records structured
-   error observations with `kind` classification (`not_found`, `transient`, `permanent`).
-7. On completion an `AgentSession` is returned; if a `PersistenceBackend` is configured,
-   the final session and every per-step snapshot are saved atomically.
-8. `RuntimeMetrics` counters are updated atomically throughout.
-
----
-
-## Quickstart
+## 5-Minute Quickstart
 
 ### 1. Add to `Cargo.toml`
 
 ```toml
 [dependencies]
-llm-agent-runtime = "1.74"
+llm-agent-runtime = "1.75"
 tokio = { version = "1", features = ["full"] }
+```
+
+To opt in to specific subsystems only:
+
+```toml
+llm-agent-runtime = { version = "1.75", default-features = false, features = ["memory", "orchestrator"] }
 ```
 
 To enable built-in LLM providers:
 
 ```toml
-llm-agent-runtime = { version = "1.58", features = ["anthropic", "openai"] }
+llm-agent-runtime = { version = "1.75", features = ["anthropic", "openai"] }
 ```
 
-To opt in to only the subsystems you need:
-
-```toml
-llm-agent-runtime = { version = "1.58", default-features = false, features = ["memory", "orchestrator"] }
-```
-
-### 2. Environment variables
+### 2. Set environment variables (if using a provider)
 
 ```sh
 export ANTHROPIC_API_KEY="sk-ant-..."   # required for AnthropicProvider
 export OPENAI_API_KEY="sk-..."          # required for OpenAiProvider
-export RUST_LOG="agent_runtime=debug"   # optional structured logging
+export RUST_LOG="agent_runtime=debug"   # optional structured tracing output
 ```
 
-### 3. Minimal example (no external services)
+### 3. Run an agent (no external services required)
 
-The default feature set (`orchestrator`, `memory`, `graph`, `wasm`) runs entirely in-process
-with no API keys, no Redis, and no database.
+The default feature set runs entirely in-process:
 
 ```rust
 use llm_agent_runtime::prelude::*;
@@ -170,7 +77,7 @@ async fn main() -> Result<(), AgentRuntimeError> {
     memory.add_episode(agent_id.clone(), "Tokio is an async runtime for Rust.", 0.8)?;
 
     // Build the runtime.  The typestate builder enforces that
-    // with_agent_config() is called before build() — at compile time.
+    // with_agent_config() is called before build() at compile time.
     let runtime = AgentRuntime::builder()
         .with_memory(memory)
         .with_agent_config(
@@ -184,8 +91,7 @@ async fn main() -> Result<(), AgentRuntimeError> {
         }))
         .build();
 
-    // The `infer` closure acts as the model.
-    // Replace with a real provider call in production.
+    // The `infer` closure acts as the model — replace with a provider call in production.
     let mut step = 0usize;
     let session = runtime
         .run_agent(agent_id, "Double the number 21.", move |_ctx: String| {
@@ -193,9 +99,7 @@ async fn main() -> Result<(), AgentRuntimeError> {
             let s = step;
             async move {
                 if s == 1 {
-                    r#"Thought: I will use the double tool.
-Action: double {"n":21}"#
-                        .to_string()
+                    "Thought: I will use the double tool.\nAction: double {\"n\":21}".to_string()
                 } else {
                     "Thought: The answer is 42.\nAction: FINAL_ANSWER 42".to_string()
                 }
@@ -213,29 +117,7 @@ Action: double {"n":21}"#
 }
 ```
 
-### 4. Using a built-in provider
-
-```rust,no_run
-use llm_agent_runtime::providers::{AnthropicProvider, LlmProvider};
-
-#[tokio::main]
-async fn main() {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY not set");
-    let provider = AnthropicProvider::new(api_key);
-
-    let reply = provider
-        .complete("Say hello in one sentence.", "claude-sonnet-4-6")
-        .await
-        .expect("provider call failed");
-
-    println!("{reply}");
-}
-```
-
-### 5. Wiring a provider into the runtime
-
-`run_agent_with_provider` removes the boilerplate closure when using a built-in
-provider:
+### 4. Use a built-in provider
 
 ```rust,no_run
 use llm_agent_runtime::prelude::*;
@@ -262,20 +144,221 @@ async fn main() -> Result<(), AgentRuntimeError> {
 
 ---
 
-## Feature Flags
+## Architecture
 
-| Feature | Default | Description |
-|---|---|---|
-| `orchestrator` | yes | `CircuitBreaker` with pluggable backends, `RetryPolicy`, `Deduplicator`, `BackpressureGuard` with soft limit, `Pipeline` |
-| `memory` | yes | `EpisodicStore` with `DecayPolicy`, `RecallPolicy::Hybrid`, per-agent capacity; `SemanticStore` with cosine search; `WorkingMemory` LRU |
-| `graph` | yes | `GraphStore` — BFS, DFS, Dijkstra, transitive closure, degree/betweenness centrality, community detection, subgraph, cycle detection |
-| `wasm` | yes | `ReActLoop` with sync and streaming inference, `ToolRegistry`, `ToolSpec`, `parse_react_step`, `AgentConfig`, observer callbacks, and step-level metrics |
-| `persistence` | no | `PersistenceBackend` trait + `FilePersistenceBackend`; session and per-step checkpointing |
-| `providers` | no | `LlmProvider` async trait |
-| `anthropic` | no | Built-in Anthropic Messages API provider with SSE streaming (implies `providers` + `reqwest`) |
-| `openai` | no | Built-in OpenAI Chat Completions API provider with SSE streaming and custom base-URL support (implies `providers` + `reqwest`) |
-| `redis-circuit-breaker` | no | Distributed `CircuitBreakerBackend` via Redis |
-| `full` | no | All features simultaneously |
+```
+  User Code
+     |
+     v
++--------------------+      compile-time typestate
+|  AgentRuntime      |<---- AgentRuntimeBuilder<NeedsConfig>
+|  runtime.rs        |          .with_agent_config()  -->
++----+----+----+-----+      AgentRuntimeBuilder<HasConfig>
+     |    |    |                  .build()             (infallible)
+     |    |    |
+     |    |    +----------------------------------------------+
+     |    |                                                   |
+     |    +-------------------+                              |
+     |                         |                              |
+     v                         v                              v
++--------------------+  +---------------------+  +--------------------+
+|  memory.rs         |  |  graph.rs           |  |  orchestrator.rs   |
+|                    |  |                     |  |                    |
+|  EpisodicStore     |  |  GraphStore         |  |  CircuitBreaker    |
+|    DecayPolicy     |  |    BFS / DFS        |  |  RetryPolicy       |
+|    RecallPolicy    |  |    Dijkstra         |  |  Deduplicator      |
+|    per-agent cap   |  |    transitive close |  |  BackpressureGuard |
+|  SemanticStore     |  |    centrality       |  |  Pipeline          |
+|    cosine search   |  |    community detect |  +--------------------+
+|  WorkingMemory     |  |    cycle detection  |
+|    LRU eviction    |  +---------------------+
++--------------------+
+     |
+     v
++---------------------------+  +---------------------------+
+|  memory_compression.rs    |  |  discovery.rs             |
+|                           |  |                           |
+|  MemoryCompressor         |  |  AgentRegistry            |
+|    ImportanceStrategy     |  |    register / deregister  |
+|    recency protection     |  |    heartbeat / evict      |
+|    MemorySummary          |  |    CapabilityQuery        |
+|    token-budget aware     |  |    tag-overlap scoring    |
++---------------------------+  +---------------------------+
+     |
+     v
++--------------------+
+|  agent.rs          |
+|                    |
+|  ReActLoop         |<--- ToolRegistry (ToolSpec, per-tool CircuitBreaker)
+|  AgentConfig       |
+|  AgentSession      |
++--------------------+
+     |
+     +---------------------------+
+     |                           |
+     v                           v
++--------------------+  +--------------------+
+|  providers.rs      |  |  persistence.rs    |
+|  LlmProvider trait |  |  PersistenceBackend|
+|  AnthropicProvider |  |  FilePersistence   |
+|  OpenAiProvider    |  |  session checkpoint|
++--------------------+  |  per-step snapshot |
+                         +--------------------+
+                                   |
+                         +---------+
+                         v
+               +--------------------+
+               |  metrics.rs        |
+               |  RuntimeMetrics    |
+               |  (atomic counters) |
+               +--------------------+
+```
+
+### Data flow inside `run_agent`
+
+1. `BackpressureGuard` is checked; sessions exceeding capacity are rejected immediately with `AgentRuntimeError::BackpressureShed`.
+2. `EpisodicStore` is recalled for the agent; matching items are injected into the prompt, subject to `max_memory_recalls` and the optional `max_memory_tokens` token budget.
+3. `WorkingMemory` key-value pairs are appended to the enriched prompt.
+4. `GraphStore` entity count is captured for session metadata.
+5. `ReActLoop` runs Thought-Action-Observation cycles, dispatching tool calls through `ToolRegistry`.
+6. Per-tool `CircuitBreaker` (optional) fast-fails unhealthy tools and records structured error observations with `kind` classification (`not_found`, `transient`, `permanent`).
+7. On completion an `AgentSession` is returned; if a `PersistenceBackend` is configured, the final session and every per-step snapshot are saved atomically.
+8. `RuntimeMetrics` counters are updated atomically throughout.
+
+---
+
+## Memory Compression
+
+When episodic history grows large, `MemoryCompressor` prunes it to fit a token budget while retaining the most useful turns.
+
+```rust
+use llm_agent_runtime::memory_compression::{
+    ImportanceStrategy, MemoryCompressor, MemoryTurn, Role,
+};
+use std::time::SystemTime;
+
+// Build a compressor targeting a 4 096-token budget.
+let compressor = MemoryCompressor::new(4096)
+    // Always keep the 8 most-recent turns verbatim.
+    .with_recency_keep(8)
+    // Turns below this score are candidates for compression.
+    .with_importance_threshold(0.35)
+    // Score by keyword density; high-frequency signal words score higher.
+    .with_strategy(ImportanceStrategy::KeywordDensity(vec![
+        "error".to_string(),
+        "critical".to_string(),
+        "user".to_string(),
+        "result".to_string(),
+    ]));
+
+// Prepare turns (e.g. loaded from EpisodicStore).
+let turns: Vec<MemoryTurn> = vec![
+    MemoryTurn {
+        id: "t1".to_string(),
+        role: Role::User,
+        content: "Please summarise the quarterly results.".to_string(),
+        timestamp: SystemTime::now(),
+        importance_score: 0.0,  // will be re-scored by compress()
+        token_count: 9,
+        tags: vec!["finance".to_string()],
+    },
+    // ... more turns
+];
+
+let (kept_turns, summaries, tokens_saved) = compressor.compress(turns);
+
+println!(
+    "Kept {} turns, created {} summaries, saved {} tokens",
+    kept_turns.len(),
+    summaries.len(),
+    tokens_saved,
+);
+
+// Summaries carry structured metadata.
+for s in &summaries {
+    println!("Summary covers {} turns: {}", s.covers_turns.len(), s.summary_text);
+    println!("  Key facts: {:?}", s.key_facts);
+    println!("  Entities:  {:?}", s.entities);
+}
+```
+
+### Available `ImportanceStrategy` variants
+
+| Variant | Score formula |
+|---|---|
+| `KeywordDensity(keywords)` | `min(1, keyword_hits / word_count)` |
+| `EntityDensity` | `min(1, entity_count / word_count)` — capitalised-word heuristic |
+| `RecencyDecay { decay_per_hour }` | `exp(-decay_per_hour * age_hours)` |
+| `Composite([(strategy, weight), ...])` | Weighted average of sub-strategies |
+
+---
+
+## Agent Discovery
+
+`AgentRegistry` is a shared, `Arc`-backed, async capability store. Agents register their capabilities and other agents query for the best match.
+
+```rust
+use llm_agent_runtime::discovery::{
+    AgentAdvertisement, AgentHealth, AgentRegistry,
+    Capability, CapabilityQuery,
+};
+use std::time::SystemTime;
+
+#[tokio::main]
+async fn main() {
+    // Shared registry with a 60-second heartbeat TTL.
+    let registry = AgentRegistry::new(60);
+
+    // Agent 1 advertises an NLP summarisation capability.
+    registry.register(AgentAdvertisement {
+        agent_id: "summariser-1".to_string(),
+        agent_name: "Summariser".to_string(),
+        capabilities: vec![Capability {
+            name: "summarise-text".to_string(),
+            description: "Summarises long documents into bullet points".to_string(),
+            tags: vec!["nlp".to_string(), "summarise".to_string(), "text".to_string()],
+            input_schema: None,
+            output_schema: None,
+            avg_latency_ms: Some(250),
+            cost_per_call_usd: Some(0.002),
+        }],
+        endpoint: Some("http://summariser-1:8080".to_string()),
+        registered_at: SystemTime::now(),
+        last_heartbeat: SystemTime::now(),
+        health: AgentHealth::Healthy,
+    }).await;
+
+    // Another agent queries for an NLP capability.
+    let matches = registry.query(&CapabilityQuery {
+        required_tags: vec!["nlp".to_string()],
+        preferred_tags: vec!["summarise".to_string()],
+        max_latency_ms: Some(500),
+        max_cost_usd: Some(0.01),
+    }).await;
+
+    for m in &matches {
+        println!(
+            "Agent {} — capability '{}' — score {:.2}",
+            m.agent_id, m.capability.name, m.score
+        );
+    }
+
+    // Send heartbeats periodically to prevent TTL eviction.
+    registry.heartbeat("summariser-1", AgentHealth::Healthy).await;
+
+    // Evict agents that missed their TTL window.
+    registry.evict_stale().await;
+}
+```
+
+### Scoring details
+
+Capability matching is a two-pass algorithm:
+
+1. **Required-tag filter** — capabilities missing any `required_tags` entry are discarded.
+2. **Latency / cost filters** — capabilities exceeding `max_latency_ms` or `max_cost_usd` are discarded.
+3. **Score** — surviving capabilities are scored with Jaccard similarity between the capability's tags and `required_tags ∪ preferred_tags`, then multiplied by a health factor (`Healthy=1.0`, `Degraded=0.6`, `Unhealthy/Unknown=0.0`).
+4. Results are returned sorted by score descending.
 
 ---
 
@@ -316,8 +399,8 @@ let runtime = AgentRuntime::builder()       // AgentRuntimeBuilder<NeedsConfig>
 | `.with_system_prompt(s)` | `String` | `"You are a helpful AI agent."` | Injected at the head of every context string |
 | `.with_max_memory_recalls(n)` | `usize` | `3` | Maximum episodic items injected per run |
 | `.with_max_memory_tokens(n)` | `usize` | `None` | Approximate token budget (~4 chars/token) |
-| `.with_stop_sequences(v)` | `Vec<String>` | `[]` | Stop sequences forwarded to the provider on every call |
-| `.with_loop_timeout_ms(n)` | `u64` | `None` | Wall-clock deadline for the entire ReAct loop in milliseconds |
+| `.with_stop_sequences(v)` | `Vec<String>` | `[]` | Stop sequences forwarded to the provider |
+| `.with_loop_timeout_ms(n)` | `u64` | `None` | Wall-clock deadline for the entire ReAct loop |
 
 ### `EpisodicStore` constructors
 
@@ -346,27 +429,24 @@ let result = cb.call(|| my_fallible_operation())?;
 
 ```rust
 // Synchronous handler
-let spec = ToolSpec::new("greet", "Greets someone", |args| {
+let spec = ToolSpec::new("greet", "Greets someone", |_args| {
     serde_json::json!({ "message": "hello" })
 });
 
 // Async handler
-let spec = ToolSpec::new_async("fetch", "Fetches a URL", |args| {
+let spec = ToolSpec::new_async("fetch", "Fetches a URL", |_args| {
     Box::pin(async move { serde_json::json!({ "status": "ok" }) })
 });
 
 // With validation and circuit breaker
-let spec = ToolSpec::new("search", "Searches the web", |args| {
+let spec = ToolSpec::new("search", "Searches the web", |_args| {
     serde_json::json!({ "results": [] })
 })
 .with_required_fields(vec!["q".to_string()])
 .with_circuit_breaker(cb_arc);
 ```
 
-### `AgentSession`
-
-Every call to `run_agent` / `run_agent_with_provider` returns an `AgentSession` with rich
-introspection methods:
+### `AgentSession` introspection
 
 | Method | Return | Description |
 |---|---|---|
@@ -375,57 +455,13 @@ introspection methods:
 | `final_answer()` | `Option<&str>` | The final answer text, if any |
 | `duration_secs()` | `f64` | Wall-clock duration in seconds |
 | `failed_tool_call_count()` | `usize` | Steps with error-bearing observations |
-| `step_success_count()` | `usize` | Steps without tool failures |
-| `checkpoint_error_count()` | `usize` | Number of checkpoint save errors |
 | `all_thoughts()` | `Vec<&str>` | All thought strings in step order |
 | `all_actions()` | `Vec<&str>` | All action strings in step order |
 | `all_observations()` | `Vec<&str>` | All observation strings in step order |
-| `action_lengths()` | `Vec<usize>` | Byte length of each action string |
-| `thought_lengths()` | `Vec<usize>` | Byte length of each thought string |
-| `total_thought_bytes()` | `usize` | Sum of all thought byte lengths |
-| `total_observation_bytes()` | `usize` | Sum of all observation byte lengths |
-| `avg_action_length()` | `f64` | Mean byte length of action strings |
-| `avg_thought_length()` | `f64` | Mean byte length of thought strings |
-| `longest_thought()` | `Option<&str>` | Thought string with the most bytes |
-| `shortest_action()` | `Option<&str>` | Action string with the fewest bytes |
-| `first_step_action()` | `Option<&str>` | Action of the first step |
-| `last_step_action()` | `Option<&str>` | Action of the last step |
 | `most_common_action()` | `Option<String>` | Most frequently used action string |
-| `count_steps_with_action(s)` | `usize` | Steps whose action matches `s` exactly |
-| `thought_contains_count(s)` | `usize` | Steps whose thought contains substring `s` |
-| `observation_contains_count(s)` | `usize` | Steps whose observation contains `s` |
-| `count_nonempty_thoughts()` | `usize` | Steps with a non-empty thought string |
-| `steps_above_thought_length(n)` | `usize` | Steps whose thought exceeds `n` bytes |
-| `unique_action_count()` | `usize` | Number of distinct action strings used |
-| `thought_char_counts()` | `Vec<usize>` | Unicode char count for each thought |
-| `observation_char_counts()` | `Vec<usize>` | Unicode char count for each observation |
-| `steps_with_observation_containing(s)` | `Vec<usize>` | Indices of steps whose observation contains `s` |
-| `is_empty()` | `bool` | `true` when the session has no steps |
-| `all_unique_thoughts()` | `Vec<&str>` | Deduplicated thought strings (insertion order) |
 | `step_at_index(i)` | `Option<&ReActStep>` | The step at the given zero-based index |
-| `thought_contains_all(terms)` | `usize` | Steps whose thought contains every term in the slice |
-| `action_contains_any(terms)` | `usize` | Steps whose action contains at least one term |
-| `max_thought_chars()` | `usize` | Largest Unicode char count across all thoughts |
-| `min_thought_chars()` | `usize` | Smallest Unicode char count across all thoughts |
-| `avg_action_chars()` | `f64` | Mean Unicode char count across all actions |
-| `avg_observation_chars()` | `f64` | Mean Unicode char count across all observations |
-| `step_with_longest_action()` | `Option<usize>` | Index of the step with the longest action |
-| `action_ends_with(suffix)` | `usize` | Steps whose action ends with the given suffix |
-| `thought_ends_with(suffix)` | `usize` | Steps whose thought ends with the given suffix |
-| `has_step_with_both(t, a)` | `bool` | Whether any step contains both thought `t` and action `a` |
-| `thought_word_counts()` | `Vec<usize>` | Whitespace-delimited word count for each thought |
-| `steps_sorted_by_thought_len()` | `Vec<usize>` | Step indices sorted by ascending thought length |
-| `steps_with_thought_longer_than(n)` | `Vec<usize>` | Indices of steps with thought longer than `n` chars |
-| `steps_with_action_containing(s)` | `Vec<usize>` | Indices of steps whose action contains `s` |
-| `observation_max_chars()` | `usize` | Largest Unicode char count across all observations |
-| `observation_min_chars()` | `usize` | Smallest non-zero Unicode char count across observations |
-| `action_word_counts()` | `Vec<usize>` | Whitespace-delimited word count for each action |
-| `thought_avg_chars()` | `f64` | Mean Unicode char count across all thoughts |
-| `thought_byte_range()` | `(usize, usize)` | `(min, max)` byte lengths across all thoughts |
 
 ### `RuntimeMetrics` live methods
-
-Called directly on `Arc<RuntimeMetrics>` for real-time access without snapshotting:
 
 | Method | Return | Description |
 |---|---|---|
@@ -433,345 +469,60 @@ Called directly on `Arc<RuntimeMetrics>` for real-time access without snapshotti
 | `total_sessions()` | `u64` | Total completed sessions |
 | `top_called_tool()` | `Option<String>` | Tool with the highest total call count |
 | `avg_step_latency_ms()` | `f64` | Mean step latency across all recorded latencies |
-| `distinct_tools_called()` | `usize` | Number of distinct tools with ≥1 call |
-| `agent_tool_call_count(agent)` | `u64` | Total tool calls attributed to `agent` |
 | `failure_rate_for(tool)` | `f64` | Per-tool failure rate (0.0–1.0) |
 | `tool_calls_per_session()` | `f64` | Mean tool calls per completed session |
-| `failure_free_tools()` | `Vec<String>` | Sorted names of tools with zero failures |
-| `checkpoint_errors_count()` | `u64` | Total checkpoint save errors |
-| `agents_with_failures()` | `Vec<String>` | Agent IDs with ≥1 recorded tool failure |
-| `total_agent_failures()` | `u64` | Sum of all per-agent tool failures |
-| `per_step_tool_call_rate()` | `f64` | Total tool calls divided by total steps |
-| `agents_with_no_failures()` | `Vec<String>` | Sorted agent IDs with calls but zero failures |
 
 ### `MetricsSnapshot`
 
-Obtained via `runtime.metrics().snapshot()`. All fields are plain integers, safe to log or
-serialize.
+Obtained via `runtime.metrics().snapshot()`. All fields are plain integers, safe to log or serialize.
 
 | Method | Return | Description |
 |---|---|---|
 | `tool_call_count(name)` | `u64` | Total calls for a named tool |
 | `tool_failure_count(name)` | `u64` | Total failures for a named tool |
-| `tool_success_count(name)` | `u64` | Calls minus failures for a tool |
-| `tool_names()` | `Vec<&str>` | Sorted names of tools with recorded calls |
 | `failure_rate()` | `f64` | Overall failure rate (0.0–1.0) |
-| `success_rate()` | `f64` | Overall success rate (0.0–1.0) |
-| `failed_tool_ratio_for(name)` | `f64` | Per-tool failure rate |
 | `most_called_tool()` | `Option<String>` | Tool name with the highest call count |
-| `tool_names_with_failures()` | `Vec<String>` | Sorted names of tools with ≥1 failure |
-| `avg_failures_per_session()` | `f64` | Failed tool calls per completed session |
-| `steps_per_tool_call()` | `f64` | Ratio of total steps to total tool calls |
-| `tool_diversity()` | `usize` | Number of distinct tools called |
-| `total_agent_count()` | `usize` | Distinct agents with recorded call data |
-| `agent_with_most_calls()` | `Option<String>` | Agent id with the highest total calls |
-| `backpressure_shed_rate()` | `f64` | Ratio of shed events to total tool calls |
-| `delta(after, before)` | `MetricsSnapshot` | Per-request delta (saturating subtraction) |
 | `to_json()` | `serde_json::Value` | Serialize for logging or export |
 
-### `EpisodicStore` helpers
-
-Beyond the core `add_episode` / `recall` / `clear` API:
-
-| Method | Description |
-|---|---|
-| `episode_count_for(agent)` | Episode count for a specific agent |
-| `agents_with_episodes()` | Sorted list of agents with at least one episode |
-| `content_lengths(agent)` | Byte lengths of episode contents in insertion order |
-| `total_content_bytes(agent)` | Sum of byte lengths of all episode contents |
-| `avg_content_length(agent)` | Mean byte length of episode contents |
-| `max_content_length(agent)` | Byte length of the longest episode |
-| `min_content_length(agent)` | Byte length of the shortest episode |
-| `high_importance_count(agent, t)` | Episodes with importance > `t` |
-| `episodes_by_importance(agent)` | Content strings sorted by descending importance |
-| `content_contains_count(agent, s)` | Episodes whose content contains substring `s` |
-| `episodes_with_importance_above(agent, t)` | Episodes whose importance exceeds `t` |
-| `agent_episode_importance_sum(agent)` | Sum of importance scores for an agent |
-| `episodes_min_importance(agent)` | Minimum importance across an agent's episodes |
-| `episode_min_content_words(agent)` | Lowest word count across an agent's episodes |
-| `episode_max_content_words(agent)` | Highest word count across an agent's episodes |
-| `total_items()` | Total episode count across all agents |
-| `all_episodes(agent)` | All `MemoryItem`s for an agent in insertion order |
-| `min_episode_count()` | Lowest per-agent episode count (excluding empty agents) |
-| `episodes_in_range(agent, min, max)` | Episodes with importance between `min` and `max` inclusive |
-| `agent_importance_range(agent)` | `Some((min, max))` importance values, or `None` if no episodes |
-| `max_episode_importance(agent)` | Maximum importance across an agent's episodes |
-
-### `WorkingMemory` helpers
-
-| Method | Description |
-|---|---|
-| `value_char_count(key)` | Unicode char count of the value stored under `key` |
-| `keys_longer_than(n)` | Keys whose string length exceeds `n` bytes |
-| `keys_shorter_than(n)` | Keys whose string length is less than `n` bytes |
-| `count_keys_below_bytes(n)` | Number of keys shorter than `n` bytes |
-| `values_with_prefix(prefix)` | Values whose string representation starts with `prefix` |
-| `values_with_suffix(suffix)` | Values whose string representation ends with `suffix` |
-
-### `SemanticStore` helpers
-
-| Method | Description |
-|---|---|
-| `count_by_tag(tag)` | Entries that contain `tag` |
-| `list_tags()` | Sorted list of all distinct tags |
-| `most_common_tag()` | Tag appearing most often across all entries |
-| `all_keys()` | Sorted list of all stored keys |
-| `total_value_bytes()` | Sum of byte lengths of all stored values |
-| `avg_value_bytes()` | Mean byte length of stored values |
-| `max_value_bytes()` | Byte length of the longest stored value |
-| `min_value_bytes()` | Byte length of the shortest stored value |
-| `tag_count()` | Number of distinct tags across all entries |
-| `entry_count_with_embedding()` | Entries with an associated embedding vector |
-
-### `GraphStore` query methods
-
-Beyond graph construction and traversal:
-
-| Method | Description |
-|---|---|
-| `relationship_kinds()` | Sorted list of distinct relationship kind strings |
-| `relationship_kind_count()` | Number of distinct relationship kinds |
-| `relationship_count_between(a, b)` | Directed relationships from `a` to `b` |
-| `edges_from(id)` | All `Relationship` objects originating from an entity |
-| `edges_to(id)` | All `Relationship` objects pointing to an entity |
-| `neighbors_of(id)` | Sorted `EntityId`s reachable in one hop |
-| `entities_with_self_loops()` | Entities where `from == to` |
-| `bidirectional_count()` | Pairs with edges in both directions |
-| `isolated_entity_count()` | Entities with no incoming or outgoing edges |
-| `total_in_degree()` | Sum of in-degrees (equals relationship count) |
-| `avg_relationship_weight()` | Mean weight of all relationships |
-| `avg_out_degree()` | Mean number of outgoing relationships per entity |
-| `avg_in_degree()` | Mean number of incoming relationships per entity |
-| `in_degree_of(id)` | In-degree of a specific entity |
-| `total_weight_for_kind(kind)` | Sum of weights across all edges with a given kind |
-| `entity_ids_with_label(label)` | Entity IDs whose label equals `label` |
-| `labels_unique_count()` | Number of distinct entity labels |
-| `relationships_from(id)` | All outgoing `Relationship`s for an entity |
-| `cycle_count()` | Number of distinct cycles in the graph |
-| `entities_with_property_key(key)` | Entities that have a property named `key` |
-| `entity_properties_count(key)` | Count of entities that have property `key` |
-| `entity_has_property_value(id, key, val)` | Whether an entity's property `key` equals `val` |
-| `all_entities_have_properties()` | `true` when every entity has at least one property |
-
-### `ToolRegistry`
-
-```rust
-// Check, remove, and query tools at runtime
-if registry.contains("old-tool") {
-    let removed: Option<ToolSpec> = registry.remove("old-tool");
-}
-
-// Introspect the registry
-let sorted   = registry.tool_names_sorted();           // Vec<&str>
-let avg_len  = registry.avg_description_length();      // f64
-let shortest = registry.shortest_description();        // Option<&str>
-let longest  = registry.longest_description();         // Option<&str>
-let count    = registry.description_contains_count("search"); // usize
-let matching = registry.names_containing("calc");      // Vec<&str>
-```
-
-### `FilePersistenceBackend`
-
-```rust
-// Conditional save — only checkpoint if one doesn't exist yet
-if !backend.exists("agent-1-session").await? {
-    backend.save("agent-1-session", &data).await?;
-}
-```
-
 ---
 
-## Multi-turn Dialogue Memory
+## Examples
 
-The `dialogue` module provides a lightweight conversation-history layer that
-sits alongside episodic memory.  Where `EpisodicStore` tracks long-term agent
-memories keyed by importance, `DialogueSession` tracks the exact sequence of
-turns in an ongoing conversation.
-
-### Key types
-
-| Type | Description |
-|---|---|
-| `Role` | Speaker role — `User`, `Assistant`, or `System` |
-| `DialogueTurn` | A single (role, content) pair |
-| `DialogueSession` | Ordered turn history for one conversation session |
-| `DialogueStore` | Concurrent `Arc<Mutex<HashMap>>` store of named sessions |
-| `DialogueContext` | Fully assembled prompt string combining episodic + dialogue history |
-
-### Usage
-
-```rust,no_run
-use llm_agent_runtime::dialogue::{DialogueStore, DialogueContext, Role};
-
-// Create a shared store (cheap to clone — all clones share the same map).
-let store = DialogueStore::new();
-
-// Append turns — creates the session automatically if it does not exist.
-store.append_turn("session-1", Role::User, "What is 6 × 7?").unwrap();
-store.append_turn("session-1", Role::Assistant, "42.").unwrap();
-
-// Retrieve and inspect the session.
-let session = store.get("session-1").unwrap().unwrap();
-println!("turns: {}", session.turn_count());
-
-// Truncate long histories (keeps last N turns + inserts a summary line).
-let mut session = session;
-session.summarize_if_long(20).unwrap();
-
-// Assemble a prompt-ready context that prepends recalled episodic memory.
-let ctx = DialogueContext::build(&session, Some("Rust is a systems language."));
-println!("{}", ctx.prompt);
-```
-
-Sessions and turns are fully serialisable with `serde`, making them easy to
-checkpoint alongside `AgentSession` data.
-
----
-
-## SSE Streaming
-
-The `streaming` module publishes agent reasoning events as Server-Sent Events
-(SSE) over a `tokio::sync::broadcast` channel.  Any number of HTTP clients can
-subscribe; the broadcaster is never blocked by slow consumers.
-
-### Key types
-
-| Type | Description |
-|---|---|
-| `AgentEvent` | Enum of `Thought`, `Action`, `Observation`, `Result`, `Error` |
-| `StreamBroadcaster` | Thin wrapper around `broadcast::Sender<String>` |
-| `AgentEventStream` | Owned stream with typed `emit_*` helpers |
-
-### SSE wire format
-
-Each event is a JSON object tagged with a `"type"` field, wrapped in the SSE
-`data: …\n\n` envelope:
-
-```
-data: {"type":"thought","content":"I should search the web."}\n\n
-data: {"type":"action","tool":"search","input":"{\"q\":\"Rust\"}"}\n\n
-data: {"type":"observation","content":"Rust is a systems language."}\n\n
-data: {"type":"result","content":"The answer is: Rust."}\n\n
-```
-
-### Usage
-
-```rust,no_run
-use llm_agent_runtime::streaming::AgentEventStream;
-
-#[tokio::main]
-async fn main() -> Result<(), llm_agent_runtime::AgentRuntimeError> {
-    // Create a stream with a 64-message ring buffer.
-    let stream = AgentEventStream::new(64)?;
-
-    // Subscribe *before* emitting so no messages are missed.
-    let mut rx = stream.broadcaster().subscribe();
-
-    // Emit events from the agent loop (these would typically live inside
-    // run_agent / run_agent_with_provider callbacks).
-    stream.emit_thought("I should look this up.")?;
-    stream.emit_action("search", r#"{"q":"Rust"}"#)?;
-    stream.emit_observation("Rust is fast and memory-safe.")?;
-    stream.emit_result("Rust is the answer.")?;
-
-    // Each subscriber reads raw SSE strings ready to forward over HTTP.
-    while let Ok(sse_line) = rx.try_recv() {
-        print!("{sse_line}");
-    }
-    Ok(())
-}
-```
-
-`StreamBroadcaster` and `AgentEventStream` are `Clone + Send + Sync`, so they
-can be passed into async tasks and across thread boundaries without an `Arc`
-wrapper.
-
----
-
-## Error Handling
-
-All public APIs return `Result<T, AgentRuntimeError>`. Match only the variants you care about:
-
-```rust
-use llm_agent_runtime::prelude::*;
-
-fn handle(err: AgentRuntimeError) {
-    match err {
-        AgentRuntimeError::CircuitOpen { service } =>
-            eprintln!("Circuit open for {service} — backing off"),
-        AgentRuntimeError::BackpressureShed { depth, capacity } =>
-            eprintln!("Shed: {depth}/{capacity} in-flight — try again later"),
-        AgentRuntimeError::AgentLoop(msg) =>
-            eprintln!("Agent loop failed: {msg}"),
-        AgentRuntimeError::Memory(msg) =>
-            eprintln!("Memory subsystem error: {msg}"),
-        AgentRuntimeError::Graph(msg) =>
-            eprintln!("Graph subsystem error: {msg}"),
-        AgentRuntimeError::Persistence(msg) =>
-            eprintln!("Persistence error: {msg}"),
-        AgentRuntimeError::Provider(msg) =>
-            eprintln!("LLM provider error: {msg}"),
-        other => eprintln!("Other error: {other}"),
-    }
-}
-```
-
-All production code paths are panic-free. Clippy denies `unwrap_used`, `expect_used`,
-`panic`, and `todo` in `src/`.
-
----
-
-## Running Tests
+Run any example with:
 
 ```sh
-# Default feature set
-cargo test
-
-# All features including persistence and providers
-cargo test --all-features
-
-# A specific module
-cargo test --lib memory
-cargo test --lib graph
-
-# With structured log output
-RUST_LOG=agent_runtime=debug cargo test -- --nocapture
+cargo run --example <name> --features <required-features>
 ```
 
-Run the full CI suite locally:
-
-```sh
-cargo fmt --all -- --check
-cargo clippy --all-features -- -D warnings
-cargo test --all-features
-cargo doc --no-deps --all-features
-cargo build --release --all-features
-```
+| Example | Features | Description |
+|---|---|---|
+| `multi_turn_chat` | `memory` | Multi-turn dialogue with episodic memory |
+| `multi_agent` | `memory` | Multiple agents sharing a memory store |
+| `resilient_tool` | `orchestrator` | Tool calls protected by circuit breaker |
+| `orchestrator_composition` | `orchestrator` | Composed pipeline + retry + dedup |
+| `custom_persistence` | `persistence,memory` | Custom checkpointing backend |
+| `working_memory_evolution` | `memory` | Working memory LRU eviction |
+| `streaming_inference` | _(default)_ | SSE streaming with a stub provider |
+| `graph_query_agent` | `graph` | Agent that queries a knowledge graph |
+| `anthropic_provider` | `anthropic,memory` | Live Anthropic API call |
 
 ---
 
 ## Contributing
 
-1. Fork the repository and create a descriptive feature branch.
-2. Add tests for every new public function, struct, and trait. The project maintains over
-   2,600 tests across all modules and targets a minimum 1:1 test-to-production line ratio.
-3. All production paths must be panic-free. Use `Result` for every fallible operation.
-   Clippy denies `unwrap_used`, `expect_used`, `panic`, and `todo` in `src/`.
-4. Run `cargo test --all-features` and `cargo clippy --all-features -- -D warnings` with
-   zero failures before opening a pull request.
-5. New public items require `///` doc comments. The crate enforces `#![deny(missing_docs)]`.
-6. Describe the motivation and design decisions in the PR body.
+Contributions are welcome. Please follow these guidelines:
 
-**Checklist before opening a PR:**
+1. **Fork and branch** — create a feature branch from `main` (`git checkout -b feat/my-feature`).
+2. **Stay zero-panic** — the project enforces `clippy::unwrap_used = "deny"` and `clippy::panic = "deny"` in all non-test code. Use `?`, `if let`, or `match` instead of `.unwrap()` / `.expect()` in `src/`.
+3. **Document public items** — `#![deny(missing_docs)]` is set at the crate root. Every new `pub` item must have a doc comment.
+4. **Write tests** — unit tests live in an inline `#[cfg(test)] mod tests` block at the bottom of each module. Use `#[allow(clippy::unwrap_used)]` only inside test modules.
+5. **Run the full check suite locally** before opening a PR:
+   ```sh
+   cargo fmt --check
+   cargo clippy --all-features -- -D warnings
+   cargo test --all-features
+   ```
+6. **Open a PR** against `main` with a clear description of what the change does and why.
+7. **Changelog** — add a line to `CHANGELOG.md` under the `Unreleased` section (create the file if it does not exist).
 
-- [ ] `cargo test --all-features` passes
-- [ ] `cargo clippy --all-features -- -D warnings` passes
-- [ ] `cargo fmt --all -- --check` passes
-- [ ] `cargo doc --no-deps --all-features` passes with `RUSTDOCFLAGS="-D warnings"`
-- [ ] New public items have `///` doc comments
-
----
-
-## License
-
-Licensed under the MIT License. See [LICENSE](LICENSE) for details.
+For bug reports, please include the `cargo --version`, `rustc --version`, your `Cargo.toml` feature flags, and a minimal reproducible example.
