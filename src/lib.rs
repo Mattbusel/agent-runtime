@@ -196,6 +196,12 @@ pub mod tool_validator;
 /// Structured per-agent metrics tracking for multi-agent systems.
 pub mod agent_metrics;
 
+/// DAG-based workflow execution with topological sort and parallel execution.
+pub mod dag;
+
+/// Fixed-size slab memory pool for agent message buffers with use-after-free protection.
+pub mod memory_pool;
+
 #[cfg(feature = "persistence")]
 pub mod persistence;
 
