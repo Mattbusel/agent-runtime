@@ -359,7 +359,12 @@ pub enum PlannerError {
     /// A compound task has methods but none have satisfied preconditions.
     NoPreconditionSatisfied(String),
     /// The decomposition depth exceeded [`PlannerConfig::max_depth`].
-    DepthExceeded { task: String, max_depth: usize },
+    DepthExceeded {
+        /// The name of the task that caused the depth limit to be exceeded.
+        task: String,
+        /// The configured maximum decomposition depth.
+        max_depth: usize,
+    },
     /// The plan grew beyond [`PlannerConfig::max_steps`].
     StepLimitExceeded(usize),
 }
@@ -393,7 +398,7 @@ impl std::error::Error for PlannerError {}
 // graph where steps declare their dependencies explicitly, supports parallel
 // execution, conditional branching, and per-step retry policies.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 
 // ---------------------------------------------------------------------------
 // DagPlanStep
@@ -544,10 +549,11 @@ impl DagExecutionPlan {
                 // Reduce in-degree for every step that depends on `id`.
                 for other in self.steps.values() {
                     if other.depends_on.iter().any(|d| d == id) {
-                        let deg = in_degree.get_mut(other.id.as_str()).unwrap_or(&mut 0);
-                        *deg = deg.saturating_sub(1);
-                        if *deg == 0 {
-                            queue.push_back(other.id.as_str());
+                        if let Some(deg) = in_degree.get_mut(other.id.as_str()) {
+                            *deg = deg.saturating_sub(1);
+                            if *deg == 0 {
+                                queue.push_back(other.id.as_str());
+                            }
                         }
                     }
                 }
@@ -639,10 +645,10 @@ impl DagExecutionPlan {
     }
 
     // Recursive DFS helper for cycle detection.
-    fn dfs_cycle(
-        node: &str,
-        steps: &std::collections::HashMap<String, DagPlanStep>,
-        colour: &mut std::collections::HashMap<&str, u8>,
+    fn dfs_cycle<'a>(
+        node: &'a str,
+        steps: &'a std::collections::HashMap<String, DagPlanStep>,
+        colour: &mut std::collections::HashMap<&'a str, u8>,
     ) -> Result<(), String> {
         *colour.entry(node).or_insert(0) = 1; // gray
         if let Some(step) = steps.get(node) {

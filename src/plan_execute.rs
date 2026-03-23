@@ -521,7 +521,7 @@ impl PlanExecuteAgent {
 
         if plan.step_count() == 0 {
             warn!(agent = %self.agent_id, "plan-execute: LLM returned empty plan");
-            return Err(AgentRuntimeError::AgentError(
+            return Err(AgentRuntimeError::Internal(
                 "Plan-Execute planning phase produced no steps. \
                  Check that the inference function returns a numbered list."
                     .to_string(),

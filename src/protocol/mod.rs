@@ -320,7 +320,7 @@ impl ProtocolRouter {
     /// - For delegate messages with `required_capability`: returns all agents
     ///   that have that capability.
     /// - For broadcasts (no `to`, no capability): returns all registered agents.
-    pub fn route(&self, msg: &AgentMessage) -> Vec<&AgentId> {
+    pub fn route<'a>(&'a self, msg: &'a AgentMessage) -> Vec<&'a AgentId> {
         if let Some(to) = &msg.to {
             return vec![to];
         }

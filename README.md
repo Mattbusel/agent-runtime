@@ -5,8 +5,10 @@
 [![docs.rs](https://docs.rs/llm-agent-runtime/badge.svg)](https://docs.rs/llm-agent-runtime)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Multi-Agent](https://img.shields.io/badge/multi--agent-bus%20%7C%20teams-blueviolet)](#multi-agent-message-bus)
+[![Streaming](https://img.shields.io/badge/inference-streaming-brightgreen)](#streaming-inference)
 
-`agent-runtime` is a batteries-included, async-first Rust crate for building production LLM agents. It unifies a ReAct (Thought-Action-Observation) loop, episodic and semantic memory with decay and cosine-similarity recall, a directed knowledge graph with centrality and community detection, an orchestration layer with circuit breakers and retry/backpressure, pluggable LLM providers with SSE streaming, optional file-based session checkpointing, intelligent memory compression for long-running agents, and a peer-discovery registry for multi-agent systems — all in a single crate, driven by a compile-time typestate builder that makes misconfiguration a compiler error rather than a runtime panic.
+`agent-runtime` is a batteries-included, async-first Rust crate for building production LLM agents. It unifies a ReAct (Thought-Action-Observation) loop, episodic and semantic memory with decay and cosine-similarity recall, a directed knowledge graph with centrality and community detection, an orchestration layer with circuit breakers and retry/backpressure, pluggable LLM providers with SSE streaming, optional file-based session checkpointing, intelligent memory compression for long-running agents, a peer-discovery registry, a **multi-agent message bus** with role-based routing, **agent teams** with Star/Mesh/Ring topologies and Majority/Pipeline/Parallel consensus, and **token-by-token streaming inference** with real-time callbacks — all in a single crate, driven by a compile-time typestate builder that makes misconfiguration a compiler error rather than a runtime panic.
 
 ---
 
@@ -28,6 +30,238 @@
 | `compression` | no | `MemoryCompressor`, `ImportanceStrategy`, `MemorySummary` — token-budget-aware compression of episodic memory |
 | `discovery` | no | `AgentRegistry`, `CapabilityQuery`, `CapabilityMatch` — TTL-based peer capability advertisement and tag-overlap matching |
 | `full` | no | All of the above simultaneously |
+
+---
+
+## Architecture
+
+```
+  User Code
+     │
+     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  AgentRuntime  (typestate builder: NeedsConfig → HasConfig → build())   │
+│                                                                         │
+│  .run_agent(id, prompt, infer_fn)        Single agent, ReAct loop       │
+│  .run_team(team_config, infer_fn)        Multi-agent team               │
+│  .bus(capacity)                          AgentBus factory               │
+└──┬──────────────┬──────────────┬─────────────────────────┬─────────────┘
+   │              │              │                         │
+   ▼              ▼              ▼                         ▼
+┌────────┐  ┌─────────┐  ┌────────────┐  ┌───────────────────────────────┐
+│bus.rs  │  │team.rs  │  │streaming.rs│  │  agent.rs  /  runtime.rs      │
+│        │  │         │  │            │  │                               │
+│AgentBus│  │AgentTeam│  │Streaming   │  │  ReActLoop   ToolRegistry     │
+│Broadcast│ │TeamConfig│ │InferenceI  │  │  AgentConfig CircuitBreaker   │
+│Role    │  │Consensus│  │Callbacks   │  │  EpisodicStore  GraphStore    │
+│Target  │  │Topology │  │TokenStream │  │  WorkingMemory  BackpressureG │
+└────────┘  └─────────┘  └────────────┘  └───────────────────────────────┘
+```
+
+### New in this release
+
+| Module | Key Types | Purpose |
+|--------|-----------|---------|
+| `bus` | `AgentBus`, `AgentMessage`, `AgentTarget`, `BusSubscription` | Async broadcast bus for peer-to-peer and role-based agent messaging |
+| `team` | `AgentTeam`, `TeamConfig`, `TeamOrchestrator`, `ConsensusStrategy` | Spawn teams of agents with Star/Mesh/Ring topologies and Majority/Pipeline/Parallel consensus |
+| `streaming` | `InferenceToken`, `StreamingInference`, `StreamingReActLoop`, `StreamingCallbacks` | Token-by-token streaming ReAct loop with per-token, per-thought, and per-action callbacks |
+
+---
+
+## Multi-Agent Message Bus
+
+The `AgentBus` is an async broadcast channel where agents can publish and subscribe to
+messages.  Every subscriber receives every published message; each `BusSubscription`
+filters silently for messages addressed to its agent ID or role.
+
+### Targets
+
+| `AgentTarget` variant | Who receives the message |
+|---|---|
+| `Broadcast` | All current subscribers |
+| `Specific(id)` | The single agent with the matching `AgentId` |
+| `Role(name)` | Every agent registered with that role name |
+
+### Example
+
+```rust
+use llm_agent_runtime::bus::{AgentBus, AgentMessage, AgentTarget};
+use llm_agent_runtime::types::AgentId;
+
+#[tokio::main]
+async fn main() {
+    let bus = AgentBus::new(256);
+
+    let planner = AgentId::new("planner");
+    let executor = AgentId::new("executor");
+
+    // Subscribe both agents.  executor registers the "executor" role.
+    let mut planner_sub = bus.subscribe(planner.clone(), Some("planner".to_string()));
+    let mut executor_sub = bus.subscribe(executor.clone(), Some("executor".to_string()));
+
+    // Planner sends a task directly to the executor.
+    bus.send(AgentMessage::new(
+        planner.clone(),
+        AgentTarget::Specific(executor.clone()),
+        "Summarise Q3 results",
+    )).unwrap();
+
+    // Executor receives it.
+    let msg = executor_sub.recv().await.unwrap();
+    println!("executor received: {}", msg.content);
+
+    // Broadcast a status update to all agents.
+    bus.send(AgentMessage::new(
+        executor.clone(),
+        AgentTarget::Broadcast,
+        "Task complete",
+    )).unwrap();
+
+    let reply = planner_sub.recv().await.unwrap();
+    println!("planner received: {}", reply.content);
+}
+```
+
+You can also create a bus from the runtime:
+
+```rust
+let bus = runtime.bus(256);
+```
+
+---
+
+## Agent Teams
+
+`AgentTeam` declares a group of collaborating agents.  `TeamOrchestrator` drives the
+run using the `AgentBus` for message routing and one of three consensus strategies.
+
+### Communication Topologies
+
+| `CommunicationTopology` | Message routing |
+|---|---|
+| `Star` (default) | Members report to the leader only |
+| `Mesh` | Every agent broadcasts to all others |
+| `Ring` | Directed ring: agent i → agent (i+1) % n |
+
+### Consensus Strategies
+
+| `ConsensusStrategy` | How the final answer is chosen |
+|---|---|
+| `Parallel` (default) | All members work concurrently; leader synthesises their answers |
+| `Majority` | Each agent votes; the most frequent answer wins |
+| `Pipeline` | Agents run in sequence; each refines the previous agent's output |
+
+### Example
+
+```rust
+use llm_agent_runtime::prelude::*;
+use llm_agent_runtime::team::{AgentTeam, TeamConfig, ConsensusStrategy, CommunicationTopology};
+
+#[tokio::main]
+async fn main() -> Result<(), AgentRuntimeError> {
+    let runtime = AgentRuntime::builder()
+        .with_agent_config(AgentConfig::new(5, "my-model"))
+        .build();
+
+    let team = AgentTeam::new(
+        AgentId::new("leader"),
+        vec![AgentId::new("analyst-1"), AgentId::new("analyst-2")],
+        "Classify these support tickets by severity",
+    );
+
+    let config = TeamConfig::new(team)
+        .with_topology(CommunicationTopology::Star)
+        .with_consensus(ConsensusStrategy::Parallel)
+        .with_max_rounds(3);
+
+    // infer is called once per agent — swap for a real provider call.
+    let result = runtime
+        .run_team(config, |agent_id, prompt| async move {
+            format!("{agent_id}: severity=high (stubbed)")
+        })
+        .await?;
+
+    println!("Team answer: {}", result.final_answer);
+    println!("Rounds completed: {}", result.rounds_completed);
+    println!("Messages exchanged: {}", result.messages_exchanged);
+    Ok(())
+}
+```
+
+---
+
+## Streaming Inference
+
+`StreamingReActLoop` runs the same Thought-Action-Observation protocol as `ReActLoop`
+but consumes tokens one at a time, firing callbacks as they arrive.
+
+### Callbacks
+
+| Callback | Fires when |
+|---|---|
+| `on_token(token)` | Every `InferenceToken` arrives from the provider |
+| `on_thought(text)` | A complete `Thought:` line has been assembled |
+| `on_action(action)` | A complete `Action:` line has been parsed |
+
+### Implementing `StreamingInference`
+
+```rust
+use llm_agent_runtime::streaming::{InferenceToken, StreamingInference, TokenStream};
+use futures::stream;
+
+struct MyProvider;
+
+impl StreamingInference for MyProvider {
+    fn infer_stream<'a>(&'a self, prompt: &'a str) -> TokenStream<'a> {
+        // In practice, call your LLM API and stream tokens.
+        let tokens = vec![
+            InferenceToken::thought("I should answer directly"),
+            InferenceToken::final_answer("The answer is 42"),
+        ];
+        Box::pin(stream::iter(tokens))
+    }
+}
+```
+
+### Full streaming example
+
+```rust
+use llm_agent_runtime::streaming::{
+    InferenceToken, StreamingCallbacks, StreamingInference, StreamingReActLoop, TokenStream,
+};
+use futures::stream;
+
+struct Stub;
+impl StreamingInference for Stub {
+    fn infer_stream<'a>(&'a self, _prompt: &'a str) -> TokenStream<'a> {
+        Box::pin(stream::iter(vec![
+            InferenceToken::thought("I should answer"),
+            InferenceToken::final_answer("42"),
+        ]))
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let callbacks = StreamingCallbacks::new()
+        .on_token(|tok| print!("{}", tok.text))
+        .on_thought(|thought| println!("\n[THOUGHT] {thought}"))
+        .on_action(|action| println!("[ACTION]  {action:?}"));
+
+    let mut loop_ = StreamingReActLoop::new(Stub, 10)
+        .with_callbacks(callbacks)
+        .with_tool_handler(|name, args| {
+            format!("tool {name} returned: {args}")
+        });
+
+    let session = loop_.run("What is 6 * 7?").await.unwrap();
+
+    println!("\nCompleted: {}", session.is_completed());
+    println!("Steps: {}", session.step_count());
+    println!("Tokens: {}", session.total_token_count());
+    println!("Answer: {:?}", session.final_answer());
+}
+```
 
 ---
 
