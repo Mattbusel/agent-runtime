@@ -414,3 +414,9 @@ pub mod agent_monitor;
 
 /// Structured inter-agent communication protocol: typed messages, CRC-32 checksums, sequence tracking.
 pub mod communication_protocol;
+
+/// Priority-based task scheduler with deadlines, FIFO tie-breaking, and expiry drain.
+pub mod task_scheduler;
+
+/// Raft-lite quorum voting engine: elections, heartbeats, log replication, step-down.
+pub mod consensus_engine;
