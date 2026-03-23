@@ -450,3 +450,9 @@ pub mod capability_registry;
 
 /// Event store with projections and replay: append-only log, snapshots, CountProjection, TimelineProjection.
 pub mod event_sourcing;
+
+/// Hierarchical state machine (HSM): guarded transitions, entry/exit hooks, parent-chain ancestry, fluent builder.
+pub mod state_machine;
+
+/// Peer-to-peer agent mesh with gossip protocol: join/leave, directed/broadcast messaging, version-based state merge.
+pub mod agent_mesh;
