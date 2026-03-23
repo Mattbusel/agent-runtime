@@ -886,15 +886,20 @@ impl<P: StreamingInference> StreamingReActLoop<P> {
             let mut step_tokens = 0usize;
             let mut step_logprob_sum = 0.0f64;
 
-            let mut stream = self.provider.infer_stream(&context);
-            while let Some(token) = stream.next().await {
-                step_tokens += 1;
-                total_tokens += 1;
-                step_logprob_sum += token.logprob.unwrap_or(0.0);
-                response_buf.push_str(&token.text);
-                self.callbacks.fire_token(&token);
-                let done = token.is_final;
-                if done { break; }
+            {
+                // Clone so the borrow of `context` via `stream` does not
+                // block the reassignment of `context` later in the loop.
+                let context_snapshot = context.clone();
+                let mut stream = self.provider.infer_stream(&context_snapshot);
+                while let Some(token) = stream.next().await {
+                    step_tokens += 1;
+                    total_tokens += 1;
+                    step_logprob_sum += token.logprob.unwrap_or(0.0);
+                    response_buf.push_str(&token.text);
+                    self.callbacks.fire_token(&token);
+                    let done = token.is_final;
+                    if done { break; }
+                }
             }
 
             let (thought, action) = parse_streaming_response(&response_buf);
@@ -903,18 +908,18 @@ impl<P: StreamingInference> StreamingReActLoop<P> {
                 self.callbacks.fire_thought(&thought);
             }
 
-            let parsed_action = crate::agent::parse_react_step(&response_buf)
-                .map(|s| s.action.clone())
-                .unwrap_or_else(|| Action::FinalAnswer(action.clone()));
+            // Parse the raw action string into a structured Action enum.
+            let parsed_action = Action::parse(&action)
+                .unwrap_or_else(|_| Action::FinalAnswer(action.clone()));
 
             self.callbacks.fire_action(&parsed_action);
 
             let observation = match &parsed_action {
                 Action::FinalAnswer(_) => String::new(),
-                Action::ToolCall { tool, args } => {
+                Action::ToolCall { name, args } => {
                     if let Some(ref handler) = self.tool_handler {
                         let args_str = serde_json::to_string(args).unwrap_or_default();
-                        handler(tool.as_str(), &args_str)
+                        handler(name.as_str(), &args_str)
                     } else {
                         "(no tool handler registered)".to_string()
                     }
