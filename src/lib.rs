@@ -235,6 +235,12 @@ pub mod circuit_breaker;
 /// In-memory bounded message queue with priority ordering and optional TTL expiry.
 pub mod message_queue;
 
+/// Task execution with timeout, retry, and live progress reporting.
+pub mod task_runner;
+
+/// Structured logging for agents: levels, sinks, filtering, spans, and ring-buffer export.
+pub mod agent_logger;
+
 // ── Top-level re-exports ────────────────────────────────────────────────────
 
 pub use error::AgentRuntimeError;
