@@ -390,3 +390,9 @@ pub mod goal_decomposer;
 
 /// BM25 full-text retrieval over agent memory entries with tag-based filtering.
 pub mod memory_retrieval;
+
+/// Structured plan executor: sequential step execution with retry, timeout, and rollback.
+pub mod plan_executor;
+
+/// Context builder: multi-source chunk aggregation, relevance filtering, dedup, and token-budgeted selection.
+pub mod context_builder;
