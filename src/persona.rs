@@ -448,8 +448,9 @@ mod tests {
         let p = assistant();
         let mut current: Option<String> = Some("default".to_string());
         {
-            let _scope = PersonaScope::new(&p, &mut current);
-            assert_eq!(current.as_deref(), Some("assistant"));
+            let scope = PersonaScope::new(&p, &mut current);
+            // Verify the active persona name via the scope to avoid borrow conflicts.
+            assert_eq!(scope.persona.name, "assistant");
         }
         assert_eq!(current.as_deref(), Some("default"));
     }

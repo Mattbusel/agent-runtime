@@ -360,3 +360,9 @@ pub use checkpoint::{
     AgentCheckpoint, CheckpointError, CheckpointManager, CheckpointStore,
     FileCheckpointStore, InMemoryCheckpointStore, MemoryEntry,
 };
+
+/// RBAC-lite policy enforcement: roles, principals, allow/deny rules, glob matching, rate limiting.
+pub mod policy;
+
+/// Distributed tracing context propagation: W3C Trace Context headers, task-local storage, timed spans.
+pub mod tracing_context;
