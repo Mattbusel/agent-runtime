@@ -2537,6 +2537,7 @@ impl AgentRuntimeBuilder<HasConfig> {
             agent_config,
             tools: self.tools,
             metrics: self.metrics,
+            metrics_registry: crate::metrics::MetricsRegistry::new(),
             token_estimator: self
                 .token_estimator
                 .unwrap_or_else(|| Arc::new(CharDivTokenEstimator)),
@@ -2596,6 +2597,8 @@ pub struct AgentRuntime {
     agent_config: AgentConfig,
     tools: Vec<Arc<ToolSpec>>,
     metrics: Arc<RuntimeMetrics>,
+    /// Prometheus-style metrics registry (counters, gauges, histograms).
+    metrics_registry: Arc<crate::metrics::MetricsRegistry>,
     #[cfg(feature = "persistence")]
     checkpoint_backend: Option<Arc<dyn crate::persistence::PersistenceBackend>>,
     token_estimator: Arc<dyn TokenEstimator>,
@@ -2643,6 +2646,21 @@ impl AgentRuntime {
     /// Return a shared reference to the runtime metrics.
     pub fn metrics(&self) -> Arc<RuntimeMetrics> {
         Arc::clone(&self.metrics)
+    }
+
+    /// Return a shared reference to the Prometheus-style [`MetricsRegistry`].
+    ///
+    /// The registry is pre-populated with five standard counters, gauges, and
+    /// histograms:
+    /// - `agent_inferences_total` (counter)
+    /// - `agent_inference_latency_ms` (histogram)
+    /// - `agent_memory_entries` (gauge)
+    /// - `agent_tool_calls_total` (counter)
+    /// - `agent_errors_total` (counter)
+    ///
+    /// [`MetricsRegistry`]: crate::metrics::MetricsRegistry
+    pub fn metrics_registry(&self) -> &crate::metrics::MetricsRegistry {
+        &self.metrics_registry
     }
 
     /// Return a reference to the tool registry.
@@ -2944,8 +2962,24 @@ impl AgentRuntime {
         // child spans (ReActLoop iterations, tool calls) carry this field.
         tracing::Span::current().record("session_id", &session_id.as_str());
 
+        let infer_start = Instant::now();
         let steps = react_loop.run(&enriched_prompt, infer).await?;
         let duration_ms = start.elapsed().as_millis() as u64;
+        let infer_latency_ms = infer_start.elapsed().as_millis() as u64;
+
+        // Record metrics in the Prometheus-style registry.
+        {
+            let reg = &self.metrics_registry;
+            reg.counter("agent_inferences_total", "").inc();
+            reg.histogram(
+                "agent_inference_latency_ms",
+                "",
+                vec![1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0],
+            )
+            .observe(infer_latency_ms as f64);
+            reg.counter("agent_tool_calls_total", "")
+                .inc_by(steps.iter().filter(|s| s.is_tool_call()).count() as u64);
+        }
 
         // Item 6 — collect per-step checkpoint errors; surfaced in AgentSession.
         #[cfg(feature = "persistence")]

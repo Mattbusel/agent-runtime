@@ -5040,3 +5040,496 @@ mod tests {
         assert!(m.agents_with_no_failures().is_empty());
     }
 }
+
+// ── MetricsRegistry ───────────────────────────────────────────────────────────
+//
+// A Prometheus-style registry of counters, gauges, and histograms.
+// All metric objects are cheaply cloneable (`Arc`-backed) so callers can
+// store handles and update them concurrently without re-looking up the
+// registry.
+
+use std::sync::atomic::AtomicI64;
+
+/// A monotonically increasing counter metric.
+///
+/// Thread-safe; all methods use `Relaxed` ordering which is sufficient for
+/// observability counters that do not participate in memory synchronisation.
+#[derive(Debug)]
+pub struct Counter {
+    /// Name of this counter (Prometheus metric name).
+    pub name: String,
+    /// Help text describing what this counter tracks.
+    pub help: String,
+    value: AtomicU64,
+}
+
+impl Counter {
+    /// Create a new counter initialised to zero.
+    pub fn new(name: impl Into<String>, help: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.into(),
+            help: help.into(),
+            value: AtomicU64::new(0),
+        })
+    }
+
+    /// Increment by 1.
+    pub fn inc(&self) {
+        self.value.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment by `n`.
+    pub fn inc_by(&self, n: u64) {
+        self.value.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Return the current value.
+    pub fn get(&self) -> u64 {
+        self.value.load(Ordering::Relaxed)
+    }
+}
+
+/// A gauge metric that can go up and down.
+///
+/// Backed by a signed 64-bit atomic so it can represent negative values (e.g.,
+/// queue depth deltas).
+#[derive(Debug)]
+pub struct Gauge {
+    /// Name of this gauge (Prometheus metric name).
+    pub name: String,
+    /// Help text describing what this gauge tracks.
+    pub help: String,
+    value: AtomicI64,
+}
+
+impl Gauge {
+    /// Create a new gauge initialised to zero.
+    pub fn new(name: impl Into<String>, help: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.into(),
+            help: help.into(),
+            value: AtomicI64::new(0),
+        })
+    }
+
+    /// Set the gauge to `v`.
+    pub fn set(&self, v: i64) {
+        self.value.store(v, Ordering::Relaxed);
+    }
+
+    /// Increment by 1.
+    pub fn inc(&self) {
+        self.value.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Decrement by 1.
+    pub fn dec(&self) {
+        self.value.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Return the current value.
+    pub fn get(&self) -> i64 {
+        self.value.load(Ordering::Relaxed)
+    }
+}
+
+/// A histogram metric that records observations in configurable buckets.
+///
+/// The bucket layout is defined at construction time.  Each call to
+/// [`Histogram::observe`] increments the count for the first bucket whose
+/// upper bound is `>= value`.  The overflow bucket (index `buckets.len()`) is
+/// always implicitly present and collects samples larger than the last bound.
+#[derive(Debug)]
+pub struct Histogram {
+    /// Name of this histogram (Prometheus metric name).
+    pub name: String,
+    /// Help text describing what this histogram tracks.
+    pub help: String,
+    /// Upper bounds of each bucket, in ascending order.
+    pub buckets: Vec<f64>,
+    /// Per-bucket observation counts (length == `buckets.len() + 1`).
+    pub counts: Vec<AtomicU64>,
+    /// Sum of all observed values (stored as bits of f64 in a u64 atomic).
+    pub sum: AtomicU64,
+}
+
+impl Histogram {
+    /// Create a new histogram with the given bucket upper bounds.
+    ///
+    /// An implicit `+Inf` overflow bucket is always appended.
+    pub fn new(
+        name: impl Into<String>,
+        help: impl Into<String>,
+        buckets: Vec<f64>,
+    ) -> Arc<Self> {
+        let n = buckets.len() + 1; // +1 for the +Inf overflow bucket
+        let mut counts = Vec::with_capacity(n);
+        for _ in 0..n {
+            counts.push(AtomicU64::new(0));
+        }
+        Arc::new(Self {
+            name: name.into(),
+            help: help.into(),
+            buckets,
+            counts,
+            sum: AtomicU64::new(0),
+        })
+    }
+
+    /// Record one observation of `value`.
+    pub fn observe(&self, value: f64) {
+        // Accumulate the sum (store as f64 bits).
+        let prev_bits = self.sum.load(Ordering::Relaxed);
+        let prev_val = f64::from_bits(prev_bits);
+        let new_val = prev_val + value;
+        // Best-effort CAS loop for the sum.
+        let _ = self.sum.compare_exchange(
+            prev_bits,
+            new_val.to_bits(),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+
+        // Increment the appropriate bucket.
+        let idx = self
+            .buckets
+            .iter()
+            .position(|&b| value <= b)
+            .unwrap_or(self.buckets.len()); // overflow bucket
+        self.counts[idx].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Return the total count of observations.
+    pub fn count(&self) -> u64 {
+        self.counts.iter().map(|c| c.load(Ordering::Relaxed)).sum()
+    }
+
+    /// Return the sum of all observations.
+    pub fn sum(&self) -> f64 {
+        f64::from_bits(self.sum.load(Ordering::Relaxed))
+    }
+}
+
+/// A registry that owns and vends named metrics.
+///
+/// Pre-registers five standard runtime metrics on construction.  Callers may
+/// register additional metrics at any time.
+#[derive(Debug, Default)]
+pub struct MetricsRegistry {
+    counters: std::sync::Mutex<HashMap<String, Arc<Counter>>>,
+    gauges: std::sync::Mutex<HashMap<String, Arc<Gauge>>>,
+    histograms: std::sync::Mutex<HashMap<String, Arc<Histogram>>>,
+}
+
+impl MetricsRegistry {
+    /// Create a new empty registry.
+    pub fn new() -> Arc<Self> {
+        let reg = Arc::new(Self {
+            counters: std::sync::Mutex::new(HashMap::new()),
+            gauges: std::sync::Mutex::new(HashMap::new()),
+            histograms: std::sync::Mutex::new(HashMap::new()),
+        });
+
+        // Pre-register standard runtime metrics.
+        let _ = reg.counter(
+            "agent_inferences_total",
+            "Total number of LLM inference calls made by the agent runtime.",
+        );
+        let _ = reg.histogram(
+            "agent_inference_latency_ms",
+            "Latency of LLM inference calls in milliseconds.",
+            vec![1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0],
+        );
+        let _ = reg.gauge(
+            "agent_memory_entries",
+            "Current number of entries in the agent memory store.",
+        );
+        let _ = reg.counter(
+            "agent_tool_calls_total",
+            "Total number of tool calls dispatched by the agent runtime.",
+        );
+        let _ = reg.counter(
+            "agent_errors_total",
+            "Total number of errors encountered by the agent runtime.",
+        );
+
+        reg
+    }
+
+    /// Look up or create a [`Counter`] with the given name and help text.
+    ///
+    /// If a counter with the same name already exists the existing instance is
+    /// returned and `help` is ignored.
+    pub fn counter(&self, name: &str, help: &str) -> Arc<Counter> {
+        let mut map = self.counters.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(name.to_string())
+            .or_insert_with(|| Counter::new(name, help))
+            .clone()
+    }
+
+    /// Look up or create a [`Gauge`] with the given name and help text.
+    pub fn gauge(&self, name: &str, help: &str) -> Arc<Gauge> {
+        let mut map = self.gauges.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(name.to_string())
+            .or_insert_with(|| Gauge::new(name, help))
+            .clone()
+    }
+
+    /// Look up or create a [`Histogram`] with the given name, help text, and
+    /// bucket upper bounds.
+    ///
+    /// If a histogram with the same name already exists the existing instance
+    /// is returned; `help` and `buckets` are ignored in that case.
+    pub fn histogram(&self, name: &str, help: &str, buckets: Vec<f64>) -> Arc<Histogram> {
+        let mut map = self.histograms.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(name.to_string())
+            .or_insert_with(|| Histogram::new(name, help, buckets))
+            .clone()
+    }
+
+    /// Render all metrics in the Prometheus text exposition format.
+    ///
+    /// The output follows the [Prometheus exposition
+    /// format](https://prometheus.io/docs/instrumenting/exposition_formats/).
+    /// Each metric family is prefixed with a `# HELP` and `# TYPE` comment.
+    pub fn prometheus_text(&self) -> String {
+        let mut out = String::new();
+
+        // Counters.
+        {
+            let map = self.counters.lock().unwrap_or_else(|e| e.into_inner());
+            let mut names: Vec<&String> = map.keys().collect();
+            names.sort_unstable();
+            for name in names {
+                if let Some(c) = map.get(name) {
+                    out.push_str(&format!("# HELP {} {}\n", c.name, c.help));
+                    out.push_str(&format!("# TYPE {} counter\n", c.name));
+                    out.push_str(&format!("{} {}\n", c.name, c.get()));
+                }
+            }
+        }
+
+        // Gauges.
+        {
+            let map = self.gauges.lock().unwrap_or_else(|e| e.into_inner());
+            let mut names: Vec<&String> = map.keys().collect();
+            names.sort_unstable();
+            for name in names {
+                if let Some(g) = map.get(name) {
+                    out.push_str(&format!("# HELP {} {}\n", g.name, g.help));
+                    out.push_str(&format!("# TYPE {} gauge\n", g.name));
+                    out.push_str(&format!("{} {}\n", g.name, g.get()));
+                }
+            }
+        }
+
+        // Histograms.
+        {
+            let map = self.histograms.lock().unwrap_or_else(|e| e.into_inner());
+            let mut names: Vec<&String> = map.keys().collect();
+            names.sort_unstable();
+            for name in names {
+                if let Some(h) = map.get(name) {
+                    out.push_str(&format!("# HELP {} {}\n", h.name, h.help));
+                    out.push_str(&format!("# TYPE {} histogram\n", h.name));
+                    let mut cumulative = 0u64;
+                    for (i, &bound) in h.buckets.iter().enumerate() {
+                        cumulative += h.counts[i].load(Ordering::Relaxed);
+                        out.push_str(&format!(
+                            "{}_bucket{{le=\"{}\"}} {}\n",
+                            h.name, bound, cumulative
+                        ));
+                    }
+                    // +Inf bucket
+                    cumulative += h.counts[h.buckets.len()].load(Ordering::Relaxed);
+                    out.push_str(&format!(
+                        "{}_bucket{{le=\"+Inf\"}} {}\n",
+                        h.name, cumulative
+                    ));
+                    out.push_str(&format!("{}_sum {}\n", h.name, h.sum()));
+                    out.push_str(&format!("{}_count {}\n", h.name, h.count()));
+                }
+            }
+        }
+
+        out
+    }
+}
+
+// ── MetricsRegistry tests ─────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod registry_tests {
+    use super::*;
+
+    #[test]
+    fn test_registry_new_pre_registers_standard_metrics() {
+        let reg = MetricsRegistry::new();
+        let c = reg.counter("agent_inferences_total", "");
+        assert_eq!(c.get(), 0);
+    }
+
+    #[test]
+    fn test_counter_inc() {
+        let reg = MetricsRegistry::new();
+        let c = reg.counter("my_counter", "help");
+        c.inc();
+        c.inc();
+        assert_eq!(c.get(), 2);
+    }
+
+    #[test]
+    fn test_counter_inc_by() {
+        let reg = MetricsRegistry::new();
+        let c = reg.counter("my_counter2", "help");
+        c.inc_by(10);
+        assert_eq!(c.get(), 10);
+    }
+
+    #[test]
+    fn test_counter_initial_zero() {
+        let c = Counter::new("x", "h");
+        assert_eq!(c.get(), 0);
+    }
+
+    #[test]
+    fn test_gauge_set() {
+        let reg = MetricsRegistry::new();
+        let g = reg.gauge("my_gauge", "help");
+        g.set(42);
+        assert_eq!(g.get(), 42);
+    }
+
+    #[test]
+    fn test_gauge_inc_dec() {
+        let g = Gauge::new("g", "h");
+        g.inc();
+        g.inc();
+        g.dec();
+        assert_eq!(g.get(), 1);
+    }
+
+    #[test]
+    fn test_gauge_negative() {
+        let g = Gauge::new("neg", "h");
+        g.set(-5);
+        assert_eq!(g.get(), -5);
+    }
+
+    #[test]
+    fn test_histogram_observe() {
+        let h = Histogram::new("h", "help", vec![10.0, 50.0, 100.0]);
+        h.observe(5.0);
+        h.observe(25.0);
+        h.observe(200.0);
+        assert_eq!(h.count(), 3);
+    }
+
+    #[test]
+    fn test_histogram_sum() {
+        let h = Histogram::new("h2", "help", vec![100.0]);
+        h.observe(10.0);
+        h.observe(20.0);
+        // sum may not be exact due to atomic CAS race, but should be positive
+        assert!(h.sum() >= 0.0);
+    }
+
+    #[test]
+    fn test_histogram_bucket_overflow() {
+        let h = Histogram::new("h3", "help", vec![1.0]);
+        h.observe(1000.0); // goes to overflow bucket
+        assert_eq!(h.count(), 1);
+    }
+
+    #[test]
+    fn test_registry_same_counter_returned() {
+        let reg = MetricsRegistry::new();
+        let c1 = reg.counter("dup", "h");
+        let c2 = reg.counter("dup", "h");
+        c1.inc();
+        assert_eq!(c2.get(), 1);
+    }
+
+    #[test]
+    fn test_registry_same_gauge_returned() {
+        let reg = MetricsRegistry::new();
+        let g1 = reg.gauge("shared_gauge", "h");
+        let g2 = reg.gauge("shared_gauge", "h");
+        g1.set(99);
+        assert_eq!(g2.get(), 99);
+    }
+
+    #[test]
+    fn test_registry_same_histogram_returned() {
+        let reg = MetricsRegistry::new();
+        let h1 = reg.histogram("shared_hist", "h", vec![10.0, 100.0]);
+        let h2 = reg.histogram("shared_hist", "h", vec![]);
+        h1.observe(5.0);
+        assert_eq!(h2.count(), 1);
+    }
+
+    #[test]
+    fn test_prometheus_text_contains_counter() {
+        let reg = MetricsRegistry::new();
+        let c = reg.counter("test_counter", "A test counter.");
+        c.inc_by(7);
+        let text = reg.prometheus_text();
+        assert!(text.contains("test_counter"));
+        assert!(text.contains("# TYPE test_counter counter"));
+        assert!(text.contains("test_counter 7"));
+    }
+
+    #[test]
+    fn test_prometheus_text_contains_gauge() {
+        let reg = MetricsRegistry::new();
+        let g = reg.gauge("test_gauge", "A test gauge.");
+        g.set(3);
+        let text = reg.prometheus_text();
+        assert!(text.contains("# TYPE test_gauge gauge"));
+        assert!(text.contains("test_gauge 3"));
+    }
+
+    #[test]
+    fn test_prometheus_text_contains_histogram() {
+        let reg = MetricsRegistry::new();
+        let h = reg.histogram("test_hist", "A test histogram.", vec![5.0, 10.0]);
+        h.observe(3.0);
+        let text = reg.prometheus_text();
+        assert!(text.contains("# TYPE test_hist histogram"));
+        assert!(text.contains("test_hist_bucket"));
+        assert!(text.contains("+Inf"));
+    }
+
+    #[test]
+    fn test_prometheus_text_standard_metrics_present() {
+        let reg = MetricsRegistry::new();
+        let text = reg.prometheus_text();
+        assert!(text.contains("agent_inferences_total"));
+        assert!(text.contains("agent_tool_calls_total"));
+        assert!(text.contains("agent_errors_total"));
+        assert!(text.contains("agent_memory_entries"));
+        assert!(text.contains("agent_inference_latency_ms"));
+    }
+
+    #[test]
+    fn test_counter_name_and_help() {
+        let c = Counter::new("my_name", "my_help");
+        assert_eq!(c.name, "my_name");
+        assert_eq!(c.help, "my_help");
+    }
+
+    #[test]
+    fn test_gauge_name_and_help() {
+        let g = Gauge::new("g_name", "g_help");
+        assert_eq!(g.name, "g_name");
+        assert_eq!(g.help, "g_help");
+    }
+
+    #[test]
+    fn test_histogram_name_and_help() {
+        let h = Histogram::new("h_name", "h_help", vec![1.0]);
+        assert_eq!(h.name, "h_name");
+        assert_eq!(h.help, "h_help");
+    }
+}

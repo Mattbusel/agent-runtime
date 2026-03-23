@@ -120,6 +120,9 @@ pub mod planner;
 pub mod runtime;
 pub mod sandbox;
 
+/// Agent workflow engine: declarative step graphs with branching, parallelism, and loops.
+pub mod workflow;
+
 /// Tool registry: named async tools with call-count, error-count, and latency tracking.
 pub mod tools;
 
@@ -198,7 +201,13 @@ pub use graph::{Entity, EntityId, GraphStore, Relationship};
 pub use orchestrator::{CircuitBreaker, Pipeline, RetryKind, RetryPolicy};
 
 pub use agent::{Action, AgentConfig, ReActLoop, ReActStep, ToolSpec, ToolValidator};
-pub use metrics::MetricsSnapshot;
+pub use metrics::{Counter, Gauge, Histogram, MetricsRegistry, MetricsSnapshot};
+
+// Workflow engine re-exports.
+pub use workflow::{
+    InferFn, Workflow, WorkflowContext, WorkflowEngine, WorkflowError, WorkflowResult,
+    WorkflowStep,
+};
 
 #[cfg(feature = "persistence")]
 pub use persistence::{FilePersistenceBackend, PersistenceBackend};

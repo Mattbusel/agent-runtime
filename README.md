@@ -1653,3 +1653,109 @@ let runtime = AgentRuntime::quick(5, "my-model");
 // In an async context:
 // let handle = runtime.spawn_supervised(vec![spec], SupervisorStrategy::OneForOne).await;
 ```
+
+
+---
+
+## Workflow Engine
+
+The `workflow` module provides a declarative graph-based agent workflow executor.
+
+### Step Types
+
+| Step | Description |
+|------|-------------|
+| `Task { name, prompt, tool }` | Run a prompt through the inference function, or call a named tool |
+| `Branch { condition, if_true, if_false }` | Conditionally execute one of two sub-steps based on a context variable |
+| `Parallel { steps }` | Execute multiple steps concurrently |
+| `Loop { body, max_iters }` | Repeat a step up to `max_iters` times |
+
+### Usage
+
+```rust,no_run
+use llm_agent_runtime::workflow::{Workflow, WorkflowStep, WorkflowEngine, InferFn};
+use llm_agent_runtime::tools::ToolRegistry;
+
+let workflow = Workflow::new("my-workflow", vec![
+    WorkflowStep::Task {
+        name: "research".into(),
+        prompt: "Summarise the topic".into(),
+        tool: None,
+    },
+    WorkflowStep::Branch {
+        condition: "confidence:high".into(),
+        if_true: Box::new(WorkflowStep::Task {
+            name: "publish".into(),
+            prompt: "Format for publication".into(),
+            tool: None,
+        }),
+        if_false: Box::new(WorkflowStep::Task {
+            name: "refine".into(),
+            prompt: "Gather more data".into(),
+            tool: None,
+        }),
+    },
+]);
+
+// Build an inference closure.
+let infer: InferFn = Box::new(|prompt| {
+    Box::pin(async move { Ok(format!("response to: {prompt}")) })
+});
+
+// Drive the workflow.
+// let result = WorkflowEngine::new().run(workflow, &infer, &ToolRegistry::new()).await.unwrap();
+```
+
+### Branch Conditions
+
+Conditions use the format `"variable_name:expected_substring"`. The branch takes the `if_true` path when the named context variable contains the expected substring.
+
+```rust,no_run
+use llm_agent_runtime::workflow::WorkflowContext;
+
+let mut ctx = WorkflowContext::new();
+ctx.set("status", "ok running");
+assert!(ctx.evaluate_condition("status:ok"));  // true — "ok running" contains "ok"
+assert!(!ctx.evaluate_condition("status:fail")); // false
+```
+
+---
+
+## Metrics Exporter
+
+The `metrics` module now exposes a Prometheus-style `MetricsRegistry` alongside the existing `RuntimeMetrics`.
+
+### Metric Types
+
+| Type | Methods | Description |
+|------|---------|-------------|
+| `Counter` | `inc()`, `inc_by(n)`, `get()` | Monotonically increasing count |
+| `Gauge` | `set(i64)`, `inc()`, `dec()`, `get()` | Value that can go up and down |
+| `Histogram` | `observe(f64)` | Observation bucketing with configurable bounds |
+
+### Pre-registered Metrics
+
+| Name | Type | Description |
+|------|------|-------------|
+| `agent_inferences_total` | counter | Total LLM inference calls |
+| `agent_inference_latency_ms` | histogram | Inference latency in milliseconds |
+| `agent_memory_entries` | gauge | Current memory entry count |
+| `agent_tool_calls_total` | counter | Total tool calls dispatched |
+| `agent_errors_total` | counter | Total errors encountered |
+
+### Usage
+
+```rust,no_run
+use llm_agent_runtime::{AgentRuntime, AgentConfig};
+
+let runtime = AgentRuntime::quick(5, "my-model");
+let reg = runtime.metrics_registry();
+
+// Record a custom counter.
+let calls = reg.counter("my_calls_total", "Custom call counter");
+calls.inc();
+
+// Render Prometheus text format.
+let prom = reg.prometheus_text();
+// Serves content suitable for a GET /metrics endpoint.
+```
