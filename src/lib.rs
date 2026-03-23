@@ -420,3 +420,9 @@ pub mod task_scheduler;
 
 /// Raft-lite quorum voting engine: elections, heartbeats, log replication, step-down.
 pub mod consensus_engine;
+
+/// DAG-based workflow engine with parallel execution, retry policies, and skip conditions.
+pub mod workflow_engine;
+
+/// Agent execution profiler for bottleneck detection: sliding windows, percentiles, global summaries.
+pub mod agent_profiler;
