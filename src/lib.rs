@@ -151,6 +151,9 @@ pub mod swarm;
 pub mod world_model;
 pub mod debate;
 
+/// In-memory knowledge graph: entities, relations, BFS shortest-path, subgraph extraction, DOT export.
+pub mod knowledge;
+
 /// Vector similarity memory search: embeddings, cosine search, TF-IDF bag-of-words, semantic memory.
 pub mod vector_memory;
 

@@ -1759,3 +1759,142 @@ calls.inc();
 let prom = reg.prometheus_text();
 // Serves content suitable for a GET /metrics endpoint.
 ```
+
+---
+
+## Multi-Agent Debate
+
+The `debate` module orchestrates **structured adversarial reasoning** where multiple
+agents argue assigned positions, score each other's arguments, and a neutral
+moderator synthesises the strongest points into a final answer.
+
+### Protocol
+
+```
+  Round 1:  Each debater receives the topic + position → opening argument
+            (all run concurrently via JoinSet)
+
+  Round N:  Each debater receives all prior arguments → rebuttal
+            (all run concurrently)
+
+  Scoring:  Every debater scores every other debater's latest argument
+            (concurrent peer-scoring via JoinSet)
+
+  Synthesis: Moderator reviews full transcript + scores → final verdict
+```
+
+### ASCII Diagram
+
+```
+  ┌──────────────────────────────────────────────────────────┐
+  │                  DebateOrchestrator                      │
+  │                                                          │
+  │  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
+  │  │ Debater A│  │ Debater B│  │ Debater C│   ...         │
+  │  └────┬─────┘  └────┬─────┘  └────┬─────┘              │
+  │       │  Round 1    │             │                      │
+  │       └────────────►├─────────────┘                     │
+  │                     │  opening statements (concurrent)   │
+  │                     ▼                                    │
+  │              peer scoring (concurrent)                   │
+  │                     │                                    │
+  │       ┌─────────────┘                                    │
+  │       │  Round 2+ rebuttals (all prior context)          │
+  │       ▼                                                  │
+  │  ┌──────────┐                                           │
+  │  │ Moderator│ ← full transcript + scores → synthesis    │
+  │  └──────────┘                                           │
+  └──────────────────────────────────────────────────────────┘
+```
+
+### Quick Start
+
+```rust,no_run
+use llm_agent_runtime::debate::{DebateConfig, DebateOrchestrator, DebaterPosition};
+
+# tokio_test::block_on(async {
+let config = DebateConfig::new("Monolith vs microservices")
+    .with_positions(vec![
+        DebaterPosition::new("Alice", "Monolith for simplicity"),
+        DebaterPosition::new("Bob", "Microservices for scale"),
+    ])
+    .with_rounds(2);
+
+let session = DebateOrchestrator::new(config)
+    .run(|agent_id, prompt| async move {
+        format!("{agent_id}: {}", &prompt[..50.min(prompt.len())])
+    })
+    .await;
+
+println!("Winner: {}", session.winner_id().unwrap_or("tie"));
+println!("Synthesis:\n{}", session.synthesis);
+# });
+```
+
+---
+
+## Knowledge Graph
+
+The `knowledge` module provides a **lightweight in-memory directed graph** for
+storing entities and their relationships. It supports BFS shortest-path,
+subgraph extraction, substring search, and Graphviz DOT export.
+
+### ASCII Diagram
+
+```
+  ┌──────────────────────────────────────────────────────────┐
+  │                   KnowledgeGraph                         │
+  │                                                          │
+  │  Entities (nodes):                                       │
+  │  ┌──────────────────────────────────────────┐           │
+  │  │ id="alice"  label="Alice"  role=engineer │           │
+  │  │ id="bob"    label="Bob"    role=manager  │           │
+  │  │ id="carol"  label="Carol"  dept=research │           │
+  │  └──────────────────────────────────────────┘           │
+  │                                                          │
+  │  Relations (directed edges):                             │
+  │                                                          │
+  │   alice ──reports_to (1.0)──► bob                       │
+  │   alice ──knows      (0.5)──► carol                     │
+  │   bob   ──collaborates(0.8)─► carol                     │
+  │                                                          │
+  │  Operations:                                             │
+  │  • add_entity / add_relation                             │
+  │  • neighbors(id)          → Vec<&Entity>                │
+  │  • shortest_path(from,to) → Option<Vec<String>> (BFS)  │
+  │  • search(query)          → Vec<&Entity> (substr)       │
+  │  • subgraph(root, depth)  → KnowledgeGraph (BFS)       │
+  │  • to_dot()               → String (Graphviz)           │
+  └──────────────────────────────────────────────────────────┘
+```
+
+### Quick Start
+
+```rust,no_run
+use llm_agent_runtime::knowledge::{Entity, KnowledgeGraph, Relation};
+
+let mut g = KnowledgeGraph::new();
+
+g.add_entity(Entity::new("alice", "Alice").with_property("role", "engineer"));
+g.add_entity(Entity::new("bob",   "Bob").with_property("role", "manager"));
+g.add_entity(Entity::new("carol", "Carol").with_property("dept", "research"));
+
+g.add_relation(Relation::new("alice", "bob",   "reports_to",  1.0));
+g.add_relation(Relation::new("alice", "carol", "knows",       0.5));
+g.add_relation(Relation::new("bob",   "carol", "collaborates",0.8));
+
+// BFS shortest path
+let path = g.shortest_path("alice", "carol");
+assert!(path.is_some());
+
+// Substring search
+let hits = g.search("engineer");
+assert_eq!(hits.len(), 1);
+
+// Subgraph within 1 hop of alice
+let sub = g.subgraph("alice", 1);
+assert_eq!(sub.entity_count(), 3);
+
+// DOT export
+println!("{}", g.to_dot());
+```
