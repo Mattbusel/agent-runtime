@@ -62,6 +62,22 @@ pub use crate::team::{
     AgentTeam, CommunicationTopology, ConsensusStrategy, TeamConfig, TeamOrchestrator, TeamResult,
 };
 
+pub use crate::world_model::{Belief, FactValue, WorldChange, WorldState};
+
+pub use crate::strips::{StripsAction, StripsFact, StripsPlanner, StripsPlannerError};
+
+pub use crate::protocol::{
+    ConsensusError, ConsensusPolicy, ConsensusRound, ConversationThread, MessageKind,
+    ProtocolMessageId, ProtocolRouter, Vote,
+    AgentMessage as ProtocolAgentMessage,
+};
+
+pub use crate::goals::{Goal, GoalId, GoalPriority, GoalStatus, GoalStore};
+
+pub use crate::cognitive_load::{
+    CognitiveLoadConfig, CognitiveLoadMonitor, CognitiveLoadSnapshot, LoadAction,
+};
+
 pub use crate::streaming::{
     AgentEvent, AgentEventStream, InferenceToken, StreamBroadcaster, StreamingCallbacks,
     StreamingInference, StreamingReActLoop, StreamingSession, StreamingStep, TokenStream,

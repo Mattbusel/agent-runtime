@@ -99,6 +99,10 @@ pub mod orchestrator;
 pub mod agent;
 /// Async broadcast message bus for inter-agent communication.
 pub mod bus;
+/// Background memory consolidation using TF-IDF k-means clustering.
+pub mod consolidation;
+/// Plan → Execute → Verify structured agent loop.
+pub mod plan_execute;
 /// Typed inter-agent messaging protocol with task delegation, capability queries, and heartbeats.
 pub mod messaging;
 pub mod dialogue;
