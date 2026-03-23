@@ -97,10 +97,16 @@ pub mod graph;
 pub mod orchestrator;
 
 pub mod agent;
+/// Async broadcast message bus for inter-agent communication.
+pub mod bus;
 pub mod dialogue;
 pub mod metrics;
+pub mod planner;
 pub mod runtime;
+pub mod sandbox;
 pub mod streaming;
+/// Multi-agent team orchestration with configurable topology and consensus.
+pub mod team;
 
 #[cfg(feature = "persistence")]
 pub mod persistence;
@@ -155,3 +161,22 @@ pub use budget::{BudgetConfig, BudgetReport, BudgetTracker, ModelPrice, PriceTab
 // Distributed coordination re-exports (feature-gated).
 #[cfg(feature = "distributed")]
 pub use distributed::{CoordinatorConfig, DistributedCoordinator, WorkItem};
+
+// Tool sandbox re-exports.
+pub use sandbox::{
+    AuditEntry, DenialReason, Sandbox, SandboxConfig, SandboxStats, ToolManifest, ToolPermission,
+};
+
+// HTN planner re-exports.
+pub use planner::{
+    ExecutionPlan, Method, Planner, PlannerConfig, PlannerError, PlanStep, Precondition, Task,
+    TaskKind,
+};
+
+// Message bus re-exports.
+pub use bus::{AgentBus, AgentMessage, AgentRole, AgentTarget, BusError, BusStats, MessageId};
+
+// Team orchestration re-exports.
+pub use team::{
+    AgentTeam, CommunicationTopology, ConsensusStrategy, TeamConfig, TeamOrchestrator, TeamResult,
+};

@@ -508,6 +508,115 @@ cargo run --example <name> --features <required-features>
 
 ---
 
+## Advanced: Tool Capability Sandbox
+
+The `sandbox` module enforces a capability-based security model — every tool
+must declare what permissions it requires, and the runtime only allows calls
+when the current grant set satisfies all requirements.
+
+This prevents prompt-injection attacks from escalating to file writes, network
+calls, or shell execution without explicit operator approval.
+
+```rust
+use llm_agent_runtime::{Sandbox, SandboxConfig, ToolManifest, ToolPermission};
+
+// Build a sandbox granting only file reads for this agent session.
+let sandbox = Sandbox::new(SandboxConfig::default())
+    .grant(ToolPermission::FileRead);
+
+// Tools declare their required permissions up-front.
+sandbox.register_tool(
+    ToolManifest::new("read_file")
+        .require(ToolPermission::FileRead)
+        .with_description("Read a file from disk"),
+);
+sandbox.register_tool(
+    ToolManifest::new("delete_file")
+        .require(ToolPermission::FileRead)
+        .require(ToolPermission::FileWrite),
+);
+
+// Before invoking any tool from the ReAct loop:
+match sandbox.check("delete_file") {
+    Ok(()) => { /* call the tool */ }
+    Err(reason) => {
+        // Return a denial observation to the agent so it can adapt.
+        println!("TOOL_DENIED: {reason}");
+    }
+}
+
+// Inspect the audit trail.
+for entry in sandbox.audit_log() {
+    println!("{}: {} — {}", entry.tool_name,
+        if entry.allowed { "ALLOW" } else { "DENY" },
+        entry.denied_capabilities.join(", "));
+}
+```
+
+**Built-in permissions:** `FileRead`, `FileWrite`, `Network`, `DatabaseRead`,
+`DatabaseWrite`, `ShellExec`, `SecretAccess`, `Custom(name)`.
+
+---
+
+## Advanced: HTN Goal Planner
+
+The `planner` module adds a **Hierarchical Task Network** planner as a
+structured alternative to the open-ended ReAct loop.  For well-defined
+multi-step workflows you register decomposition methods once, and the planner
+expands any compound goal into a fully ordered sequence of primitive tool calls
+before execution begins.
+
+```rust
+use llm_agent_runtime::{Planner, PlannerConfig, Task, Method, Precondition};
+
+let mut planner = Planner::new(PlannerConfig { max_depth: 16, max_steps: 256 });
+
+// Register a method: "ResearchCompany" decomposes into 3 primitives.
+planner.register_method(Method {
+    task: "ResearchCompany".into(),
+    subtasks: vec![
+        Task::primitive("web_search", r#"{"query":"<company>"}"#),
+        Task::primitive("scrape_page", r#"{"url":"<top_result>"}"#),
+        Task::primitive("summarise",   r#"{"text":"<content>"}"#),
+    ],
+    preconditions: vec![],
+    description: "Standard research workflow".into(),
+});
+
+// Register a conditional variant (only applies when the company is public).
+planner.register_method(Method {
+    task: "ResearchCompany".into(),
+    subtasks: vec![
+        Task::primitive("web_search",    r#"{"query":"<company>"}"#),
+        Task::primitive("fetch_sec_filings", r#"{"ticker":"<ticker>"}"#),
+        Task::primitive("summarise",    r#"{"text":"<content>"}"#),
+    ],
+    preconditions: vec![Precondition::new("company_type", "public")],
+    description: "Research including SEC filings for public companies".into(),
+});
+
+// Plan against a world state.
+let mut world = std::collections::HashMap::new();
+world.insert("company_type".into(), "public".into());
+let plan = planner.plan_with_world(Task::compound("ResearchCompany"), &world)?;
+
+println!("Plan has {} steps:", plan.len());
+for step in plan.steps() {
+    println!("  [depth={}] {} {}", step.depth, step.tool, step.args);
+}
+```
+
+HTN planning is most useful when:
+- You have well-known multi-step workflows that always follow the same structure.
+- You want to enforce step ordering without relying on the LLM to rediscover it.
+- Preconditions (world state) should select between alternative strategies.
+
+Combine with the ReAct loop: use the planner to build the top-level task
+structure, then let `ReActLoop` handle each primitive step with its own
+Thought-Action-Observation cycle.
+
+---
+
 ## Contributing
 
 Contributions are welcome. Please follow these guidelines:

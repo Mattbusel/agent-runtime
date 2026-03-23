@@ -45,3 +45,13 @@ pub use crate::persistence::{FilePersistenceBackend, PersistenceBackend};
 pub use crate::providers::{CompletionOptions, LlmProvider};
 
 pub use crate::metrics::{LatencyHistogram, MetricsSnapshot, RuntimeMetrics};
+
+pub use crate::conversation::{ConversationHistory, SummaryEntry, Turn};
+
+pub use crate::budget::{BudgetConfig, BudgetReport, BudgetTracker, ModelPrice, PriceTable, UsageRecord};
+
+#[cfg(feature = "distributed")]
+pub use crate::distributed::{CoordinatorConfig, DistributedCoordinator, WorkItem};
+
+#[cfg(feature = "otel")]
+pub use crate::telemetry::{OtelTracer, ToolCallSpan};

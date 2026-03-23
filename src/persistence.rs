@@ -19,6 +19,7 @@ use futures::future::try_join_all;
 use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
+use tokio::io::AsyncWriteExt as _;
 
 // ── PersistenceBackend ────────────────────────────────────────────────────────
 
@@ -86,20 +87,50 @@ pub trait PersistenceBackend: Send + Sync {
 /// Concurrent writes to the **same key** from multiple tasks are safe but
 /// are not serialized — the final file content is determined by whichever
 /// rename completes last.
+///
+/// # Crash Safety
+///
+/// When `sync_writes` is enabled (the default), the backend calls
+/// `file.sync_all()` on the temporary file before renaming it into place.
+/// This flushes the data and metadata to durable storage so that a process
+/// crash between the write and the rename cannot leave data in the OS page
+/// cache that is never persisted.  Disable `sync_writes` only when throughput
+/// matters more than crash durability (e.g. in tests or non-critical caches).
 #[derive(Debug, Clone)]
 pub struct FilePersistenceBackend {
     /// Absolute path to the directory where `<key>.bin` files are stored.
     base_dir: Arc<PathBuf>,
+    /// When `true` (the default), `sync_all()` is called on the temporary
+    /// file before it is renamed into place, guaranteeing durability on crash.
+    sync_writes: bool,
 }
 
 impl FilePersistenceBackend {
     /// Create a new backend that stores files in `base_dir`.
     ///
     /// The directory is not created automatically — it must already exist.
+    /// `sync_writes` defaults to `true` for crash-safe durability.
     pub fn new(base_dir: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Arc::new(base_dir.into()),
+            sync_writes: true,
         }
+    }
+
+    /// Create a backend with `sync_writes` explicitly configured.
+    ///
+    /// Pass `sync_writes: false` to skip the `sync_all()` call for higher
+    /// write throughput when crash durability is not required (e.g. tests).
+    pub fn new_with_sync(base_dir: impl Into<PathBuf>, sync_writes: bool) -> Self {
+        Self {
+            base_dir: Arc::new(base_dir.into()),
+            sync_writes,
+        }
+    }
+
+    /// Return whether this backend calls `sync_all()` after each write.
+    pub fn sync_writes(&self) -> bool {
+        self.sync_writes
     }
 
     /// Return the base directory that this backend stores files in.
@@ -130,9 +161,25 @@ impl PersistenceBackend for FilePersistenceBackend {
         // This prevents a reader from observing a half-written file if the
         // process crashes mid-write.
         let tmp_path = path.with_extension(format!("tmp-{}", Uuid::new_v4().simple()));
-        tokio::fs::write(&tmp_path, value)
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .await
+            .map_err(|e| AgentRuntimeError::Persistence(format!("open tmp {tmp_path:?}: {e}")))?;
+        file.write_all(value)
             .await
             .map_err(|e| AgentRuntimeError::Persistence(format!("write tmp {tmp_path:?}: {e}")))?;
+        // Flush OS page-cache to durable storage before rename so a crash
+        // between write and rename cannot lose data that was never synced.
+        if self.sync_writes {
+            file.sync_all().await.map_err(|e| {
+                AgentRuntimeError::Persistence(format!("sync_all {tmp_path:?}: {e}"))
+            })?;
+        }
+        // Release the file handle so the rename succeeds on Windows.
+        drop(file);
         tokio::fs::rename(&tmp_path, &path).await.map_err(|e| {
             AgentRuntimeError::Persistence(format!(
                 "rename {tmp_path:?} -> {path:?}: {e}"
