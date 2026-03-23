@@ -168,7 +168,8 @@ impl AgentRuntimeError {
             | Self::Orchestration(s)
             | Self::AgentLoop(s)
             | Self::Provider(s)
-            | Self::Persistence(s) => s.clone(),
+            | Self::Persistence(s)
+            | Self::Internal(s) => s.clone(),
             Self::NotConfigured(s) => s.to_string(),
             Self::CircuitOpen { service } => format!("circuit open for '{service}'"),
             Self::BackpressureShed { depth, capacity } => {
