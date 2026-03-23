@@ -480,3 +480,6 @@ pub mod cron_scheduler;
 
 /// Agent pool with work stealing: PooledAgent CAS transitions, priority work queue, dynamic scaling.
 pub mod agent_pool;
+
+/// Agent state checkpointing and resume: save/restore with XOR checksum verification, bounded history, step-level restore.
+pub mod checkpoint_manager;

@@ -509,3 +509,228 @@ mod tests {
         assert_eq!(stats.total_published, 1);
     }
 }
+
+// ── Callback-based routing event bus ─────────────────────────────────────────
+//
+// A synchronous, callback-driven pub/sub bus with wildcard topic routing and
+// an in-memory event log.  Complements the async broadcast-based EventBus
+// above with a simpler, closure-based API that does not require a Tokio
+// runtime.
+
+/// A routing event with metadata.
+#[derive(Clone, Debug)]
+pub struct RoutingEvent {
+    /// Monotonically increasing event identifier.
+    pub id: u64,
+    /// Dot-separated topic (e.g. "agent.start").
+    pub topic: String,
+    /// Serialised payload string.
+    pub payload: String,
+    /// Wall-clock time of creation.
+    pub timestamp: std::time::Instant,
+    /// Identity of the publisher.
+    pub publisher: String,
+}
+
+/// Type alias for a boxed event handler closure.
+pub type RoutingHandler = Box<dyn Fn(&RoutingEvent) + Send + Sync>;
+
+/// A single topic subscription.
+pub struct RoutingSubscription {
+    /// Unique subscription identifier.
+    pub id: u64,
+    /// Topic pattern, supporting `*` (single segment) and `**` (tail wildcard).
+    pub topic_pattern: String,
+    handler: RoutingHandler,
+}
+
+/// Check whether `pattern` matches `topic`.
+///
+/// Rules:
+/// - `*`  matches exactly one dot-separated segment.
+/// - `**` matches zero or more remaining segments (only valid at the end).
+/// - Exact segments must match literally.
+pub fn topic_matches(pattern: &str, topic: &str) -> bool {
+    let p_parts: Vec<&str> = pattern.split('.').collect();
+    let t_parts: Vec<&str> = topic.split('.').collect();
+    topic_matches_parts(&p_parts, &t_parts)
+}
+
+fn topic_matches_parts(p: &[&str], t: &[&str]) -> bool {
+    if p.is_empty() && t.is_empty() {
+        return true;
+    }
+    if p.is_empty() {
+        return false;
+    }
+    if p[0] == "**" {
+        // ** at end matches everything remaining
+        return true;
+    }
+    if t.is_empty() {
+        return false;
+    }
+    if p[0] == "*" || p[0] == t[0] {
+        return topic_matches_parts(&p[1..], &t[1..]);
+    }
+    false
+}
+
+/// Synchronous, callback-based pub/sub event bus with wildcard topic routing.
+pub struct RoutingEventBus {
+    subscriptions: std::sync::RwLock<Vec<RoutingSubscription>>,
+    event_log: std::sync::Mutex<std::collections::VecDeque<RoutingEvent>>,
+    next_id: std::sync::atomic::AtomicU64,
+    max_log_size: usize,
+}
+
+impl RoutingEventBus {
+    /// Create a new bus with the given event-log capacity.
+    pub fn new(max_log_size: usize) -> Self {
+        Self {
+            subscriptions: std::sync::RwLock::new(Vec::new()),
+            event_log: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            next_id: std::sync::atomic::AtomicU64::new(1),
+            max_log_size,
+        }
+    }
+
+    /// Register a handler for events matching `topic_pattern`.  Returns the subscription ID.
+    pub fn subscribe(
+        &self,
+        topic_pattern: &str,
+        _publisher: &str,
+        handler: RoutingHandler,
+    ) -> u64 {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let sub = RoutingSubscription {
+            id,
+            topic_pattern: topic_pattern.to_owned(),
+            handler,
+        };
+        self.subscriptions.write().unwrap().push(sub);
+        id
+    }
+
+    /// Remove the subscription with the given ID.
+    pub fn unsubscribe(&self, subscription_id: u64) {
+        self.subscriptions
+            .write()
+            .unwrap()
+            .retain(|s| s.id != subscription_id);
+    }
+
+    /// Publish an event, calling all matching handlers and appending to the log.
+    pub fn publish(&self, topic: &str, payload: &str, publisher: &str) {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let event = RoutingEvent {
+            id,
+            topic: topic.to_owned(),
+            payload: payload.to_owned(),
+            timestamp: std::time::Instant::now(),
+            publisher: publisher.to_owned(),
+        };
+
+        // Call handlers while holding the read lock.
+        {
+            let subs = self.subscriptions.read().unwrap();
+            for sub in subs.iter() {
+                if topic_matches(&sub.topic_pattern, topic) {
+                    (sub.handler)(&event);
+                }
+            }
+        }
+
+        // Append to log.
+        let mut log = self.event_log.lock().unwrap();
+        if log.len() >= self.max_log_size {
+            log.pop_front();
+        }
+        log.push_back(event);
+    }
+
+    /// Return up to `limit` recent events whose topic matches `topic_pattern`.
+    pub fn replay(&self, topic_pattern: &str, limit: usize) -> Vec<RoutingEvent> {
+        let log = self.event_log.lock().unwrap();
+        log.iter()
+            .filter(|e| topic_matches(topic_pattern, &e.topic))
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// Count active subscriptions whose pattern matches `topic_pattern`.
+    pub fn subscriber_count(&self, topic_pattern: &str) -> usize {
+        self.subscriptions
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|s| topic_matches(topic_pattern, &s.topic_pattern))
+            .count()
+    }
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn topic_wildcard_single() {
+        assert!(topic_matches("agent.*", "agent.start"));
+        assert!(topic_matches("agent.*", "agent.stop"));
+        assert!(!topic_matches("agent.*", "agent.sub.start"));
+        assert!(!topic_matches("agent.*", "other.start"));
+    }
+
+    #[test]
+    fn topic_wildcard_double() {
+        assert!(topic_matches("agent.**", "agent.start"));
+        assert!(topic_matches("agent.**", "agent.sub.start"));
+        assert!(!topic_matches("agent.**", "other.start"));
+    }
+
+    #[test]
+    fn publish_and_replay() {
+        let bus = RoutingEventBus::new(100);
+        let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let r = received.clone();
+        bus.subscribe(
+            "agent.*",
+            "test",
+            Box::new(move |e| {
+                r.lock().unwrap().push(e.topic.clone());
+            }),
+        );
+        bus.publish("agent.start", "payload", "pub1");
+        bus.publish("agent.stop", "payload", "pub1");
+        bus.publish("other.event", "payload", "pub2");
+        let msgs = received.lock().unwrap().clone();
+        assert_eq!(msgs, vec!["agent.start", "agent.stop"]);
+        let replayed = bus.replay("agent.*", 10);
+        assert_eq!(replayed.len(), 2);
+    }
+
+    #[test]
+    fn unsubscribe() {
+        let bus = RoutingEventBus::new(100);
+        let counter: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+        let c = counter.clone();
+        let id = bus.subscribe(
+            "*",
+            "test",
+            Box::new(move |_| {
+                *c.lock().unwrap() += 1;
+            }),
+        );
+        bus.publish("x", "p", "pub");
+        bus.unsubscribe(id);
+        bus.publish("x", "p", "pub");
+        assert_eq!(*counter.lock().unwrap(), 1);
+    }
+}
