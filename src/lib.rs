@@ -217,6 +217,12 @@ pub mod distributed_lock;
 /// Fault-tolerant agent supervisor tree: OneForOne/OneForAll/RestForOne restart strategies.
 pub mod agent_supervisor;
 
+/// Plan feasibility checking and constraint satisfaction: capability, resource, mutual-exclusion, and dependency validation.
+pub mod plan_validator;
+
+/// Entity-relationship knowledge graph with BFS traversal, transitive closure, IsA inference, and connected-component stats.
+pub mod knowledge_graph;
+
 // ── Top-level re-exports ────────────────────────────────────────────────────
 
 pub use error::AgentRuntimeError;
