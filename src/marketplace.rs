@@ -548,7 +548,8 @@ mod tests {
     #[test]
     fn registry_all_returns_sorted() {
         let reg = populated_registry();
-        let names: Vec<&str> = reg.all().iter().map(|s| s.name.as_str()).collect();
+        let all = reg.all();
+        let names: Vec<&str> = all.iter().map(|s| s.name.as_str()).collect();
         let mut sorted = names.clone();
         sorted.sort_unstable();
         assert_eq!(names, sorted);

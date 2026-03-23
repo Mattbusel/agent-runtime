@@ -140,6 +140,7 @@ pub mod swarm;
 
 /// World model: typed key-value belief store with temporal history and planning integration.
 pub mod world_model;
+pub mod debate;
 
 /// STRIPS-style backward-chaining planner for goal-directed action sequencing.
 pub mod strips;
