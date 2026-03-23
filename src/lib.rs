@@ -110,6 +110,21 @@ pub mod streaming;
 /// Multi-agent team orchestration with configurable topology and consensus.
 pub mod team;
 
+/// Declarative tool pipeline: output of one tool feeds as input to the next.
+pub mod tool_chain;
+
+/// Concurrent tool execution using `FuturesUnordered` with dependency detection.
+pub mod parallel_tools;
+
+/// Agent self-reflection: score reasoning after each ReAct cycle and retry on low scores.
+pub mod reflection;
+
+/// Named, parameterised skill sequences definable in TOML.
+pub mod skills;
+
+/// Multi-agent swarm: decompose tasks into subtasks and run worker agents concurrently.
+pub mod swarm;
+
 #[cfg(feature = "persistence")]
 pub mod persistence;
 
@@ -185,7 +200,17 @@ pub use messaging::{
 };
 
 // Message bus re-exports.
-pub use bus::{AgentBus, AgentMessage, AgentRole, AgentTarget, BusError, BusStats, MessageId};
+// Note: `AgentMessage` and `BusStats` are already re-exported from `messaging` above,
+// so we alias the bus equivalents to avoid ambiguity.
+pub use bus::{
+    AgentBus,
+    AgentMessage as BusAgentMessage,
+    AgentRole,
+    AgentTarget,
+    BusError,
+    BusStats as AgentBusStats,
+    MessageId,
+};
 
 // Team orchestration re-exports.
 pub use team::{

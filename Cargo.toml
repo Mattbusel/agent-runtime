@@ -59,6 +59,9 @@ async-trait = "0.1"
 # futures: combinators for async primitives (join_all for parallel batch ops)
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 
+# toml: TOML parser for tool chain and skill library definitions
+toml = "0.8"
+
 # reqwest: HTTP client for built-in LLM providers (optional)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], optional = true }
 

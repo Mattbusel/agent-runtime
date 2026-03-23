@@ -68,6 +68,10 @@ pub enum AgentRuntimeError {
     #[error("Persistence error: {0}")]
     Persistence(String),
 
+    /// A general internal error not covered by a more specific variant.
+    #[error("Internal error: {0}")]
+    Internal(String),
+
     /// A tool argument validation failed.
     #[error("Validation failed for field '{field}': [{code}] {message}")]
     Validation {
