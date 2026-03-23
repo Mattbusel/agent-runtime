@@ -558,7 +558,7 @@ impl PlanExecuteAgent {
 
             let output: Result<String, String> = if let Some(ref name) = tool_name {
                 // Dispatch to a registered tool.
-                match tools.iter().find(|t| t.name() == name) {
+                match tools.iter().find(|t| t.name.as_str() == name) {
                     Some(tool_spec) => {
                         let result = tool_spec
                             .call(serde_json::Value::Object(serde_json::Map::new()))

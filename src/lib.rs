@@ -125,6 +125,21 @@ pub mod skills;
 /// Multi-agent swarm: decompose tasks into subtasks and run worker agents concurrently.
 pub mod swarm;
 
+/// World model: typed key-value belief store with temporal history and planning integration.
+pub mod world_model;
+
+/// STRIPS-style backward-chaining planner for goal-directed action sequencing.
+pub mod strips;
+
+/// Multi-agent conversation protocol: message types, threading, routing, and consensus voting.
+pub mod protocol;
+
+/// Persistent goal tracking with priority, deadlines, and dependency relationships.
+pub mod goals;
+
+/// Cognitive load monitor: tracks active goals, reasoning depth, and memory pressure.
+pub mod cognitive_load;
+
 #[cfg(feature = "persistence")]
 pub mod persistence;
 
@@ -215,4 +230,26 @@ pub use bus::{
 // Team orchestration re-exports.
 pub use team::{
     AgentTeam, CommunicationTopology, ConsensusStrategy, TeamConfig, TeamOrchestrator, TeamResult,
+};
+
+// World model re-exports.
+pub use world_model::{Belief, FactValue, TemporalRecord, WorldChange, WorldState};
+
+// STRIPS planner re-exports.
+pub use strips::{StripsFact, StripsAction, StripsPlanner, StripsPlannerError};
+
+// Multi-agent conversation protocol re-exports.
+pub use protocol::{
+    AgentMessage as ProtocolAgentMessage,
+    ConsensusError, ConsensusPolicy, ConsensusRound,
+    ConversationThread, MessageKind,
+    ProtocolMessageId, ProtocolRouter, Vote,
+};
+
+// Persistent goal tracking re-exports.
+pub use goals::{Goal, GoalId, GoalPriority, GoalStatus, GoalStore};
+
+// Cognitive load monitor re-exports.
+pub use cognitive_load::{
+    CognitiveLoadConfig, CognitiveLoadMonitor, CognitiveLoadSnapshot, LoadAction,
 };

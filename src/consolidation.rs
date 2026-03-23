@@ -555,7 +555,7 @@ impl MemoryConsolidator {
         loop {
             tokio::time::sleep(interval).await;
 
-            let agent_ids = match self.store.all_agent_ids() {
+            let agent_ids = match self.store.agent_ids() {
                 Ok(ids) => ids,
                 Err(e) => {
                     debug!(%e, "consolidation: failed to enumerate agent ids");
