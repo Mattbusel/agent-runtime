@@ -65,6 +65,76 @@
 | `bus` | `AgentBus`, `AgentMessage`, `AgentTarget`, `BusSubscription` | Async broadcast bus for peer-to-peer and role-based agent messaging |
 | `team` | `AgentTeam`, `TeamConfig`, `TeamOrchestrator`, `ConsensusStrategy` | Spawn teams of agents with Star/Mesh/Ring topologies and Majority/Pipeline/Parallel consensus |
 | `streaming` | `InferenceToken`, `StreamingInference`, `StreamingReActLoop`, `StreamingCallbacks` | Token-by-token streaming ReAct loop with per-token, per-thought, and per-action callbacks |
+| `ltm` | `LtmStore`, `LtmEntry`, `LtmConfig`, `ForgettingCurve` | Long-term memory with Ebbinghaus forgetting-curve decay and consolidation |
+| `persona` | `Persona`, `PersonaTone`, `PersonaBuilder`, `PersonaRegistry`, `PersonaScope` | Named agent personas with tone, constraints, and scoped activation |
+
+---
+
+## Long-Term Memory
+
+The `ltm` module provides a persistent in-process memory store backed by the
+Ebbinghaus forgetting curve.  Entries decay exponentially over time; entries
+whose `decayed_importance` falls below `min_importance` are pruned on each
+`decay()` call.  Similar entries (cosine similarity > 0.85) can be merged with
+`consolidate()`.
+
+```rust,no_run
+use llm_agent_runtime::ltm::{LtmConfig, LtmStore};
+
+let mut store = LtmStore::new(LtmConfig {
+    capacity: 1_000,
+    min_importance: 0.05,
+    stability_days: 30.0,
+    decay_interval_hours: 24,
+});
+
+let id = store.remember("Rust ownership rules prevent data races", 0.9);
+let hits = store.recall("ownership memory safety", 5);
+println!("top hit: {}", hits[0].content);
+
+store.decay();        // update decayed_importance and prune stale entries
+store.consolidate();  // merge near-duplicate entries
+```
+
+`AgentRuntime` exposes the store via `runtime.ltm()` and `runtime.ltm_mut()`.
+
+---
+
+## Agent Persona System
+
+The `persona` module lets you define named personas with a communication tone,
+system prompt, and behavioural constraints.  Five built-in personas are
+provided: `assistant`, `researcher`, `coder`, `critic`, and `teacher`.
+
+```rust,no_run
+use llm_agent_runtime::persona::{PersonaRegistry, PersonaBuilder, PersonaTone};
+
+let mut reg = PersonaRegistry::with_builtins();
+
+// Use a built-in persona.
+let prompt = reg.apply_named("coder", "implement binary search").unwrap();
+println!("{prompt}");
+
+// Register a custom persona.
+let custom = PersonaBuilder::new()
+    .name("legal")
+    .role("Legal analyst")
+    .tone(PersonaTone::Formal)
+    .system_prompt("You are a careful legal analyst.")
+    .constraint("Always cite jurisdiction.")
+    .build();
+reg.register(custom);
+```
+
+`AgentRuntime::with_persona(name)` returns a `PersonaScope` that restores the
+previous persona on drop:
+
+```rust,no_run
+let mut runtime = AgentRuntime::quick(5, "my-model");
+if let Some(scope) = runtime.with_persona("coder") {
+    println!("active: {}", scope.persona().name);
+} // previous persona restored here
+```
 
 ---
 

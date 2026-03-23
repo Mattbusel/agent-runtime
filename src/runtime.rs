@@ -2548,6 +2548,9 @@ impl AgentRuntimeBuilder<HasConfig> {
             semantic_memory_store: Arc::new(tokio::sync::Mutex::new(
                 crate::vector_memory::SemanticMemory::new(),
             )),
+            ltm_store: crate::ltm::LtmStore::default_config(),
+            persona_registry: crate::persona::PersonaRegistry::with_builtins(),
+            active_persona: None,
         }
     }
 }
@@ -2608,6 +2611,12 @@ pub struct AgentRuntime {
     checkpoint_manager: crate::checkpoint::CheckpointManager,
     /// Vector similarity semantic memory store.
     semantic_memory_store: Arc<tokio::sync::Mutex<crate::vector_memory::SemanticMemory<String>>>,
+    /// Long-term memory store with Ebbinghaus forgetting-curve decay.
+    ltm_store: crate::ltm::LtmStore,
+    /// Persona registry for named agent personas.
+    persona_registry: crate::persona::PersonaRegistry,
+    /// Currently active persona name (used by PersonaScope).
+    active_persona: Option<String>,
 }
 
 impl std::fmt::Debug for AgentRuntime {
@@ -2696,6 +2705,58 @@ impl AgentRuntime {
         &self,
     ) -> Arc<tokio::sync::Mutex<crate::vector_memory::SemanticMemory<String>>> {
         self.semantic_memory_store.clone()
+    }
+
+    /// Return a reference to the long-term memory store.
+    ///
+    /// The store applies Ebbinghaus forgetting-curve decay and allows
+    /// entries to be recalled by semantic similarity.
+    pub fn ltm(&self) -> &crate::ltm::LtmStore {
+        &self.ltm_store
+    }
+
+    /// Return a mutable reference to the long-term memory store.
+    pub fn ltm_mut(&mut self) -> &mut crate::ltm::LtmStore {
+        &mut self.ltm_store
+    }
+
+    /// Return a reference to the persona registry.
+    pub fn persona_registry(&self) -> &crate::persona::PersonaRegistry {
+        &self.persona_registry
+    }
+
+    /// Return a mutable reference to the persona registry.
+    pub fn persona_registry_mut(&mut self) -> &mut crate::persona::PersonaRegistry {
+        &mut self.persona_registry
+    }
+
+    /// Activate a named persona for the duration of the returned [`PersonaScope`].
+    ///
+    /// The previous active persona (if any) is restored when the scope is dropped.
+    /// Returns `None` if the persona name is not registered.
+    pub fn with_persona(
+        &mut self,
+        name: &str,
+    ) -> Option<crate::persona::PersonaScope<'_>> {
+        if !self.persona_registry.contains(name) {
+            return None;
+        }
+        // SAFETY: we checked that the persona exists.  We use a raw pointer to
+        // split the borrow between persona_registry (immutable) and
+        // active_persona (mutable) which are separate fields of Self.
+        #[allow(clippy::unwrap_used)]
+        let persona: *const crate::persona::Persona =
+            self.persona_registry.get(name).unwrap();
+        let persona_ref: &crate::persona::Persona = unsafe { &*persona };
+        Some(crate::persona::PersonaScope::new(
+            persona_ref,
+            &mut self.active_persona,
+        ))
+    }
+
+    /// Return the currently active persona name, if any.
+    pub fn active_persona(&self) -> Option<&str> {
+        self.active_persona.as_deref()
     }
 
     /// Spawn a supervised group of child tasks under the given [`SupervisorStrategy`].

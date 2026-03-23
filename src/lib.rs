@@ -172,6 +172,12 @@ pub mod goals;
 /// Cognitive load monitor: tracks active goals, reasoning depth, and memory pressure.
 pub mod cognitive_load;
 
+/// Long-term memory with Ebbinghaus forgetting-curve decay and consolidation.
+pub mod ltm;
+
+/// Agent persona system: tones, built-in personas, registry, and scoped application.
+pub mod persona;
+
 /// JSON-schema-like validation of tool call arguments before execution.
 pub mod tool_validator;
 
