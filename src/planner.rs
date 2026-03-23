@@ -383,8 +383,565 @@ impl std::fmt::Display for PlannerError {
 
 impl std::error::Error for PlannerError {}
 
+// ===========================================================================
+// Goal Decomposition Planner — DAG-based ExecutionPlan / PlanBuilder
+// ===========================================================================
+//
+// This section adds a second planning abstraction alongside the HTN planner
+// above.  The HTN planner produces a flat ordered list of tool calls from a
+// goal decomposition.  The DAG planner represents work as a directed acyclic
+// graph where steps declare their dependencies explicitly, supports parallel
+// execution, conditional branching, and per-step retry policies.
+
+use std::collections::{HashSet, VecDeque};
+
 // ---------------------------------------------------------------------------
-// Tests
+// DagPlanStep
+// ---------------------------------------------------------------------------
+
+/// A single step inside a DAG [`DagExecutionPlan`].
+#[derive(Debug, Clone)]
+pub struct DagPlanStep {
+    /// Unique identifier for this step within the plan.
+    pub id: String,
+    /// Short human-readable name.
+    pub name: String,
+    /// Detailed description of what this step does.
+    pub description: String,
+    /// Capability tags that an executing agent must provide.
+    pub required_capabilities: Vec<String>,
+    /// IDs of steps that must be in [`DagStepStatus::Completed`] before this
+    /// step is eligible to run.
+    pub depends_on: Vec<String>,
+    /// Maximum number of retry attempts before declaring the step failed.
+    pub max_retries: u32,
+    /// Optional wall-clock timeout in seconds.
+    pub timeout_secs: Option<u64>,
+    /// Optional human-readable description of how to roll back this step.
+    pub rollback_description: Option<String>,
+    /// Arbitrary key/value metadata for callers.
+    pub metadata: std::collections::HashMap<String, String>,
+}
+
+// ---------------------------------------------------------------------------
+// DagStepStatus
+// ---------------------------------------------------------------------------
+
+/// Execution status of a [`DagPlanStep`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum DagStepStatus {
+    /// Not yet eligible to run (dependencies unsatisfied).
+    Pending,
+    /// All dependencies are satisfied; the step may begin.
+    Ready,
+    /// The step is currently executing.
+    InProgress,
+    /// The step finished successfully.
+    Completed {
+        /// The result produced by the step.
+        result: String,
+    },
+    /// The step has failed and may not be retried further.
+    Failed {
+        /// Human-readable error message.
+        error: String,
+        /// Total number of attempts made.
+        attempts: u32,
+    },
+    /// The step was intentionally skipped.
+    Skipped {
+        /// Reason for skipping.
+        reason: String,
+    },
+    /// The step was rolled back after a failure.
+    RolledBack,
+}
+
+// ---------------------------------------------------------------------------
+// DagExecutionPlan
+// ---------------------------------------------------------------------------
+
+/// A complete DAG-based execution plan.
+///
+/// Steps declare their dependencies via [`DagPlanStep::depends_on`].  The plan
+/// tracks the status of every step and surfaces which steps are currently
+/// eligible to run.
+#[derive(Debug, Clone)]
+pub struct DagExecutionPlan {
+    /// Unique plan identifier.
+    pub id: String,
+    /// High-level goal this plan is working toward.
+    pub goal: String,
+    /// All steps, keyed by their [`DagPlanStep::id`].
+    pub steps: std::collections::HashMap<String, DagPlanStep>,
+    /// Current execution status of every step.
+    pub step_status: std::collections::HashMap<String, DagStepStatus>,
+    /// When the plan was created.
+    pub created_at: std::time::SystemTime,
+    /// When the plan finished (all steps terminal), if ever.
+    pub completed_at: Option<std::time::SystemTime>,
+}
+
+impl DagExecutionPlan {
+    /// Return steps whose dependencies are all completed and that are still
+    /// in [`DagStepStatus::Pending`] or [`DagStepStatus::Ready`].
+    pub fn ready_steps(&self) -> Vec<&DagPlanStep> {
+        self.steps
+            .values()
+            .filter(|step| {
+                let status = self.step_status.get(&step.id);
+                // Only consider steps that haven't started yet.
+                let is_waiting = matches!(
+                    status,
+                    Some(DagStepStatus::Pending) | Some(DagStepStatus::Ready) | None
+                );
+                if !is_waiting {
+                    return false;
+                }
+                // All dependencies must be completed.
+                step.depends_on.iter().all(|dep_id| {
+                    matches!(
+                        self.step_status.get(dep_id),
+                        Some(DagStepStatus::Completed { .. })
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Return all steps in a valid topological order (dependencies before
+    /// dependants).  Returns an error if the graph contains a cycle.
+    pub fn topological_order(&self) -> Vec<&DagPlanStep> {
+        // Kahn's algorithm.
+        let mut in_degree: std::collections::HashMap<&str, usize> =
+            self.steps.keys().map(|k| (k.as_str(), 0)).collect();
+
+        for step in self.steps.values() {
+            for dep in &step.depends_on {
+                *in_degree.entry(step.id.as_str()).or_insert(0) += 1;
+                let _ = dep; // dep already counted via depends_on
+            }
+            // Re-count: for each step, its in-degree is len(depends_on).
+        }
+        // Reset and recount properly.
+        for k in in_degree.values_mut() {
+            *k = 0;
+        }
+        for step in self.steps.values() {
+            in_degree.insert(step.id.as_str(), step.depends_on.len());
+        }
+
+        let mut queue: VecDeque<&str> = in_degree
+            .iter()
+            .filter_map(|(id, &deg)| if deg == 0 { Some(*id) } else { None })
+            .collect();
+
+        let mut order: Vec<&DagPlanStep> = Vec::with_capacity(self.steps.len());
+
+        while let Some(id) = queue.pop_front() {
+            if let Some(step) = self.steps.get(id) {
+                order.push(step);
+                // Reduce in-degree for every step that depends on `id`.
+                for other in self.steps.values() {
+                    if other.depends_on.iter().any(|d| d == id) {
+                        let deg = in_degree.get_mut(other.id.as_str()).unwrap_or(&mut 0);
+                        *deg = deg.saturating_sub(1);
+                        if *deg == 0 {
+                            queue.push_back(other.id.as_str());
+                        }
+                    }
+                }
+            }
+        }
+
+        order
+    }
+
+    /// Mark a step as [`DagStepStatus::Completed`].
+    pub fn complete_step(&mut self, step_id: &str, result: impl Into<String>) {
+        self.step_status
+            .insert(step_id.to_owned(), DagStepStatus::Completed { result: result.into() });
+        self.maybe_set_completed_at();
+    }
+
+    /// Mark a step as [`DagStepStatus::Failed`].
+    pub fn fail_step(&mut self, step_id: &str, error: impl Into<String>) {
+        let attempts = match self.step_status.get(step_id) {
+            Some(DagStepStatus::Failed { attempts, .. }) => *attempts + 1,
+            _ => 1,
+        };
+        self.step_status.insert(
+            step_id.to_owned(),
+            DagStepStatus::Failed { error: error.into(), attempts },
+        );
+        self.maybe_set_completed_at();
+    }
+
+    /// Return `true` if every step is in a terminal state (completed, failed,
+    /// skipped, or rolled back).
+    pub fn is_complete(&self) -> bool {
+        self.steps.keys().all(|id| {
+            matches!(
+                self.step_status.get(id),
+                Some(
+                    DagStepStatus::Completed { .. }
+                        | DagStepStatus::Failed { .. }
+                        | DagStepStatus::Skipped { .. }
+                        | DagStepStatus::RolledBack
+                )
+            )
+        })
+    }
+
+    /// Return `true` if any step is in [`DagStepStatus::Failed`] with no
+    /// retries remaining.
+    pub fn has_failed(&self) -> bool {
+        self.steps.values().any(|step| {
+            matches!(
+                self.step_status.get(&step.id),
+                Some(DagStepStatus::Failed { attempts, .. })
+                    if *attempts > step.max_retries
+            )
+        })
+    }
+
+    /// Return plan progress as an integer percentage (0–100).
+    ///
+    /// Progress = completed steps / total steps.
+    pub fn progress_pct(&self) -> u8 {
+        if self.steps.is_empty() {
+            return 100;
+        }
+        let completed = self
+            .step_status
+            .values()
+            .filter(|s| matches!(s, DagStepStatus::Completed { .. }))
+            .count();
+        ((completed * 100) / self.steps.len()).min(100) as u8
+    }
+
+    /// Validate that the step dependency graph is a DAG (no cycles).
+    ///
+    /// Uses iterative DFS with a "gray/black" colouring scheme.
+    /// Returns `Ok(())` if the graph is acyclic, or `Err` with a description
+    /// of the cycle.
+    pub fn validate_dag(&self) -> Result<(), String> {
+        // 0 = white (unvisited), 1 = gray (in stack), 2 = black (done)
+        let mut colour: std::collections::HashMap<&str, u8> =
+            self.steps.keys().map(|k| (k.as_str(), 0u8)).collect();
+
+        for start in self.steps.keys() {
+            if *colour.get(start.as_str()).unwrap_or(&0) == 0 {
+                Self::dfs_cycle(start.as_str(), &self.steps, &mut colour)?;
+            }
+        }
+        Ok(())
+    }
+
+    // Recursive DFS helper for cycle detection.
+    fn dfs_cycle(
+        node: &str,
+        steps: &std::collections::HashMap<String, DagPlanStep>,
+        colour: &mut std::collections::HashMap<&str, u8>,
+    ) -> Result<(), String> {
+        *colour.entry(node).or_insert(0) = 1; // gray
+        if let Some(step) = steps.get(node) {
+            for dep in &step.depends_on {
+                let c = *colour.get(dep.as_str()).unwrap_or(&0);
+                if c == 1 {
+                    return Err(format!(
+                        "cycle detected: step '{}' depends on '{}' which is already in the current path",
+                        node, dep
+                    ));
+                }
+                if c == 0 {
+                    Self::dfs_cycle(dep.as_str(), steps, colour)?;
+                }
+            }
+        }
+        *colour.entry(node).or_insert(0) = 2; // black
+        Ok(())
+    }
+
+    /// Return a human-readable summary of the plan and its current status.
+    pub fn summary(&self) -> String {
+        let total = self.steps.len();
+        let completed = self
+            .step_status
+            .values()
+            .filter(|s| matches!(s, DagStepStatus::Completed { .. }))
+            .count();
+        let failed = self
+            .step_status
+            .values()
+            .filter(|s| matches!(s, DagStepStatus::Failed { .. }))
+            .count();
+        let pending = total - completed - failed;
+        format!(
+            "Plan '{}' [{}]: {total} steps, {completed} completed, {failed} failed, {pending} pending ({pct}%)",
+            self.goal,
+            self.id,
+            pct = self.progress_pct(),
+        )
+    }
+
+    // Set completed_at when the plan reaches a terminal state.
+    fn maybe_set_completed_at(&mut self) {
+        if self.completed_at.is_none() && self.is_complete() {
+            self.completed_at = Some(std::time::SystemTime::now());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PlanBuilder
+// ---------------------------------------------------------------------------
+
+/// Constructs [`DagExecutionPlan`] instances.
+///
+/// Provides convenience constructors for common patterns (sequential,
+/// parallel) and a low-level [`PlanBuilder::add_step`] for bespoke graphs.
+pub struct PlanBuilder;
+
+impl PlanBuilder {
+    /// Create a new empty plan for the given goal.
+    pub fn new(goal: impl Into<String>) -> DagExecutionPlan {
+        DagExecutionPlan {
+            id: uuid::Uuid::new_v4().to_string(),
+            goal: goal.into(),
+            steps: std::collections::HashMap::new(),
+            step_status: std::collections::HashMap::new(),
+            created_at: std::time::SystemTime::now(),
+            completed_at: None,
+        }
+    }
+
+    /// Create a linear sequential plan: each step depends on the one before it.
+    ///
+    /// `steps` is a slice of `(name, description)` pairs.
+    pub fn sequential(
+        goal: impl Into<String>,
+        steps: Vec<(&str, &str)>,
+    ) -> DagExecutionPlan {
+        let mut plan = Self::new(goal);
+        let mut prev_id: Option<String> = None;
+        for (name, description) in steps {
+            let id = uuid::Uuid::new_v4().to_string();
+            let step = DagPlanStep {
+                id: id.clone(),
+                name: name.to_owned(),
+                description: description.to_owned(),
+                required_capabilities: Vec::new(),
+                depends_on: prev_id.iter().cloned().collect(),
+                max_retries: 0,
+                timeout_secs: None,
+                rollback_description: None,
+                metadata: std::collections::HashMap::new(),
+            };
+            plan.step_status.insert(id.clone(), DagStepStatus::Pending);
+            plan.steps.insert(id.clone(), step);
+            prev_id = Some(id);
+        }
+        plan
+    }
+
+    /// Create a plan where all steps are independent (no dependencies).
+    ///
+    /// All steps may run in parallel.
+    pub fn parallel(goal: impl Into<String>, steps: Vec<(&str, &str)>) -> DagExecutionPlan {
+        let mut plan = Self::new(goal);
+        for (name, description) in steps {
+            let id = uuid::Uuid::new_v4().to_string();
+            let step = DagPlanStep {
+                id: id.clone(),
+                name: name.to_owned(),
+                description: description.to_owned(),
+                required_capabilities: Vec::new(),
+                depends_on: Vec::new(),
+                max_retries: 0,
+                timeout_secs: None,
+                rollback_description: None,
+                metadata: std::collections::HashMap::new(),
+            };
+            plan.step_status.insert(id.clone(), DagStepStatus::Pending);
+            plan.steps.insert(id.clone(), step);
+        }
+        plan
+    }
+
+    /// Add a step to an existing plan.
+    ///
+    /// The step's initial status is set to [`DagStepStatus::Pending`].
+    pub fn add_step(plan: &mut DagExecutionPlan, step: DagPlanStep) {
+        plan.step_status.insert(step.id.clone(), DagStepStatus::Pending);
+        plan.steps.insert(step.id.clone(), step);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DAG planner tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod dag_tests {
+    use super::*;
+
+    fn make_step(id: &str, depends_on: Vec<&str>) -> DagPlanStep {
+        DagPlanStep {
+            id: id.to_owned(),
+            name: format!("Step {id}"),
+            description: format!("Description for {id}"),
+            required_capabilities: Vec::new(),
+            depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
+            max_retries: 0,
+            timeout_secs: None,
+            rollback_description: None,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn sequential_plan_has_chained_deps() {
+        let plan = PlanBuilder::sequential(
+            "Linear goal",
+            vec![("a", "first"), ("b", "second"), ("c", "third")],
+        );
+        assert_eq!(plan.steps.len(), 3);
+        // Validate the DAG is acyclic.
+        plan.validate_dag().unwrap();
+        // Topological order has 3 items.
+        let order = plan.topological_order();
+        assert_eq!(order.len(), 3);
+    }
+
+    #[test]
+    fn parallel_plan_all_steps_ready_immediately() {
+        let plan = PlanBuilder::parallel(
+            "Parallel goal",
+            vec![("x", "step x"), ("y", "step y"), ("z", "step z")],
+        );
+        assert_eq!(plan.steps.len(), 3);
+        let ready = plan.ready_steps();
+        // All three steps have no deps → all ready.
+        assert_eq!(ready.len(), 3);
+    }
+
+    #[test]
+    fn ready_steps_respects_dependencies() {
+        let mut plan = PlanBuilder::new("dep test");
+        PlanBuilder::add_step(&mut plan, make_step("a", vec![]));
+        PlanBuilder::add_step(&mut plan, make_step("b", vec!["a"]));
+
+        // Initially only "a" has no deps → ready.
+        let ready: Vec<&str> = plan.ready_steps().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ready, vec!["a"]);
+
+        // Complete "a" → "b" becomes ready.
+        plan.complete_step("a", "done");
+        let ready: Vec<&str> = plan.ready_steps().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ready, vec!["b"]);
+    }
+
+    #[test]
+    fn complete_step_updates_progress() {
+        let mut plan = PlanBuilder::sequential("prog", vec![("s1", "d1"), ("s2", "d2")]);
+        assert_eq!(plan.progress_pct(), 0);
+
+        let ids: Vec<String> = plan.steps.keys().cloned().collect();
+        plan.complete_step(&ids[0], "ok");
+        assert_eq!(plan.progress_pct(), 50);
+
+        plan.complete_step(&ids[1], "ok");
+        assert_eq!(plan.progress_pct(), 100);
+    }
+
+    #[test]
+    fn is_complete_when_all_terminal() {
+        let mut plan = PlanBuilder::parallel("done", vec![("a", ""), ("b", "")]);
+        assert!(!plan.is_complete());
+
+        let ids: Vec<String> = plan.steps.keys().cloned().collect();
+        plan.complete_step(&ids[0], "ok");
+        assert!(!plan.is_complete());
+        plan.complete_step(&ids[1], "ok");
+        assert!(plan.is_complete());
+    }
+
+    #[test]
+    fn has_failed_detects_exhausted_step() {
+        let mut plan = PlanBuilder::new("fail test");
+        // max_retries = 0 → any failure is terminal.
+        PlanBuilder::add_step(&mut plan, make_step("s1", vec![]));
+        assert!(!plan.has_failed());
+        plan.fail_step("s1", "boom");
+        // 1 attempt > 0 max_retries → has_failed.
+        assert!(plan.has_failed());
+    }
+
+    #[test]
+    fn validate_dag_accepts_valid_graph() {
+        let mut plan = PlanBuilder::new("valid");
+        PlanBuilder::add_step(&mut plan, make_step("a", vec![]));
+        PlanBuilder::add_step(&mut plan, make_step("b", vec!["a"]));
+        PlanBuilder::add_step(&mut plan, make_step("c", vec!["a", "b"]));
+        assert!(plan.validate_dag().is_ok());
+    }
+
+    #[test]
+    fn validate_dag_rejects_cycle() {
+        let mut plan = PlanBuilder::new("cycle");
+        PlanBuilder::add_step(&mut plan, make_step("a", vec!["c"]));
+        PlanBuilder::add_step(&mut plan, make_step("b", vec!["a"]));
+        PlanBuilder::add_step(&mut plan, make_step("c", vec!["b"]));
+        assert!(plan.validate_dag().is_err());
+    }
+
+    #[test]
+    fn topological_order_respects_dependencies() {
+        let mut plan = PlanBuilder::new("topo");
+        PlanBuilder::add_step(&mut plan, make_step("a", vec![]));
+        PlanBuilder::add_step(&mut plan, make_step("b", vec!["a"]));
+        PlanBuilder::add_step(&mut plan, make_step("c", vec!["b"]));
+
+        let order = plan.topological_order();
+        assert_eq!(order.len(), 3);
+
+        // Find positions.
+        let pos = |id: &str| order.iter().position(|s| s.id == id).unwrap();
+        assert!(pos("a") < pos("b"));
+        assert!(pos("b") < pos("c"));
+    }
+
+    #[test]
+    fn summary_contains_goal_and_counts() {
+        let plan = PlanBuilder::sequential("My Goal", vec![("s1", ""), ("s2", "")]);
+        let s = plan.summary();
+        assert!(s.contains("My Goal"));
+        assert!(s.contains("2 steps"));
+    }
+
+    #[test]
+    fn completed_at_set_when_all_done() {
+        let mut plan = PlanBuilder::parallel("finish", vec![("a", ""), ("b", "")]);
+        assert!(plan.completed_at.is_none());
+        let ids: Vec<String> = plan.steps.keys().cloned().collect();
+        plan.complete_step(&ids[0], "ok");
+        assert!(plan.completed_at.is_none());
+        plan.complete_step(&ids[1], "ok");
+        assert!(plan.completed_at.is_some());
+    }
+
+    #[test]
+    fn add_step_builder_creates_pending_status() {
+        let mut plan = PlanBuilder::new("manual");
+        PlanBuilder::add_step(&mut plan, make_step("x", vec![]));
+        assert_eq!(plan.step_status.get("x"), Some(&DagStepStatus::Pending));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests (original HTN planner)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

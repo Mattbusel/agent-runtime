@@ -99,6 +99,8 @@ pub mod orchestrator;
 pub mod agent;
 /// Async broadcast message bus for inter-agent communication.
 pub mod bus;
+/// Typed inter-agent messaging protocol with task delegation, capability queries, and heartbeats.
+pub mod messaging;
 pub mod dialogue;
 pub mod metrics;
 pub mod planner;
@@ -171,6 +173,15 @@ pub use sandbox::{
 pub use planner::{
     ExecutionPlan, Method, Planner, PlannerConfig, PlannerError, PlanStep, Precondition, Task,
     TaskKind,
+};
+
+// DAG goal-decomposition planner re-exports.
+pub use planner::{DagExecutionPlan, DagPlanStep, DagStepStatus, PlanBuilder};
+
+// Inter-agent messaging protocol re-exports.
+pub use messaging::{
+    AgentMailbox, AgentMessage, BusStats as MessagingBusStats, MessageBus, MessageEnvelope,
+    AgentId as MessagingAgentId,
 };
 
 // Message bus re-exports.
