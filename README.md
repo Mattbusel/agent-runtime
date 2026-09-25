@@ -1,14 +1,128 @@
 # agent-runtime
 
-[![CI](https://github.com/Mattbusel/agent-runtime/actions/workflows/ci.yml/badge.svg)](https://github.com/Mattbusel/agent-runtime/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/llm-agent-runtime.svg)](https://crates.io/crates/llm-agent-runtime)
 [![docs.rs](https://docs.rs/llm-agent-runtime/badge.svg)](https://docs.rs/llm-agent-runtime)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
-[![Multi-Agent](https://img.shields.io/badge/multi--agent-bus%20%7C%20teams-blueviolet)](#multi-agent-message-bus)
-[![Streaming](https://img.shields.io/badge/inference-streaming-brightgreen)](#streaming-inference)
 
-`agent-runtime` is a batteries-included, async-first Rust crate for building production LLM agents. It unifies a ReAct (Thought-Action-Observation) loop, a **Plan-Execute-Verify** structured agent loop, episodic and semantic memory with decay and cosine-similarity recall, **automatic background memory consolidation** via TF-IDF k-means clustering, a directed knowledge graph with centrality and community detection, an orchestration layer with circuit breakers and retry/backpressure, pluggable LLM providers with SSE streaming, optional file-based session checkpointing, intelligent memory compression for long-running agents, a peer-discovery registry, a **multi-agent message bus** with role-based routing, **agent teams** with Star/Mesh/Ring topologies and Majority/Pipeline/Parallel consensus, and **token-by-token streaming inference** with real-time callbacks — all in a single crate, driven by a compile-time typestate builder that makes misconfiguration a compiler error rather than a runtime panic.
+A Rust crate (`llm-agent-runtime`) for building LLM agents on Tokio: a ReAct tool-calling loop, a plan-execute-verify loop, episodic, semantic and working memory, a knowledge graph, circuit breakers and backpressure, Anthropic and OpenAI providers with streaming, and a multi-agent message bus, all behind one builder.
+
+Agent code tends to grow the same pieces every time: a loop that parses the model's action and calls a tool, somewhere to remember things between turns, retries and circuit breakers around flaky tools, and a way for several agents to talk. This crate puts those pieces in one place with typed errors. The builder uses a compile-time typestate, so forgetting to set an `AgentConfig` is a compile error rather than a runtime panic, and the default feature set runs entirely in process: you can pass a closure as the "model" and test an agent without any API key.
+
+## Quick start
+
+### 1. Add to `Cargo.toml`
+
+```toml
+[dependencies]
+llm-agent-runtime = "1.74"   # latest on crates.io; this repository is at 1.75.0
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+```
+
+For the unreleased code on `master`: `llm-agent-runtime = { git = "https://github.com/Mattbusel/agent-runtime" }`.
+
+To opt in to specific subsystems only:
+
+```toml
+llm-agent-runtime = { version = "1.74", default-features = false, features = ["memory", "orchestrator"] }
+```
+
+To enable built-in LLM providers:
+
+```toml
+llm-agent-runtime = { version = "1.74", features = ["anthropic", "openai"] }
+```
+
+### 2. Set environment variables (if using a provider)
+
+```sh
+export ANTHROPIC_API_KEY="sk-ant-..."   # required for AnthropicProvider
+export OPENAI_API_KEY="sk-..."          # required for OpenAiProvider
+export RUST_LOG="agent_runtime=debug"   # optional structured tracing output
+```
+
+### 3. Run an agent (no external services required)
+
+The default feature set runs entirely in-process:
+
+```rust
+use llm_agent_runtime::prelude::*;
+
+#[tokio::main]
+async fn main() -> Result<(), AgentRuntimeError> {
+    // Seed episodic memory.
+    let memory = EpisodicStore::new();
+    let agent_id = AgentId::new("demo");
+    memory.add_episode(agent_id.clone(), "Rust is fast and memory-safe.", 0.9)?;
+    memory.add_episode(agent_id.clone(), "Tokio is an async runtime for Rust.", 0.8)?;
+
+    // Build the runtime.  The typestate builder enforces that
+    // with_agent_config() is called before build() at compile time.
+    let runtime = AgentRuntime::builder()
+        .with_memory(memory)
+        .with_agent_config(
+            AgentConfig::new(5, "stub-model")
+                .with_system_prompt("You are a demo agent.")
+                .with_max_memory_recalls(3),
+        )
+        .register_tool(ToolSpec::new("double", "Doubles a number", |args| {
+            let n = args.get("n").and_then(|v| v.as_i64()).unwrap_or(0);
+            serde_json::json!(n * 2)
+        }))
+        .build();
+
+    // The `infer` closure acts as the model, replace with a provider call in production.
+    let mut step = 0usize;
+    let session = runtime
+        .run_agent(agent_id, "Double the number 21.", move |_ctx: String| {
+            step += 1;
+            let s = step;
+            async move {
+                if s == 1 {
+                    "Thought: I will use the double tool.\nAction: double {\"n\":21}".to_string()
+                } else {
+                    "Thought: The answer is 42.\nAction: FINAL_ANSWER 42".to_string()
+                }
+            }
+        })
+        .await?;
+
+    println!(
+        "Done in {} step(s), {} memory hit(s), {}ms",
+        session.step_count(),
+        session.memory_hits,
+        session.duration_ms,
+    );
+    Ok(())
+}
+```
+
+### 4. Use a built-in provider
+
+```rust,no_run
+use llm_agent_runtime::prelude::*;
+use llm_agent_runtime::providers::AnthropicProvider;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), AgentRuntimeError> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY not set");
+    let provider = Arc::new(AnthropicProvider::new(api_key));
+
+    let runtime = AgentRuntime::builder()
+        .with_agent_config(AgentConfig::new(10, "claude-sonnet-4-6"))
+        .build();
+
+    let session = runtime
+        .run_agent_with_provider(AgentId::new("agent-1"), "What is 6 * 7?", provider)
+        .await?;
+
+    println!("Answer: {}", session.final_answer().unwrap_or("no answer"));
+    Ok(())
+}
+```
+
+---
 
 ---
 
@@ -18,7 +132,7 @@
 |---|:---:|---|
 | `orchestrator` | yes | `CircuitBreaker` (pluggable backends), `RetryPolicy` (exp. backoff), `Deduplicator` (TTL), `BackpressureGuard` (hard + soft limits), `Pipeline` |
 | `memory` | yes | `EpisodicStore` (`DecayPolicy`, `RecallPolicy::Hybrid`, per-agent capacity), `SemanticStore` (cosine-similarity vector search, tag recall), `WorkingMemory` (bounded LRU) |
-| `graph` | yes | `GraphStore` — BFS, DFS, Dijkstra shortest-path, transitive closure, degree/betweenness centrality, community detection, cycle detection, subgraph extraction |
+| `graph` | yes | `GraphStore`, BFS, DFS, Dijkstra shortest-path, transitive closure, degree/betweenness centrality, community detection, cycle detection, subgraph extraction |
 | `wasm` | yes | `ReActLoop` with sync + streaming inference, `ToolRegistry`, `ToolSpec`, `parse_react_step`, `AgentConfig`, observer callbacks, step-level metrics |
 | `persistence` | no | `PersistenceBackend` async trait + `FilePersistenceBackend`; per-session and per-step checkpointing to disk |
 | `providers` | no | `LlmProvider` async trait |
@@ -27,8 +141,8 @@
 | `redis-circuit-breaker` | no | Distributed `CircuitBreakerBackend` state via Redis |
 | `distributed` | no | Distributed agent coordination via Redis: work queue and leader election |
 | `otel` | no | OpenTelemetry tracing spans for tool calls (implies `opentelemetry` + `opentelemetry_sdk` + `opentelemetry-otlp`) |
-| `compression` | no | `MemoryCompressor`, `ImportanceStrategy`, `MemorySummary` — token-budget-aware compression of episodic memory |
-| `discovery` | no | `AgentRegistry`, `CapabilityQuery`, `CapabilityMatch` — TTL-based peer capability advertisement and tag-overlap matching |
+| `compression` | no | `MemoryCompressor`, `ImportanceStrategy`, `MemorySummary`, token-budget-aware compression of episodic memory |
+| `discovery` | no | `AgentRegistry`, `CapabilityQuery`, `CapabilityMatch`, TTL-based peer capability advertisement and tag-overlap matching |
 | `full` | no | All of the above simultaneously |
 
 ---
@@ -58,7 +172,7 @@
 └────────┘  └─────────┘  └────────────┘  └───────────────────────────────┘
 ```
 
-### New in this release
+### Newer modules
 
 | Module | Key Types | Purpose |
 |--------|-----------|---------|
@@ -130,6 +244,8 @@ reg.register(custom);
 previous persona on drop:
 
 ```rust,no_run
+use llm_agent_runtime::prelude::*;
+
 let mut runtime = AgentRuntime::quick(5, "my-model");
 if let Some(scope) = runtime.with_persona("coder") {
     println!("active: {}", scope.persona().name);
@@ -244,7 +360,7 @@ async fn main() -> Result<(), AgentRuntimeError> {
         .with_consensus(ConsensusStrategy::Parallel)
         .with_max_rounds(3);
 
-    // infer is called once per agent — swap for a real provider call.
+    // infer is called once per agent, swap for a real provider call.
     let result = runtime
         .run_team(config, |agent_id, prompt| async move {
             format!("{agent_id}: severity=high (stubbed)")
@@ -330,119 +446,6 @@ async fn main() {
     println!("Steps: {}", session.step_count());
     println!("Tokens: {}", session.total_token_count());
     println!("Answer: {:?}", session.final_answer());
-}
-```
-
----
-
-## 5-Minute Quickstart
-
-### 1. Add to `Cargo.toml`
-
-```toml
-[dependencies]
-llm-agent-runtime = "1.75"
-tokio = { version = "1", features = ["full"] }
-```
-
-To opt in to specific subsystems only:
-
-```toml
-llm-agent-runtime = { version = "1.75", default-features = false, features = ["memory", "orchestrator"] }
-```
-
-To enable built-in LLM providers:
-
-```toml
-llm-agent-runtime = { version = "1.75", features = ["anthropic", "openai"] }
-```
-
-### 2. Set environment variables (if using a provider)
-
-```sh
-export ANTHROPIC_API_KEY="sk-ant-..."   # required for AnthropicProvider
-export OPENAI_API_KEY="sk-..."          # required for OpenAiProvider
-export RUST_LOG="agent_runtime=debug"   # optional structured tracing output
-```
-
-### 3. Run an agent (no external services required)
-
-The default feature set runs entirely in-process:
-
-```rust
-use llm_agent_runtime::prelude::*;
-
-#[tokio::main]
-async fn main() -> Result<(), AgentRuntimeError> {
-    // Seed episodic memory.
-    let memory = EpisodicStore::new();
-    let agent_id = AgentId::new("demo");
-    memory.add_episode(agent_id.clone(), "Rust is fast and memory-safe.", 0.9)?;
-    memory.add_episode(agent_id.clone(), "Tokio is an async runtime for Rust.", 0.8)?;
-
-    // Build the runtime.  The typestate builder enforces that
-    // with_agent_config() is called before build() at compile time.
-    let runtime = AgentRuntime::builder()
-        .with_memory(memory)
-        .with_agent_config(
-            AgentConfig::new(5, "stub-model")
-                .with_system_prompt("You are a demo agent.")
-                .with_max_memory_recalls(3),
-        )
-        .register_tool(ToolSpec::new("double", "Doubles a number", |args| {
-            let n = args.get("n").and_then(|v| v.as_i64()).unwrap_or(0);
-            serde_json::json!(n * 2)
-        }))
-        .build();
-
-    // The `infer` closure acts as the model — replace with a provider call in production.
-    let mut step = 0usize;
-    let session = runtime
-        .run_agent(agent_id, "Double the number 21.", move |_ctx: String| {
-            step += 1;
-            let s = step;
-            async move {
-                if s == 1 {
-                    "Thought: I will use the double tool.\nAction: double {\"n\":21}".to_string()
-                } else {
-                    "Thought: The answer is 42.\nAction: FINAL_ANSWER 42".to_string()
-                }
-            }
-        })
-        .await?;
-
-    println!(
-        "Done in {} step(s), {} memory hit(s), {}ms",
-        session.step_count(),
-        session.memory_hits,
-        session.duration_ms,
-    );
-    Ok(())
-}
-```
-
-### 4. Use a built-in provider
-
-```rust,no_run
-use llm_agent_runtime::prelude::*;
-use llm_agent_runtime::providers::AnthropicProvider;
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> Result<(), AgentRuntimeError> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY not set");
-    let provider = Arc::new(AnthropicProvider::new(api_key));
-
-    let runtime = AgentRuntime::builder()
-        .with_agent_config(AgentConfig::new(10, "claude-sonnet-4-6"))
-        .build();
-
-    let session = runtime
-        .run_agent_with_provider(AgentId::new("agent-1"), "What is 6 * 7?", provider)
-        .await?;
-
-    println!("Answer: {}", session.final_answer().unwrap_or("no answer"));
-    Ok(())
 }
 ```
 
@@ -576,17 +579,16 @@ async fn main() -> Result<(), AgentRuntimeError> {
         .with_agent_config(AgentConfig::new(5, "claude-sonnet-4-6"))
         .build();
 
-    let mut n = 0usize;
+    let n = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (plan, verification) = runtime
         .run_plan_execute(
             AgentId::new("researcher"),
             "Research the latest Rust async developments",
             move |ctx: String| {
-                n += 1;
-                let step = n;
+                let step = n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 async move {
                     if step == 1 {
-                        // Planning response — numbered steps.
+                        // Planning response, numbered steps.
                         "1. Search Rust blog | tool:web_search | expected:recent posts\n\
                          2. Summarise findings | tool:none | expected:summary\n"
                             .to_string()
@@ -666,7 +668,7 @@ async fn main() {
     let consolidator = MemoryConsolidator::new(Arc::clone(&store), policy);
     let metrics = consolidator.metrics();
 
-    // Spawn as a background task — runs indefinitely.
+    // Spawn as a background task, runs indefinitely.
     tokio::spawn(consolidator.run());
 
     // Periodically inspect consolidated summaries.
@@ -737,7 +739,7 @@ for s in &summaries {
 | Variant | Score formula |
 |---|---|
 | `KeywordDensity(keywords)` | `min(1, keyword_hits / word_count)` |
-| `EntityDensity` | `min(1, entity_count / word_count)` — capitalised-word heuristic |
+| `EntityDensity` | `min(1, entity_count / word_count)`, capitalised-word heuristic |
 | `RecencyDecay { decay_per_hour }` | `exp(-decay_per_hour * age_hours)` |
 | `Composite([(strategy, weight), ...])` | Weighted average of sub-strategies |
 
@@ -788,7 +790,7 @@ async fn main() {
 
     for m in &matches {
         println!(
-            "Agent {} — capability '{}' — score {:.2}",
+            "Agent {}, capability '{}', score {:.2}",
             m.agent_id, m.capability.name, m.score
         );
     }
@@ -805,9 +807,9 @@ async fn main() {
 
 Capability matching is a two-pass algorithm:
 
-1. **Required-tag filter** — capabilities missing any `required_tags` entry are discarded.
-2. **Latency / cost filters** — capabilities exceeding `max_latency_ms` or `max_cost_usd` are discarded.
-3. **Score** — surviving capabilities are scored with Jaccard similarity between the capability's tags and `required_tags ∪ preferred_tags`, then multiplied by a health factor (`Healthy=1.0`, `Degraded=0.6`, `Unhealthy/Unknown=0.0`).
+1. **Required-tag filter**: capabilities missing any `required_tags` entry are discarded.
+2. **Latency / cost filters**: capabilities exceeding `max_latency_ms` or `max_cost_usd` are discarded.
+3. **Score**: surviving capabilities are scored with Jaccard similarity between the capability's tags and `required_tags ∪ preferred_tags`, then multiplied by a health factor (`Healthy=1.0`, `Degraded=0.6`, `Unhealthy/Unknown=0.0`).
 4. Results are returned sorted by score descending.
 
 ---
@@ -960,7 +962,7 @@ cargo run --example <name> --features <required-features>
 
 ## Advanced: Tool Capability Sandbox
 
-The `sandbox` module enforces a capability-based security model — every tool
+The `sandbox` module enforces a capability-based security model, every tool
 must declare what permissions it requires, and the runtime only allows calls
 when the current grant set satisfies all requirements.
 
@@ -997,7 +999,7 @@ match sandbox.check("delete_file") {
 
 // Inspect the audit trail.
 for entry in sandbox.audit_log() {
-    println!("{}: {} — {}", entry.tool_name,
+    println!("{}: {}, {}", entry.tool_name,
         if entry.allowed { "ALLOW" } else { "DENY" },
         entry.denied_capabilities.join(", "));
 }
@@ -1123,7 +1125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Variant | Behaviour |
 |---|---|
-| `Breadth` | Split on commas, semicolons, and ` and ` — produces a flat parallel list |
+| `Breadth` | Split on commas, semicolons, and ` and `, produces a flat parallel list |
 | `Depth` | Recursively split on sequencing connectors (` then `, ` next `, …) for DFS ordering |
 
 ---
@@ -1204,7 +1206,7 @@ use llm_agent_runtime::marketplace::{Skill, SkillRegistry, SkillMatcher, SkillCo
 use std::sync::Arc;
 
 fn main() {
-    // Build a shared registry — wrap in Arc for multi-task sharing.
+    // Build a shared registry, wrap in Arc for multi-task sharing.
     let registry = Arc::new(SkillRegistry::new());
 
     // Register skills.
@@ -1243,7 +1245,7 @@ fn main() {
         3,
     );
     for m in &matches {
-        println!("  {:<20} score={:.2f}", m.skill.name, m.score);
+        println!("  {:<20} score={:.2}", m.skill.name, m.score);
     }
 
     // --- SkillComposer: build a multi-skill pipeline ---
@@ -1352,7 +1354,7 @@ across all sessions), `AgentMetrics` tracks each agent independently.
 |---|---|
 | `AgentMetrics` | Mutable live counters for one agent: steps, tokens, tool calls, latency, memory |
 | `AgentMetricsSnapshot` | Serialisable (`serde`) point-in-time capture of `AgentMetrics` |
-| `AgentMetricsRegistry` | `Arc<Mutex<HashMap<String, AgentMetrics>>>` — thread-safe multi-agent registry |
+| `AgentMetricsRegistry` | `Arc<Mutex<HashMap<String, AgentMetrics>>>`, thread-safe multi-agent registry |
 
 ### Tracked Fields
 
@@ -1383,7 +1385,7 @@ registry.record_tool_call("agent-1", false /* success */);
 registry.record_tool_call("agent-1", true  /* failure */);
 registry.record_tokens("agent-1", 512, 128);
 
-// Snapshot is Serialize/Deserialize — log it, store it, or send it over the wire.
+// Snapshot is Serialize/Deserialize, log it, store it, or send it over the wire.
 let snap = registry.snapshot("agent-1").expect("agent was registered");
 println!("steps={} failure_rate={:.2}", snap.total_steps, snap.failure_rate);
 
@@ -1394,14 +1396,20 @@ println!("{} agents tracked", all.len());
 
 ---
 
+## Status
+
+The crate is large (about 100 public modules) and moves quickly; the core path is `AgentRuntime`, the ReAct loop, memory, graph, orchestrator and providers described above, while many later modules are standalone utilities. The CI workflow is currently failing (`cargo test`, `cargo doc` and the MSRV 1.85 check), so pin a version and run your own tests before depending on less-used modules. crates.io has 1.74.0; this repository is at 1.75.0.
+
+---
+
 ## Contributing
 
 Contributions are welcome. Please follow these guidelines:
 
-1. **Fork and branch** — create a feature branch from `main` (`git checkout -b feat/my-feature`).
-2. **Stay zero-panic** — the project enforces `clippy::unwrap_used = "deny"` and `clippy::panic = "deny"` in all non-test code. Use `?`, `if let`, or `match` instead of `.unwrap()` / `.expect()` in `src/`.
-3. **Document public items** — `#![deny(missing_docs)]` is set at the crate root. Every new `pub` item must have a doc comment.
-4. **Write tests** — unit tests live in an inline `#[cfg(test)] mod tests` block at the bottom of each module. Use `#[allow(clippy::unwrap_used)]` only inside test modules.
+1. **Fork and branch**: create a feature branch from `main` (`git checkout -b feat/my-feature`).
+2. **Stay zero-panic**: the project enforces `clippy::unwrap_used = "deny"` and `clippy::panic = "deny"` in all non-test code. Use `?`, `if let`, or `match` instead of `.unwrap()` / `.expect()` in `src/`.
+3. **Document public items**: `#![deny(missing_docs)]` is set at the crate root. Every new `pub` item must have a doc comment.
+4. **Write tests**: unit tests live in an inline `#[cfg(test)] mod tests` block at the bottom of each module. Use `#[allow(clippy::unwrap_used)]` only inside test modules.
 5. **Run the full check suite locally** before opening a PR:
    ```sh
    cargo fmt --check
@@ -1409,7 +1417,7 @@ Contributions are welcome. Please follow these guidelines:
    cargo test --all-features
    ```
 6. **Open a PR** against `main` with a clear description of what the change does and why.
-7. **Changelog** — add a line to `CHANGELOG.md` under the `Unreleased` section (create the file if it does not exist).
+7. **Changelog**: add a line to `CHANGELOG.md` under the `Unreleased` section (create the file if it does not exist).
 
 For bug reports, please include the `cargo --version`, `rustc --version`, your `Cargo.toml` feature flags, and a minimal reproducible example.
 
@@ -1785,7 +1793,7 @@ use llm_agent_runtime::workflow::WorkflowContext;
 
 let mut ctx = WorkflowContext::new();
 ctx.set("status", "ok running");
-assert!(ctx.evaluate_condition("status:ok"));  // true — "ok running" contains "ok"
+assert!(ctx.evaluate_condition("status:ok"));  // true, "ok running" contains "ok"
 assert!(!ctx.evaluate_condition("status:fail")); // false
 ```
 
