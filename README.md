@@ -1976,3 +1976,8 @@ assert_eq!(sub.entity_count(), 3);
 // DOT export
 println!("{}", g.to_dot());
 ```
+
+
+## Hire the author
+
+**Need this kind of engineering on your product?** I take on a small number of client builds: LLM features, iOS apps and performance work, fixed price. [Services and pricing](https://mattbusel.github.io/) · [Email](mailto:mattbusel@gmail.com) · [LinkedIn](https://www.linkedin.com/in/matthewbusel/)
