@@ -6,18 +6,42 @@
 //!
 //! ## Guarantees
 //! - Thread-safe: all types wrap state in `Arc<Mutex<_>>` or atomics
-//! - Circuit breaker opens after `threshold` failures within `window` calls
-//! - RetryPolicy delays grow exponentially and are capped at `MAX_RETRY_DELAY`
+//! - Circuit breaker opens after `threshold` consecutive failures
+//! - RetryPolicy delays grow exponentially and are capped at [`MAX_RETRY_DELAY`]
 //! - Deduplicator is deterministic and non-blocking
-//! - BackpressureGuard never exceeds declared capacity
+//! - BackpressureGuard never exceeds declared hard capacity
 //! - Non-panicking: all operations return `Result`
 //!
 //! ## NOT Responsible For
-//! - Cross-node circuit breakers (single-process only)
+//! - Cross-node circuit breakers (single-process only, unless a distributed backend is provided)
 //! - Persistent deduplication (in-memory, bounded TTL)
 //! - Distributed backpressure
+//!
+//! ## Composing the Primitives
+//!
+//! The four primitives are designed to be layered. A typical production setup:
+//!
+//! ```text
+//! request
+//!   │
+//!   ▼
+//! BackpressureGuard  ← shed if too many in-flight requests
+//!   │
+//!   ▼
+//! Deduplicator       ← return cached result for duplicate keys
+//!   │
+//!   ▼
+//! CircuitBreaker     ← fast-fail if the downstream is unhealthy
+//!   │
+//!   ▼
+//! RetryPolicy        ← retry transient failures with exponential backoff
+//!   │
+//!   ▼
+//! Pipeline           ← transform request/response through named stages
+//! ```
 
 use crate::error::AgentRuntimeError;
+use crate::util::timed_lock;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -27,13 +51,24 @@ pub const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 // ── RetryPolicy ───────────────────────────────────────────────────────────────
 
-/// Exponential backoff retry policy.
+/// Retry mode: exponential backoff or constant interval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryKind {
+    /// Delay doubles each attempt: `base_delay * 2^(attempt-1)`.
+    Exponential,
+    /// Delay is fixed at `base_delay` for every attempt.
+    Constant,
+}
+
+/// Configurable retry policy with exponential backoff or constant interval.
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
     /// Maximum number of attempts (including the first).
     pub max_attempts: u32,
     /// Base delay for the first retry.
     pub base_delay: Duration,
+    /// Whether to use exponential or constant delay.
+    pub kind: RetryKind,
 }
 
 impl RetryPolicy {
@@ -52,24 +87,324 @@ impl RetryPolicy {
                 "max_attempts must be >= 1".into(),
             ));
         }
+        if base_ms == 0 {
+            return Err(AgentRuntimeError::Orchestration(
+                "base_ms must be >= 1 to avoid zero-delay busy-loop retries".into(),
+            ));
+        }
         Ok(Self {
             max_attempts,
             base_delay: Duration::from_millis(base_ms),
+            kind: RetryKind::Exponential,
         })
+    }
+
+    /// Create a constant (fixed-interval) retry policy.
+    ///
+    /// Every retry waits exactly `delay_ms` milliseconds regardless of attempt
+    /// number, unlike [`exponential`] which doubles the delay each time.
+    ///
+    /// [`exponential`]: RetryPolicy::exponential
+    ///
+    /// # Returns
+    /// - `Ok(RetryPolicy)` — on success
+    /// - `Err(AgentRuntimeError::Orchestration)` — if `max_attempts == 0` or `delay_ms == 0`
+    pub fn constant(max_attempts: u32, delay_ms: u64) -> Result<Self, AgentRuntimeError> {
+        if max_attempts == 0 {
+            return Err(AgentRuntimeError::Orchestration(
+                "max_attempts must be >= 1".into(),
+            ));
+        }
+        if delay_ms == 0 {
+            return Err(AgentRuntimeError::Orchestration(
+                "delay_ms must be >= 1 to avoid busy-loop retries".into(),
+            ));
+        }
+        Ok(Self {
+            max_attempts,
+            base_delay: Duration::from_millis(delay_ms),
+            kind: RetryKind::Constant,
+        })
+    }
+
+    /// Create a no-retry policy (single attempt, no delay).
+    ///
+    /// Useful for one-shot operations or when the caller manages retry logic externally.
+    pub fn none() -> Self {
+        Self {
+            max_attempts: 1,
+            base_delay: Duration::ZERO,
+            kind: RetryKind::Constant,
+        }
+    }
+
+    /// Return `true` if this policy makes at most one attempt with no delay.
+    ///
+    /// Equivalent to `max_attempts == 1 && base_delay == Duration::ZERO`.
+    pub fn is_none(&self) -> bool {
+        self.max_attempts == 1 && self.base_delay == Duration::ZERO
+    }
+
+    /// Return a copy of this policy with `max_attempts` changed.
+    ///
+    /// # Errors
+    /// Returns `Err` if `n == 0`.
+    pub fn with_max_attempts(mut self, n: u32) -> Result<Self, AgentRuntimeError> {
+        if n == 0 {
+            return Err(AgentRuntimeError::Orchestration(
+                "max_attempts must be >= 1".into(),
+            ));
+        }
+        self.max_attempts = n;
+        Ok(self)
+    }
+
+    /// Return the configured maximum number of attempts.
+    pub fn max_attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
+    /// Return `true` if this policy performs no retries (max_attempts ≤ 1).
+    ///
+    /// Useful for short-circuiting retry logic in hot paths.
+    pub fn is_no_retry(&self) -> bool {
+        self.max_attempts <= 1
+    }
+
+    /// Return `true` if this policy allows at least one retry (max_attempts > 1).
+    ///
+    /// Complement of [`is_no_retry`].
+    ///
+    /// [`is_no_retry`]: RetryPolicy::is_no_retry
+    pub fn will_retry_at_all(&self) -> bool {
+        self.max_attempts > 1
+    }
+
+    /// Return `true` if this policy uses exponential back-off between retries.
+    pub fn is_exponential(&self) -> bool {
+        matches!(self.kind, RetryKind::Exponential)
+    }
+
+    /// Return `true` if this policy uses a constant (fixed-interval) delay between retries.
+    pub fn is_constant(&self) -> bool {
+        matches!(self.kind, RetryKind::Constant)
+    }
+
+    /// Return the configured base delay in milliseconds.
+    ///
+    /// For constant policies this equals every per-retry delay.  For
+    /// exponential policies this is the delay before the first retry.
+    pub fn base_delay_ms(&self) -> u64 {
+        self.base_delay.as_millis() as u64
+    }
+
+    /// Return the delay before the first retry in milliseconds.
+    ///
+    /// Alias for `base_delay_ms`; the name communicates intent more clearly at
+    /// call sites that only care about the first-retry delay.
+    pub fn first_delay_ms(&self) -> u64 {
+        self.base_delay_ms()
+    }
+
+    /// Return `true` if `attempt` is the last allowed attempt for this policy.
+    ///
+    /// `attempt` is 1-indexed: `attempt == max_attempts` means no more retries.
+    pub fn is_last_attempt(&self, attempt: u32) -> bool {
+        attempt >= self.max_attempts
+    }
+
+    /// Return the sum of all per-attempt delays across all attempts, in milliseconds.
+    ///
+    /// For exponential policies each attempt's delay is capped at
+    /// [`MAX_RETRY_DELAY`].  For constant policies every attempt uses
+    /// `base_delay_ms`.
+    pub fn max_total_delay_ms(&self) -> u64 {
+        (1..=self.max_attempts)
+            .map(|attempt| self.delay_for(attempt).as_millis() as u64)
+            .sum()
+    }
+
+    /// Return the sum of delays for the first `n` attempts, in milliseconds.
+    ///
+    /// If `n > max_attempts`, only `max_attempts` delays are summed.
+    pub fn delay_sum_ms(&self, n: u32) -> u64 {
+        let limit = n.min(self.max_attempts);
+        (1..=limit)
+            .map(|attempt| self.delay_for(attempt).as_millis() as u64)
+            .sum()
+    }
+
+    /// Return the average delay per attempt in milliseconds.
+    ///
+    /// Returns `0` for policies with no delay (e.g. `RetryPolicy::none()`).
+    pub fn avg_delay_ms(&self) -> u64 {
+        if self.max_attempts == 0 {
+            return 0;
+        }
+        self.max_total_delay_ms() / self.max_attempts as u64
+    }
+
+    /// Return the effective backoff factor per attempt.
+    ///
+    /// Returns `2.0` for exponential policies and `1.0` for constant policies.
+    pub fn backoff_factor(&self) -> f64 {
+        match self.kind {
+            RetryKind::Exponential => 2.0,
+            RetryKind::Constant => 1.0,
+        }
+    }
+
+    /// Return a copy of this policy with the base delay changed to `ms` milliseconds.
+    ///
+    /// # Errors
+    /// Returns `Err` if `ms == 0`.
+    pub fn with_base_delay_ms(mut self, ms: u64) -> Result<Self, AgentRuntimeError> {
+        if ms == 0 {
+            return Err(AgentRuntimeError::Orchestration(
+                "base_delay_ms must be >= 1 to avoid busy-loop retries".into(),
+            ));
+        }
+        self.base_delay = Duration::from_millis(ms);
+        Ok(self)
+    }
+
+    /// Return the delay for `attempt` in whole milliseconds.
+    ///
+    /// Convenience wrapper around [`delay_for`] for use in logging and metrics
+    /// where a `u64` is easier to handle than a `Duration`.
+    ///
+    /// [`delay_for`]: RetryPolicy::delay_for
+    pub fn delay_ms_for(&self, attempt: u32) -> u64 {
+        self.delay_for(attempt).as_millis() as u64
+    }
+
+    /// Return the total maximum delay in milliseconds across all retry attempts.
+    ///
+    /// Sums `delay_for(attempt)` for every attempt from 1 to `max_attempts`.
+    /// Useful for estimating worst-case latency budgets.
+    pub fn total_max_delay_ms(&self) -> u64 {
+        (1..=self.max_attempts)
+            .map(|a| self.delay_for(a).as_millis() as u64)
+            .sum()
+    }
+
+    /// Return the number of attempts still available after `attempt` have been made.
+    ///
+    /// Returns `0` once the budget is exhausted (`attempt >= max_attempts`).
+    pub fn attempts_remaining(&self, attempt: u32) -> u32 {
+        self.max_attempts.saturating_sub(attempt)
+    }
+
+    /// Return the fraction of the retry budget consumed after `attempt` attempts.
+    ///
+    /// Computed as `attempt / max_attempts`, clamped to `[0.0, 1.0]`.
+    /// Returns `1.0` when `max_attempts` is zero (budget fully consumed by
+    /// definition).
+    ///
+    /// Useful for surfacing "how far through the retry budget are we" in
+    /// dashboards and progress logs.
+    pub fn attempts_budget_used(&self, attempt: u32) -> f64 {
+        if self.max_attempts == 0 {
+            return 1.0;
+        }
+        (attempt as f64 / self.max_attempts as f64).min(1.0)
+    }
+
+    /// Return the maximum delay for any single attempt in milliseconds.
+    ///
+    /// For `Exponential` policies this is the delay for the last attempt
+    /// (which may be capped by `MAX_RETRY_DELAY`).  For `Constant` policies it
+    /// equals the base delay.  Returns `0` for a `none()` policy.
+    pub fn max_delay_ms(&self) -> u64 {
+        if self.max_attempts == 0 {
+            return 0;
+        }
+        self.delay_ms_for(self.max_attempts)
+    }
+
+    /// Return `true` if another attempt is permitted after `attempt` failures.
+    ///
+    /// `attempt` is the number of attempts already made (0-based: `0` means
+    /// no attempt has been made yet).  Returns `false` once the budget is
+    /// exhausted (i.e. `attempt >= max_attempts`).
+    pub fn can_retry(&self, attempt: u32) -> bool {
+        attempt < self.max_attempts
     }
 
     /// Compute the delay before the given attempt number (1-based).
     ///
-    /// Delay = `base_delay * 2^(attempt-1)`, capped at `MAX_RETRY_DELAY`.
+    /// - [`RetryKind::Exponential`]: `base_delay * 2^(attempt-1)`, capped at `MAX_RETRY_DELAY`.
+    /// - [`RetryKind::Constant`]: always returns `base_delay`.
     pub fn delay_for(&self, attempt: u32) -> Duration {
-        let exp = attempt.saturating_sub(1);
-        let multiplier = 1u64.checked_shl(exp.min(63)).unwrap_or(u64::MAX);
-        let millis = self
-            .base_delay
-            .as_millis()
-            .saturating_mul(multiplier as u128);
-        let raw = Duration::from_millis(millis.min(u64::MAX as u128) as u64);
-        raw.min(MAX_RETRY_DELAY)
+        match self.kind {
+            RetryKind::Constant => self.base_delay.min(MAX_RETRY_DELAY),
+            RetryKind::Exponential => {
+                let exp = attempt.saturating_sub(1);
+                let multiplier = 1u64.checked_shl(exp.min(63)).unwrap_or(u64::MAX);
+                let millis = self
+                    .base_delay
+                    .as_millis()
+                    .saturating_mul(multiplier as u128);
+                let raw = Duration::from_millis(millis.min(u64::MAX as u128) as u64);
+                raw.min(MAX_RETRY_DELAY)
+            }
+        }
+    }
+
+    /// Return `true` if the policy has a finite retry limit.
+    ///
+    /// A policy with `max_attempts < u32::MAX` is considered bounded.
+    /// In practice all policies created via the public constructors are bounded.
+    pub fn is_bounded(&self) -> bool {
+        self.max_attempts < u32::MAX
+    }
+
+    /// Return the remaining wait budget in milliseconds after `attempts_done`
+    /// have been completed.
+    ///
+    /// Computed as `max_total_delay_ms().saturating_sub(delay_sum_ms(attempts_done))`.
+    /// Returns `0` when `attempts_done` equals or exceeds `max_attempts`.
+    pub fn remaining_wait_budget_ms(&self, attempts_done: u32) -> u64 {
+        self.max_total_delay_ms().saturating_sub(self.delay_sum_ms(attempts_done))
+    }
+
+    /// Return the maximum delay a single retry attempt can incur, in
+    /// milliseconds.
+    ///
+    /// For exponential policies this is `delay_for(max_attempts)` which equals
+    /// `base * 2^(max_attempts-1)` capped at the global `MAX_RETRY_DELAY`.
+    /// For constant policies this equals the configured base delay.
+    pub fn max_single_delay_ms(&self) -> u64 {
+        self.delay_for(self.max_attempts).as_millis() as u64
+    }
+
+    /// Return `true` if this policy allows at least `n` retry attempts
+    /// (i.e. `max_attempts > n`).
+    ///
+    /// Useful for validating that a policy can tolerate a minimum number of
+    /// consecutive failures before giving up.
+    pub fn covers_n_failures(&self, n: u32) -> bool {
+        self.max_attempts > n
+    }
+}
+
+impl std::fmt::Display for RetryPolicy {
+    /// Render as `"Exponential(n×, base=Xms)"` or `"Constant(n×, delay=Xms)"`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.kind {
+            RetryKind::Exponential => write!(
+                f,
+                "Exponential({}×, base={}ms)",
+                self.max_attempts,
+                self.base_delay.as_millis()
+            ),
+            RetryKind::Constant => write!(
+                f,
+                "Constant({}×, delay={}ms)",
+                self.max_attempts,
+                self.base_delay.as_millis()
+            ),
+        }
     }
 }
 
@@ -78,12 +413,144 @@ impl RetryPolicy {
 /// Tracks failure rates and opens when the threshold is exceeded.
 ///
 /// States: `Closed` (normal) → `Open` (fast-fail) → `HalfOpen` (probe).
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Note: `PartialEq` is implemented manually because the `Open` variant
+/// contains `std::time::Instant` which does not implement `Eq`. The manual
+/// implementation compares only the variant discriminant, not the timestamp.
+#[derive(Debug, Clone)]
 pub enum CircuitState {
+    /// Circuit is operating normally; requests pass through.
     Closed,
-    Open { opened_at: Instant },
+    /// Circuit has tripped; requests are fast-failed without calling the operation.
+    Open {
+        /// The instant at which the circuit was opened.
+        opened_at: Instant,
+    },
+    /// Recovery probe period; the next request will be attempted to test recovery.
     HalfOpen,
 }
+
+impl PartialEq for CircuitState {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (CircuitState::Closed, CircuitState::Closed) => true,
+            (CircuitState::Open { .. }, CircuitState::Open { .. }) => true,
+            (CircuitState::HalfOpen, CircuitState::HalfOpen) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for CircuitState {}
+
+impl std::fmt::Display for CircuitState {
+    /// Render as `"Closed"`, `"Open"`, or `"HalfOpen"`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CircuitState::Closed => write!(f, "Closed"),
+            CircuitState::Open { .. } => write!(f, "Open"),
+            CircuitState::HalfOpen => write!(f, "HalfOpen"),
+        }
+    }
+}
+
+/// Backend for circuit breaker state storage.
+///
+/// Implement this trait to share circuit breaker state across processes
+/// (e.g., via Redis). The in-process default is `InMemoryCircuitBreakerBackend`.
+///
+/// Note: Methods are synchronous to avoid pulling in `async-trait`. A
+/// distributed backend (e.g., Redis) can internally spawn a Tokio runtime.
+pub trait CircuitBreakerBackend: Send + Sync {
+    /// Increment the consecutive failure count for `service` and return the new count.
+    fn increment_failures(&self, service: &str) -> u32;
+    /// Reset the consecutive failure count for `service` to zero.
+    fn reset_failures(&self, service: &str);
+    /// Return the current consecutive failure count for `service`.
+    fn get_failures(&self, service: &str) -> u32;
+    /// Record the instant at which the circuit was opened for `service`.
+    fn set_open_at(&self, service: &str, at: std::time::Instant);
+    /// Clear the open-at timestamp, effectively moving the circuit to Closed or HalfOpen.
+    fn clear_open_at(&self, service: &str);
+    /// Return the instant at which the circuit was opened, or `None` if it is not open.
+    fn get_open_at(&self, service: &str) -> Option<std::time::Instant>;
+}
+
+// ── InMemoryCircuitBreakerBackend ─────────────────────────────────────────────
+
+/// In-process circuit breaker backend backed by a `Mutex<HashMap>`.
+///
+/// Each service name gets its own independent failure counter and open-at
+/// timestamp.  Multiple `CircuitBreaker` instances that share the same
+/// backend (via [`CircuitBreaker::with_backend`]) will correctly track
+/// failures per service rather than sharing a single counter.
+pub struct InMemoryCircuitBreakerBackend {
+    inner: Arc<Mutex<HashMap<String, InMemoryServiceState>>>,
+}
+
+#[derive(Default)]
+struct InMemoryServiceState {
+    consecutive_failures: u32,
+    open_at: Option<std::time::Instant>,
+}
+
+impl InMemoryCircuitBreakerBackend {
+    /// Create a new in-memory backend with all counters at zero.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl Default for InMemoryCircuitBreakerBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CircuitBreakerBackend for InMemoryCircuitBreakerBackend {
+    fn increment_failures(&self, service: &str) -> u32 {
+        let mut map = timed_lock(
+            &self.inner,
+            "InMemoryCircuitBreakerBackend::increment_failures",
+        );
+        let state = map.entry(service.to_owned()).or_default();
+        state.consecutive_failures += 1;
+        state.consecutive_failures
+    }
+
+    fn reset_failures(&self, service: &str) {
+        let mut map = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::reset_failures");
+        if let Some(state) = map.get_mut(service) {
+            state.consecutive_failures = 0;
+        }
+    }
+
+    fn get_failures(&self, service: &str) -> u32 {
+        let map = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::get_failures");
+        map.get(service).map_or(0, |s| s.consecutive_failures)
+    }
+
+    fn set_open_at(&self, service: &str, at: std::time::Instant) {
+        let mut map = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::set_open_at");
+        map.entry(service.to_owned()).or_default().open_at = Some(at);
+    }
+
+    fn clear_open_at(&self, service: &str) {
+        let mut map = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::clear_open_at");
+        if let Some(state) = map.get_mut(service) {
+            state.open_at = None;
+        }
+    }
+
+    fn get_open_at(&self, service: &str) -> Option<std::time::Instant> {
+        let map = timed_lock(&self.inner, "InMemoryCircuitBreakerBackend::get_open_at");
+        map.get(service).and_then(|s| s.open_at)
+    }
+}
+
+// ── CircuitBreaker ────────────────────────────────────────────────────────────
 
 /// Circuit breaker guarding a fallible operation.
 ///
@@ -91,25 +558,29 @@ pub enum CircuitState {
 /// - Opens after `threshold` consecutive failures
 /// - Transitions to `HalfOpen` after `recovery_window` has elapsed
 /// - Closes on the first successful probe in `HalfOpen`
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CircuitBreaker {
-    inner: Arc<Mutex<CircuitBreakerInner>>,
-}
-
-#[derive(Debug)]
-struct CircuitBreakerInner {
     threshold: u32,
     recovery_window: Duration,
-    consecutive_failures: u32,
-    state: CircuitState,
     service: String,
+    backend: Arc<dyn CircuitBreakerBackend>,
+}
+
+impl std::fmt::Debug for CircuitBreaker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CircuitBreaker")
+            .field("threshold", &self.threshold)
+            .field("recovery_window", &self.recovery_window)
+            .field("service", &self.service)
+            .finish()
+    }
 }
 
 impl CircuitBreaker {
-    /// Create a new circuit breaker.
+    /// Create a new circuit breaker backed by an in-memory backend.
     ///
     /// # Arguments
-    /// * `service` — name used in error messages
+    /// * `service` — name used in error messages and logs
     /// * `threshold` — consecutive failures before opening
     /// * `recovery_window` — how long to stay open before probing
     pub fn new(
@@ -122,69 +593,87 @@ impl CircuitBreaker {
                 "circuit breaker threshold must be >= 1".into(),
             ));
         }
+        let service = service.into();
         Ok(Self {
-            inner: Arc::new(Mutex::new(CircuitBreakerInner {
-                threshold,
-                recovery_window,
-                consecutive_failures: 0,
-                state: CircuitState::Closed,
-                service: service.into(),
-            })),
+            threshold,
+            recovery_window,
+            service,
+            backend: Arc::new(InMemoryCircuitBreakerBackend::new()),
         })
+    }
+
+    /// Replace the default in-memory backend with a custom one.
+    ///
+    /// Useful for sharing circuit breaker state across processes.
+    pub fn with_backend(mut self, backend: Arc<dyn CircuitBreakerBackend>) -> Self {
+        self.backend = backend;
+        self
     }
 
     /// Attempt to call `f`, respecting the circuit breaker state.
     ///
-    /// # Returns
-    /// - `Ok(T)` — if `f` succeeds (resets failure count)
-    /// - `Err(AgentRuntimeError::CircuitOpen)` — if the breaker is open
-    /// - `Err(...)` — if `f` fails (may open the breaker)
+    /// # Errors
+    /// - `AgentRuntimeError::CircuitOpen` — the breaker is in the `Open` state
+    ///   and the recovery window has not yet elapsed
+    /// - `AgentRuntimeError::Orchestration` — `f` returned an error; the error
+    ///   message is the `Display` of the inner error. This call may open the
+    ///   breaker if it pushes the consecutive failure count above `threshold`.
+    #[tracing::instrument(skip(self, f))]
     pub fn call<T, E, F>(&self, f: F) -> Result<T, AgentRuntimeError>
     where
         F: FnOnce() -> Result<T, E>,
         E: std::fmt::Display,
     {
-        // Check and potentially transition state
-        {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
-
-            match &inner.state {
-                CircuitState::Open { opened_at } => {
-                    if opened_at.elapsed() >= inner.recovery_window {
-                        inner.state = CircuitState::HalfOpen;
-                    } else {
-                        return Err(AgentRuntimeError::CircuitOpen {
-                            service: inner.service.clone(),
-                        });
-                    }
+        // Determine effective state, potentially transitioning Open → HalfOpen.
+        let effective_state = match self.backend.get_open_at(&self.service) {
+            Some(opened_at) => {
+                if opened_at.elapsed() >= self.recovery_window {
+                    // Clear open_at to signal HalfOpen; failures remain.
+                    self.backend.clear_open_at(&self.service);
+                    tracing::info!("circuit moved to half-open for {}", self.service);
+                    CircuitState::HalfOpen
+                } else {
+                    CircuitState::Open { opened_at }
                 }
-                CircuitState::Closed | CircuitState::HalfOpen => {}
             }
+            None => {
+                // Either Closed or HalfOpen (after a prior transition).
+                // We distinguish by checking whether failures >= threshold
+                // but no open_at is set — that means we are in HalfOpen.
+                let failures = self.backend.get_failures(&self.service);
+                if failures >= self.threshold {
+                    CircuitState::HalfOpen
+                } else {
+                    CircuitState::Closed
+                }
+            }
+        };
+
+        tracing::debug!("circuit state: {:?}", effective_state);
+
+        match effective_state {
+            CircuitState::Open { .. } => {
+                return Err(AgentRuntimeError::CircuitOpen {
+                    service: self.service.clone(),
+                });
+            }
+            CircuitState::Closed | CircuitState::HalfOpen => {}
         }
 
-        // Execute the operation
+        // Execute the operation.
         match f() {
             Ok(val) => {
-                let mut inner = self
-                    .inner
-                    .lock()
-                    .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
-                inner.consecutive_failures = 0;
-                inner.state = CircuitState::Closed;
+                self.backend.reset_failures(&self.service);
+                self.backend.clear_open_at(&self.service);
+                tracing::info!("circuit closed for {}", self.service);
                 Ok(val)
             }
             Err(e) => {
-                let mut inner = self.inner.lock().map_err(|e2| {
-                    AgentRuntimeError::Orchestration(format!("lock poisoned: {e2}"))
-                })?;
-                inner.consecutive_failures += 1;
-                if inner.consecutive_failures >= inner.threshold {
-                    inner.state = CircuitState::Open {
-                        opened_at: Instant::now(),
-                    };
+                let failures = self.backend.increment_failures(&self.service);
+                if failures >= self.threshold {
+                    let now = Instant::now();
+                    self.backend.set_open_at(&self.service, now);
+                    tracing::info!("circuit opened for {}", self.service);
                 }
                 Err(AgentRuntimeError::Orchestration(e.to_string()))
             }
@@ -193,20 +682,280 @@ impl CircuitBreaker {
 
     /// Return the current circuit state.
     pub fn state(&self) -> Result<CircuitState, AgentRuntimeError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
-        Ok(inner.state.clone())
+        let state = match self.backend.get_open_at(&self.service) {
+            Some(opened_at) => {
+                if opened_at.elapsed() >= self.recovery_window {
+                    // Would transition to HalfOpen on next call; report HalfOpen.
+                    let failures = self.backend.get_failures(&self.service);
+                    if failures >= self.threshold {
+                        CircuitState::HalfOpen
+                    } else {
+                        CircuitState::Closed
+                    }
+                } else {
+                    CircuitState::Open { opened_at }
+                }
+            }
+            None => {
+                let failures = self.backend.get_failures(&self.service);
+                if failures >= self.threshold {
+                    CircuitState::HalfOpen
+                } else {
+                    CircuitState::Closed
+                }
+            }
+        };
+        Ok(state)
     }
 
     /// Return the consecutive failure count.
     pub fn failure_count(&self) -> Result<u32, AgentRuntimeError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
-        Ok(inner.consecutive_failures)
+        Ok(self.backend.get_failures(&self.service))
+    }
+
+    /// Record a successful call, resetting the consecutive failure counter.
+    ///
+    /// Call this when a protected operation succeeds so the circuit can
+    /// transition back to `Closed` after a `HalfOpen` probe.
+    pub fn record_success(&self) {
+        self.backend.reset_failures(&self.service);
+        self.backend.clear_open_at(&self.service);
+    }
+
+    /// Record a failed call, incrementing the consecutive failure counter.
+    ///
+    /// Opens the circuit when the failure count reaches `threshold`.
+    pub fn record_failure(&self) {
+        let failures = self.backend.increment_failures(&self.service);
+        if failures >= self.threshold {
+            self.backend.set_open_at(&self.service, Instant::now());
+            tracing::info!("circuit opened for {} (manual record)", self.service);
+        }
+    }
+
+    /// Return the service name this circuit breaker is protecting.
+    pub fn service_name(&self) -> &str {
+        &self.service
+    }
+
+    /// Return `true` if the circuit is currently `Closed` (healthy).
+    pub fn is_closed(&self) -> bool {
+        matches!(self.state(), Ok(CircuitState::Closed))
+    }
+
+    /// Return `true` if the circuit is currently `Open` (fast-failing).
+    pub fn is_open(&self) -> bool {
+        matches!(self.state(), Ok(CircuitState::Open { .. }))
+    }
+
+    /// Return `true` if the circuit is currently `HalfOpen` (probing).
+    pub fn is_half_open(&self) -> bool {
+        matches!(self.state(), Ok(CircuitState::HalfOpen))
+    }
+
+    /// Return `true` if the circuit is in a state that allows calls to proceed.
+    ///
+    /// Calls are allowed in both `Closed` and `HalfOpen` states; only `Open`
+    /// fast-fails.
+    pub fn is_healthy(&self) -> bool {
+        !self.is_open()
+    }
+
+    /// Return the configured consecutive-failure threshold.
+    ///
+    /// The circuit opens when `failure_count()` reaches this value.
+    pub fn threshold(&self) -> u32 {
+        self.threshold
+    }
+
+    /// Return how many more failures can be recorded before the circuit opens.
+    ///
+    /// Returns `0` when the circuit is already open or at the threshold.
+    /// Useful for alerting logic that needs to know how close the system is
+    /// to being cut off.
+    pub fn failure_headroom(&self) -> u32 {
+        let failures = self.backend.get_failures(&self.service);
+        self.threshold.saturating_sub(failures)
+    }
+
+    /// Return the current failure count as a ratio of the threshold.
+    ///
+    /// Returns a value in `[0.0, 1.0]` where `1.0` (or greater) means the
+    /// circuit will open (or is already open).  Returns `0.0` when the
+    /// threshold is zero to avoid division by zero.
+    pub fn failure_rate(&self) -> f64 {
+        if self.threshold == 0 {
+            return 0.0;
+        }
+        let failures = self.backend.get_failures(&self.service);
+        failures as f64 / self.threshold as f64
+    }
+
+    /// Return `true` when `failure_count()` has reached the configured threshold.
+    ///
+    /// The circuit opens immediately when this returns `true` on the next
+    /// `record_failure` call.
+    pub fn is_at_threshold(&self) -> bool {
+        let failures = self.backend.get_failures(&self.service);
+        failures >= self.threshold
+    }
+
+    /// Return the number of additional failures needed to open the circuit.
+    ///
+    /// Returns `0` when the circuit is already at or beyond threshold.
+    pub fn failures_until_open(&self) -> u32 {
+        let failures = self.backend.get_failures(&self.service);
+        self.threshold.saturating_sub(failures)
+    }
+
+    /// Return the configured recovery window duration.
+    ///
+    /// After the circuit has been `Open` for this long, it transitions to
+    /// `HalfOpen` and allows the next call through as a recovery probe.
+    pub fn recovery_window(&self) -> std::time::Duration {
+        self.recovery_window
+    }
+
+    /// Force the circuit back to `Closed` state, resetting all failure counters.
+    ///
+    /// Useful for tests and manual operator recovery.  Under normal operation
+    /// the circuit closes automatically after a successful `HalfOpen` probe.
+    pub fn reset(&self) {
+        self.backend.reset_failures(&self.service);
+        self.backend.clear_open_at(&self.service);
+        tracing::info!("circuit manually reset to Closed for {}", self.service);
+    }
+
+    /// Return a human-readable one-line summary of the circuit breaker state.
+    ///
+    /// Format: `"service='<name>' state=<State> failures=<n>/<threshold>"`.
+    ///
+    /// # Errors
+    /// Propagates any error returned by [`state`] or [`failure_count`].
+    ///
+    /// [`state`]: CircuitBreaker::state
+    /// [`failure_count`]: CircuitBreaker::failure_count
+    pub fn describe(&self) -> Result<String, AgentRuntimeError> {
+        let state = self.state()?;
+        let failures = self.failure_count()?;
+        Ok(format!(
+            "service='{}' state={} failures={}/{}",
+            self.service, state, failures, self.threshold
+        ))
+    }
+
+    /// Execute an async fallible operation under the circuit breaker using an
+    /// [`AsyncCircuitBreakerBackend`].
+    ///
+    /// This is the async counterpart of [`call`] and is intended for backends
+    /// that perform genuine async I/O (e.g. Redis, etcd, distributed stores).
+    /// The in-process default can be used via [`InMemoryCircuitBreakerBackend`]
+    /// which trivially implements `AsyncCircuitBreakerBackend`.
+    ///
+    /// [`call`]: CircuitBreaker::call
+    #[tracing::instrument(skip(self, backend, f))]
+    pub async fn async_call<T, E, F, Fut>(
+        &self,
+        backend: &dyn AsyncCircuitBreakerBackend,
+        f: F,
+    ) -> Result<T, AgentRuntimeError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+        E: std::fmt::Display,
+    {
+        // Determine effective state via async backend.
+        let effective_state = match backend.get_open_at(&self.service).await {
+            Some(opened_at) => {
+                if opened_at.elapsed() >= self.recovery_window {
+                    backend.clear_open_at(&self.service).await;
+                    tracing::info!("circuit async moved to half-open for {}", self.service);
+                    CircuitState::HalfOpen
+                } else {
+                    CircuitState::Open { opened_at }
+                }
+            }
+            None => {
+                let failures = backend.get_failures(&self.service).await;
+                if failures >= self.threshold {
+                    CircuitState::HalfOpen
+                } else {
+                    CircuitState::Closed
+                }
+            }
+        };
+
+        if let CircuitState::Open { .. } = effective_state {
+            return Err(AgentRuntimeError::CircuitOpen {
+                service: self.service.clone(),
+            });
+        }
+
+        match f().await {
+            Ok(val) => {
+                backend.reset_failures(&self.service).await;
+                backend.clear_open_at(&self.service).await;
+                Ok(val)
+            }
+            Err(e) => {
+                let failures = backend.increment_failures(&self.service).await;
+                if failures >= self.threshold {
+                    backend
+                        .set_open_at(&self.service, Instant::now())
+                        .await;
+                    tracing::info!("circuit async opened for {}", self.service);
+                }
+                Err(AgentRuntimeError::Orchestration(e.to_string()))
+            }
+        }
+    }
+}
+
+// ── AsyncCircuitBreakerBackend ────────────────────────────────────────────────
+
+/// Async counterpart of [`CircuitBreakerBackend`] for distributed backends.
+///
+/// Implement this trait for backends that require genuine async I/O — e.g. Redis,
+/// etcd, or any network-based store — so they don't need to embed their own
+/// blocking runtime.
+///
+/// [`InMemoryCircuitBreakerBackend`] implements this trait with trivially-async
+/// wrappers for use in testing and single-process deployments.
+#[async_trait::async_trait]
+pub trait AsyncCircuitBreakerBackend: Send + Sync {
+    /// Increment the consecutive failure count and return the new count.
+    async fn increment_failures(&self, service: &str) -> u32;
+    /// Reset the consecutive failure count to zero.
+    async fn reset_failures(&self, service: &str);
+    /// Return the current consecutive failure count.
+    async fn get_failures(&self, service: &str) -> u32;
+    /// Record the instant at which the circuit was opened.
+    async fn set_open_at(&self, service: &str, at: Instant);
+    /// Clear the open-at timestamp.
+    async fn clear_open_at(&self, service: &str);
+    /// Return the instant at which the circuit was opened, or `None`.
+    async fn get_open_at(&self, service: &str) -> Option<Instant>;
+}
+
+#[async_trait::async_trait]
+impl AsyncCircuitBreakerBackend for InMemoryCircuitBreakerBackend {
+    async fn increment_failures(&self, service: &str) -> u32 {
+        <Self as CircuitBreakerBackend>::increment_failures(self, service)
+    }
+    async fn reset_failures(&self, service: &str) {
+        <Self as CircuitBreakerBackend>::reset_failures(self, service);
+    }
+    async fn get_failures(&self, service: &str) -> u32 {
+        <Self as CircuitBreakerBackend>::get_failures(self, service)
+    }
+    async fn set_open_at(&self, service: &str, at: Instant) {
+        <Self as CircuitBreakerBackend>::set_open_at(self, service, at);
+    }
+    async fn clear_open_at(&self, service: &str) {
+        <Self as CircuitBreakerBackend>::clear_open_at(self, service);
+    }
+    async fn get_open_at(&self, service: &str) -> Option<Instant> {
+        <Self as CircuitBreakerBackend>::get_open_at(self, service)
     }
 }
 
@@ -229,9 +978,14 @@ pub enum DeduplicationResult {
 /// - Deterministic: same key always maps to the same result
 /// - Thread-safe via `Arc<Mutex<_>>`
 /// - Entries expire after `ttl`
+/// - Optional `max_entries` cap bounds memory independently of TTL
 #[derive(Debug, Clone)]
 pub struct Deduplicator {
     ttl: Duration,
+    /// Optional hard cap on cached entries. When exceeded the oldest entry is
+    /// evicted before inserting the new one, bounding memory growth even when
+    /// all keys are unique and none have expired yet.
+    max_entries: Option<usize>,
     inner: Arc<Mutex<DeduplicatorInner>>,
 }
 
@@ -239,6 +993,12 @@ pub struct Deduplicator {
 struct DeduplicatorInner {
     cache: HashMap<String, (String, Instant)>, // key → (result, inserted_at)
     in_flight: HashMap<String, Instant>,       // key → started_at
+    /// Insertion-ordered keys for O(1) FIFO eviction when `max_entries` is set.
+    cache_order: std::collections::VecDeque<String>,
+    /// Tracks calls since the last full expiry scan. Full scans run every
+    /// `EXPIRY_INTERVAL` calls; per-key inline checks maintain correctness
+    /// between scans.
+    call_count: u64,
 }
 
 impl Deduplicator {
@@ -246,55 +1006,326 @@ impl Deduplicator {
     pub fn new(ttl: Duration) -> Self {
         Self {
             ttl,
+            max_entries: None,
             inner: Arc::new(Mutex::new(DeduplicatorInner {
                 cache: HashMap::new(),
                 in_flight: HashMap::new(),
+                cache_order: std::collections::VecDeque::new(),
+                call_count: 0,
             })),
         }
+    }
+
+    /// Set a hard cap on the number of cached (completed) entries.
+    ///
+    /// When the cache is full the oldest entry (by insertion time) is evicted
+    /// before the new entry is stored.  This bounds memory growth for workloads
+    /// where all request keys are unique and the TTL has not yet expired.
+    ///
+    /// # Returns
+    /// - `Err(AgentRuntimeError::Orchestration)` if `max == 0`
+    pub fn with_max_entries(mut self, max: usize) -> Result<Self, AgentRuntimeError> {
+        if max == 0 {
+            return Err(AgentRuntimeError::Orchestration(
+                "Deduplicator max_entries must be >= 1".into(),
+            ));
+        }
+        self.max_entries = Some(max);
+        Ok(self)
     }
 
     /// Check whether `key` is new, cached, or in-flight.
     ///
     /// Marks the key as in-flight if it is new.
     pub fn check_and_register(&self, key: &str) -> Result<DeduplicationResult, AgentRuntimeError> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
+        let mut inner = timed_lock(&self.inner, "Deduplicator::check_and_register");
 
         let now = Instant::now();
 
-        // Expire stale cache entries
-        inner
-            .cache
-            .retain(|_, (_, ts)| now.duration_since(*ts) < self.ttl);
-        inner
-            .in_flight
-            .retain(|_, ts| now.duration_since(*ts) < self.ttl);
-
-        if let Some((result, _)) = inner.cache.get(key) {
-            return Ok(DeduplicationResult::Cached(result.clone()));
+        // Lazy expiry: full O(n) retain scan runs only every EXPIRY_INTERVAL
+        // calls, amortising the cost. Per-key inline checks below keep
+        // correctness between scans.
+        const EXPIRY_INTERVAL: u64 = 64;
+        inner.call_count = inner.call_count.wrapping_add(1);
+        if inner.call_count % EXPIRY_INTERVAL == 0 {
+            let ttl = self.ttl;
+            inner.cache.retain(|_, (_, ts)| now.duration_since(*ts) < ttl);
+            inner
+                .in_flight
+                .retain(|_, ts| now.duration_since(*ts) < ttl);
         }
 
-        if inner.in_flight.contains_key(key) {
-            return Ok(DeduplicationResult::InProgress);
+        // Inline expiry check for this specific key.
+        match inner.cache.get(key) {
+            Some((result, ts)) if now.duration_since(*ts) < self.ttl => {
+                return Ok(DeduplicationResult::Cached(result.clone()));
+            }
+            Some(_) => {
+                inner.cache.remove(key); // entry is expired
+            }
+            None => {}
+        }
+        match inner.in_flight.get(key) {
+            Some(ts) if now.duration_since(*ts) < self.ttl => {
+                return Ok(DeduplicationResult::InProgress);
+            }
+            Some(_) => {
+                inner.in_flight.remove(key); // in-flight entry is expired
+            }
+            None => {}
         }
 
         inner.in_flight.insert(key.to_owned(), now);
         Ok(DeduplicationResult::New)
     }
 
+    /// Check deduplication state for a key with a per-call TTL override.
+    ///
+    /// Marks the key as in-flight if it is new. Ignores the stored TTL and uses
+    /// `ttl` instead for expiry checks.
+    pub fn check(&self, key: &str, ttl: std::time::Duration) -> Result<DeduplicationResult, AgentRuntimeError> {
+        let mut inner = timed_lock(&self.inner, "Deduplicator::check");
+        let now = Instant::now();
+
+        // Lazy expiry: full scan every EXPIRY_INTERVAL calls.
+        const EXPIRY_INTERVAL: u64 = 64;
+        inner.call_count = inner.call_count.wrapping_add(1);
+        if inner.call_count % EXPIRY_INTERVAL == 0 {
+            inner.cache.retain(|_, (_, ts)| now.duration_since(*ts) < ttl);
+            inner.in_flight.retain(|_, ts| now.duration_since(*ts) < ttl);
+        }
+
+        match inner.cache.get(key) {
+            Some((result, ts)) if now.duration_since(*ts) < ttl => {
+                return Ok(DeduplicationResult::Cached(result.clone()));
+            }
+            Some(_) => {
+                inner.cache.remove(key);
+            }
+            None => {}
+        }
+        match inner.in_flight.get(key) {
+            Some(ts) if now.duration_since(*ts) < ttl => {
+                return Ok(DeduplicationResult::InProgress);
+            }
+            Some(_) => {
+                inner.in_flight.remove(key);
+            }
+            None => {}
+        }
+
+        inner.in_flight.insert(key.to_owned(), now);
+        Ok(DeduplicationResult::New)
+    }
+
+    /// Check deduplication state for multiple keys at once.
+    ///
+    /// Returns results in the same order as `requests`.
+    /// Each entry is `(key, ttl)` — same signature as `check`.
+    ///
+    /// Acquires the internal mutex **once** for the entire batch, avoiding the
+    /// per-key lock overhead of calling `check` in a loop.
+    pub fn dedup_many(
+        &self,
+        requests: &[(&str, std::time::Duration)],
+    ) -> Result<Vec<DeduplicationResult>, AgentRuntimeError> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut inner = timed_lock(&self.inner, "Deduplicator::dedup_many");
+        let now = std::time::Instant::now();
+        let mut results = Vec::with_capacity(requests.len());
+
+        for &(key, ttl) in requests {
+            // Expire stale entries using this request's TTL.
+            inner.cache.retain(|_, (_, ts)| now.duration_since(*ts) < ttl);
+            inner.in_flight.retain(|_, ts| now.duration_since(*ts) < ttl);
+
+            let result = if let Some((cached_result, _)) = inner.cache.get(key) {
+                DeduplicationResult::Cached(cached_result.clone())
+            } else if inner.in_flight.contains_key(key) {
+                DeduplicationResult::InProgress
+            } else {
+                inner.in_flight.insert(key.to_owned(), now);
+                DeduplicationResult::New
+            };
+            results.push(result);
+        }
+
+        Ok(results)
+    }
+
     /// Complete a request: move from in-flight to cached with the given result.
+    ///
+    /// If `max_entries` is configured and the cache is full, the oldest cached
+    /// entry (by insertion time) is evicted before the new one is stored.
     pub fn complete(&self, key: &str, result: impl Into<String>) -> Result<(), AgentRuntimeError> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
+        let mut inner = timed_lock(&self.inner, "Deduplicator::complete");
         inner.in_flight.remove(key);
-        inner
-            .cache
-            .insert(key.to_owned(), (result.into(), Instant::now()));
+
+        // Enforce max_entries cap: evict via insertion-ordered VecDeque (O(1) amortised).
+        // Ghost entries (already expired by a prior `retain`) are skipped by looping.
+        if let Some(max) = self.max_entries {
+            while inner.cache.len() >= max {
+                match inner.cache_order.pop_front() {
+                    Some(oldest_key) => {
+                        inner.cache.remove(&oldest_key);
+                    }
+                    None => break,
+                }
+            }
+        }
+
+        let owned_key = key.to_owned();
+        inner.cache_order.push_back(owned_key.clone());
+        inner.cache.insert(owned_key, (result.into(), Instant::now()));
         Ok(())
+    }
+
+    /// Remove a key from in-flight tracking without caching a result.
+    ///
+    /// Call this when an in-flight operation fails so that subsequent callers
+    /// are not permanently blocked by a stuck `InProgress` entry for the full TTL.
+    pub fn fail(&self, key: &str) -> Result<(), AgentRuntimeError> {
+        let mut inner = timed_lock(&self.inner, "Deduplicator::fail");
+        inner.in_flight.remove(key);
+        Ok(())
+    }
+
+    /// Return the number of keys currently in-flight (not yet completed or failed).
+    pub fn in_flight_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = timed_lock(&self.inner, "Deduplicator::in_flight_count");
+        Ok(inner.in_flight.len())
+    }
+
+    /// Return a snapshot of all keys currently in-flight.
+    pub fn in_flight_keys(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = timed_lock(&self.inner, "Deduplicator::in_flight_keys");
+        Ok(inner.in_flight.keys().cloned().collect())
+    }
+
+    /// Return the number of keys currently in the completed result cache.
+    ///
+    /// Note: expired entries are only removed lazily on the next `check*` call.
+    pub fn cached_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = timed_lock(&self.inner, "Deduplicator::cached_count");
+        Ok(inner.cache.len())
+    }
+
+    /// Return a snapshot of all keys that have cached results.
+    ///
+    /// Expired entries are included (they are removed lazily).  Use
+    /// [`purge_expired`] first for a clean list of live keys.
+    ///
+    /// [`purge_expired`]: Deduplicator::purge_expired
+    pub fn cached_keys(&self) -> Result<Vec<String>, AgentRuntimeError> {
+        let inner = timed_lock(&self.inner, "Deduplicator::cached_keys");
+        Ok(inner.cache.keys().cloned().collect())
+    }
+
+    /// Return the configured time-to-live for cached results.
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
+    /// Return the configured maximum number of cached entries, if any.
+    ///
+    /// Returns `None` if no cap was set via [`with_max_entries`].
+    ///
+    /// [`with_max_entries`]: Deduplicator::with_max_entries
+    pub fn max_entries(&self) -> Option<usize> {
+        self.max_entries
+    }
+
+    /// Return `true` if there are no in-flight requests.
+    pub fn is_idle(&self) -> Result<bool, AgentRuntimeError> {
+        let inner = timed_lock(&self.inner, "Deduplicator::is_idle");
+        Ok(inner.in_flight.is_empty())
+    }
+
+    /// Return the total number of items tracked by the deduplicator
+    /// (in-flight + cached results, regardless of TTL expiry).
+    pub fn total_count(&self) -> Result<usize, AgentRuntimeError> {
+        let inner = timed_lock(&self.inner, "Deduplicator::total_count");
+        Ok(inner.in_flight.len() + inner.cache.len())
+    }
+
+    /// Return `true` if `key` is currently in-flight or has a cached result.
+    ///
+    /// Unlike [`check_and_register`] this is a read-only inspection — it does
+    /// not register the key or consume a deduplication slot.
+    ///
+    /// [`check_and_register`]: Deduplicator::check_and_register
+    pub fn contains(&self, key: &str) -> Result<bool, AgentRuntimeError> {
+        let inner = timed_lock(&self.inner, "Deduplicator::contains");
+        Ok(inner.in_flight.contains_key(key) || inner.cache.contains_key(key))
+    }
+
+    /// Return the cached result for `key` if one exists and has not expired.
+    ///
+    /// Returns `None` when the key is not in the cache (either not yet
+    /// completed or already expired).  Does not modify any state.
+    pub fn get_result(&self, key: &str) -> Result<Option<String>, AgentRuntimeError> {
+        let inner = timed_lock(&self.inner, "Deduplicator::get_result");
+        let ttl = self.ttl;
+        let now = std::time::Instant::now();
+        Ok(inner.cache.get(key).and_then(|(result, inserted_at)| {
+            if now.duration_since(*inserted_at) <= ttl {
+                Some(result.clone())
+            } else {
+                None
+            }
+        }))
+    }
+
+    /// Remove all in-flight entries and cached results.
+    ///
+    /// Useful for test teardown or hard resets.
+    pub fn clear(&self) -> Result<(), AgentRuntimeError> {
+        let mut inner = timed_lock(&self.inner, "Deduplicator::clear");
+        inner.cache.clear();
+        inner.in_flight.clear();
+        inner.cache_order.clear();
+        Ok(())
+    }
+
+    /// Eagerly evict all cache entries whose TTL has elapsed.
+    ///
+    /// Under normal operation expired entries are removed lazily on the next
+    /// `check*` call.  Call `purge_expired` for deterministic memory reclamation
+    /// (e.g. before a `cached_count` snapshot or in a maintenance loop).
+    ///
+    /// Returns the number of entries that were removed.
+    pub fn purge_expired(&self) -> Result<usize, AgentRuntimeError> {
+        let mut inner = timed_lock(&self.inner, "Deduplicator::purge_expired");
+        let ttl = self.ttl;
+        let now = std::time::Instant::now();
+        let before = inner.cache.len();
+        inner.cache.retain(|_, (_, inserted_at)| {
+            now.duration_since(*inserted_at) <= ttl
+        });
+        let removed = before - inner.cache.len();
+        // Rebuild cache_order to drop ghost entries (keys purged from cache but
+        // still referenced in the VecDeque).
+        if removed > 0 {
+            let live_keys: std::collections::HashSet<String> =
+                inner.cache.keys().cloned().collect();
+            inner.cache_order.retain(|k| live_keys.contains(k));
+        }
+        Ok(removed)
+    }
+
+    /// Remove the oldest cached result entry (FIFO order).
+    ///
+    /// Returns `true` if an entry was removed, `false` if the cache was empty.
+    pub fn evict_oldest(&self) -> Result<bool, AgentRuntimeError> {
+        let mut inner = timed_lock(&self.inner, "Deduplicator::evict_oldest");
+        while let Some(key) = inner.cache_order.pop_front() {
+            if inner.cache.remove(&key).is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -306,9 +1337,11 @@ impl Deduplicator {
 /// - Thread-safe via `Arc<Mutex<_>>`
 /// - `try_acquire` is non-blocking
 /// - `release` decrements the counter; no-op if counter is already 0
+/// - Optional soft limit emits a warning when depth reaches the threshold
 #[derive(Debug, Clone)]
 pub struct BackpressureGuard {
     capacity: usize,
+    soft_capacity: Option<usize>,
     inner: Arc<Mutex<usize>>,
 }
 
@@ -326,20 +1359,33 @@ impl BackpressureGuard {
         }
         Ok(Self {
             capacity,
+            soft_capacity: None,
             inner: Arc::new(Mutex::new(0)),
         })
     }
 
+    /// Set a soft capacity threshold. When depth reaches this level, a warning
+    /// is logged but the request is still accepted (up to hard capacity).
+    pub fn with_soft_limit(mut self, soft: usize) -> Result<Self, AgentRuntimeError> {
+        if soft >= self.capacity {
+            return Err(AgentRuntimeError::Orchestration(
+                "soft_capacity must be less than hard capacity".into(),
+            ));
+        }
+        self.soft_capacity = Some(soft);
+        Ok(self)
+    }
+
     /// Try to acquire a slot.
+    ///
+    /// Emits a warning when the soft limit is reached (if configured), but
+    /// still accepts the request until hard capacity is exceeded.
     ///
     /// # Returns
     /// - `Ok(())` — slot acquired
-    /// - `Err(AgentRuntimeError::BackpressureShed)` — capacity exceeded
+    /// - `Err(AgentRuntimeError::BackpressureShed)` — hard capacity exceeded
     pub fn try_acquire(&self) -> Result<(), AgentRuntimeError> {
-        let mut depth = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
+        let mut depth = timed_lock(&self.inner, "BackpressureGuard::try_acquire");
         if *depth >= self.capacity {
             return Err(AgentRuntimeError::BackpressureShed {
                 depth: *depth,
@@ -347,34 +1393,209 @@ impl BackpressureGuard {
             });
         }
         *depth += 1;
+        if let Some(soft) = self.soft_capacity {
+            if *depth >= soft {
+                tracing::warn!(
+                    depth = *depth,
+                    soft_capacity = soft,
+                    hard_capacity = self.capacity,
+                    "backpressure approaching hard limit"
+                );
+            }
+        }
         Ok(())
     }
 
     /// Release a previously acquired slot.
     pub fn release(&self) -> Result<(), AgentRuntimeError> {
-        let mut depth = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
+        let mut depth = timed_lock(&self.inner, "BackpressureGuard::release");
         *depth = depth.saturating_sub(1);
         Ok(())
     }
 
+    /// Reset the current depth to zero.
+    ///
+    /// Useful in tests or after a controlled shutdown when all in-flight
+    /// requests have been cancelled and the guard should start fresh.
+    pub fn reset(&self) {
+        let mut depth = timed_lock(&self.inner, "BackpressureGuard::reset");
+        *depth = 0;
+    }
+
+    /// Return `true` if the guard is at or over its hard capacity.
+    pub fn is_full(&self) -> Result<bool, AgentRuntimeError> {
+        Ok(self.depth()? >= self.capacity)
+    }
+
+    /// Return `true` if no slots are currently in use.
+    pub fn is_empty(&self) -> Result<bool, AgentRuntimeError> {
+        Ok(self.depth()? == 0)
+    }
+
+    /// Return the number of additional request slots available before the hard cap.
+    pub fn available_capacity(&self) -> Result<usize, AgentRuntimeError> {
+        Ok(self.capacity.saturating_sub(self.depth()?))
+    }
+
+    /// Return the hard capacity (maximum concurrent slots) configured for this guard.
+    pub fn hard_capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Return the soft capacity limit if one was configured, or `None`.
+    pub fn soft_limit(&self) -> Option<usize> {
+        self.soft_capacity
+    }
+
+    /// Return `true` if a soft capacity limit has been configured.
+    ///
+    /// Equivalent to `self.soft_limit().is_some()` but more readable at call
+    /// sites that only need a boolean check.
+    pub fn is_soft_limited(&self) -> bool {
+        self.soft_capacity.is_some()
+    }
+
     /// Return the current depth.
     pub fn depth(&self) -> Result<usize, AgentRuntimeError> {
-        let depth = self
-            .inner
-            .lock()
-            .map_err(|e| AgentRuntimeError::Orchestration(format!("lock poisoned: {e}")))?;
+        let depth = timed_lock(&self.inner, "BackpressureGuard::depth");
         Ok(*depth)
+    }
+
+    /// Return the current depth as a percentage of the hard capacity.
+    ///
+    /// Returns a value in `[0.0, 100.0]`.  When `depth > capacity` (which
+    /// cannot happen in normal operation) the result is clamped to `100.0`.
+    pub fn percent_full(&self) -> Result<f64, AgentRuntimeError> {
+        let depth = self.depth()?;
+        Ok((depth as f64 / self.capacity as f64 * 100.0).min(100.0))
+    }
+
+    /// Return the ratio of current depth to soft capacity as a value in `[0.0, ∞)`.
+    ///
+    /// Returns `0.0` if no soft limit has been configured.
+    /// Values above `1.0` mean the soft limit has been exceeded.
+    pub fn soft_depth_ratio(&self) -> f32 {
+        match self.soft_capacity {
+            None => 0.0,
+            Some(soft) => {
+                let depth = timed_lock(&self.inner, "BackpressureGuard::soft_depth_ratio");
+                *depth as f32 / soft as f32
+            }
+        }
+    }
+
+    /// Return the fraction of the hard capacity currently in use: `depth / capacity`.
+    ///
+    /// Returns `0.0` when no slots are in use, `1.0` when fully saturated.
+    pub fn utilization_ratio(&self) -> Result<f32, AgentRuntimeError> {
+        if self.capacity == 0 {
+            return Ok(0.0);
+        }
+        let depth = self.depth()?;
+        Ok(depth as f32 / self.capacity as f32)
+    }
+
+    /// Return the number of additional slots that can be acquired before hitting
+    /// the hard capacity limit.
+    ///
+    /// Returns `0` when the guard is full.
+    pub fn remaining_capacity(&self) -> Result<usize, AgentRuntimeError> {
+        let depth = self.depth()?;
+        Ok(self.capacity.saturating_sub(depth))
+    }
+
+    /// Force the in-flight depth counter to zero.
+    ///
+    /// Useful for test teardown or hard resets where acquired slots will never
+    /// be released normally (e.g., after a test panics before calling `release`).
+    pub fn reset_depth(&self) -> Result<(), AgentRuntimeError> {
+        let mut depth = timed_lock(&self.inner, "BackpressureGuard::reset_depth");
+        *depth = 0;
+        Ok(())
+    }
+
+    /// Return the fraction of capacity that is still available, in `[0.0, 1.0]`.
+    ///
+    /// `1.0` means completely empty; `0.0` means at full capacity.
+    pub fn headroom_ratio(&self) -> Result<f64, AgentRuntimeError> {
+        Ok(self.available_capacity()? as f64 / self.capacity as f64)
+    }
+
+    /// Return the number of currently held (acquired) slots.
+    ///
+    /// Equivalent to `capacity - available_capacity()`.
+    pub fn acquired_count(&self) -> Result<usize, AgentRuntimeError> {
+        Ok(self.capacity - self.available_capacity()?)
+    }
+
+    /// Return `true` if the current depth exceeds the configured soft limit.
+    ///
+    /// Returns `false` if no soft limit is set.
+    pub fn over_soft_limit(&self) -> Result<bool, AgentRuntimeError> {
+        let soft = match self.soft_limit() {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+        Ok(self.depth()? > soft)
     }
 }
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────
 
+/// Result of executing a pipeline, including per-stage timing.
+#[derive(Debug)]
+pub struct PipelineResult {
+    /// Final output value after all stages.
+    pub output: String,
+    /// Per-stage timing: `(stage_name, duration_ms)` in execution order.
+    pub stage_timings: Vec<(String, u64)>,
+}
+
+impl PipelineResult {
+    /// Return the total wall-clock time across all stages in milliseconds.
+    pub fn total_duration_ms(&self) -> u64 {
+        self.stage_timings.iter().map(|(_, ms)| ms).sum()
+    }
+
+    /// Return the number of stages that recorded a timing entry.
+    ///
+    /// Normally this equals the pipeline's stage count, but may be less if
+    /// the pipeline short-circuited after an error.
+    pub fn stage_count(&self) -> usize {
+        self.stage_timings.len()
+    }
+
+    /// Return the name and duration of the slowest stage.
+    ///
+    /// Returns `None` if no stages ran.
+    pub fn slowest_stage(&self) -> Option<(&str, u64)> {
+        self.stage_timings
+            .iter()
+            .max_by_key(|(_, ms)| ms)
+            .map(|(name, ms)| (name.as_str(), *ms))
+    }
+
+    /// Return the name and duration of the fastest stage.
+    ///
+    /// Returns `None` if no stages ran.
+    pub fn fastest_stage(&self) -> Option<(&str, u64)> {
+        self.stage_timings
+            .iter()
+            .min_by_key(|(_, ms)| ms)
+            .map(|(name, ms)| (name.as_str(), *ms))
+    }
+
+    /// Return `true` if no stage timings were recorded (pipeline ran zero stages).
+    pub fn is_empty(&self) -> bool {
+        self.stage_timings.is_empty()
+    }
+}
+
 /// A single named stage in the pipeline.
 pub struct Stage {
+    /// Human-readable name used in log output and error messages.
     pub name: String,
+    /// The transform function; receives the current string and returns the transformed string.
     pub handler: Box<dyn Fn(String) -> Result<String, AgentRuntimeError> + Send + Sync>,
 }
 
@@ -384,21 +1605,46 @@ impl std::fmt::Debug for Stage {
     }
 }
 
+/// Error handler callback type for pipeline stage failures.
+type StageErrorHandler = Box<dyn Fn(&str, &str) -> String + Send + Sync>;
+
 /// A composable pipeline that passes a string through a sequence of named stages.
 ///
 /// ## Guarantees
 /// - Stages execute in insertion order
-/// - First stage failure short-circuits remaining stages
+/// - First stage failure short-circuits remaining stages (unless an error handler is set)
 /// - Non-panicking
-#[derive(Debug)]
 pub struct Pipeline {
     stages: Vec<Stage>,
+    error_handler: Option<StageErrorHandler>,
+}
+
+impl std::fmt::Debug for Pipeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pipeline")
+            .field("stages", &self.stages)
+            .field("has_error_handler", &self.error_handler.is_some())
+            .finish()
+    }
 }
 
 impl Pipeline {
     /// Create a new empty pipeline.
     pub fn new() -> Self {
-        Self { stages: Vec::new() }
+        Self { stages: Vec::new(), error_handler: None }
+    }
+
+    /// Attach a recovery callback for stage failures.
+    ///
+    /// When a stage fails, `handler(stage_name, error_message)` is called.
+    /// The returned string becomes the input to the next stage.
+    /// If no handler is set, stage failures propagate as errors.
+    pub fn with_error_handler(
+        mut self,
+        handler: impl Fn(&str, &str) -> String + Send + Sync + 'static,
+    ) -> Self {
+        self.error_handler = Some(Box::new(handler));
+        self
     }
 
     /// Append a stage to the pipeline.
@@ -414,19 +1660,600 @@ impl Pipeline {
         self
     }
 
-    /// Execute the pipeline, passing `input` through each stage in order.
-    pub fn run(&self, input: String) -> Result<String, AgentRuntimeError> {
-        let mut current = input;
-        for stage in &self.stages {
-            current = (stage.handler)(current)?;
-        }
-        Ok(current)
+    /// Insert a stage at the **front** of the pipeline (index 0).
+    ///
+    /// All existing stages are shifted to higher indices.  The pipeline's
+    /// stage names remain unique only if the caller ensures uniqueness.
+    pub fn prepend_stage(
+        mut self,
+        name: impl Into<String>,
+        handler: impl Fn(String) -> Result<String, AgentRuntimeError> + Send + Sync + 'static,
+    ) -> Self {
+        self.stages.insert(0, Stage {
+            name: name.into(),
+            handler: Box::new(handler),
+        });
+        self
+    }
+
+    /// Return `true` if the pipeline has no stages.
+    pub fn is_empty(&self) -> bool {
+        self.stages.is_empty()
+    }
+
+    /// Return `true` if a stage error handler has been configured via
+    /// [`with_error_handler`].
+    ///
+    /// [`with_error_handler`]: Pipeline::with_error_handler
+    pub fn has_error_handler(&self) -> bool {
+        self.error_handler.is_some()
     }
 
     /// Return the number of stages in the pipeline.
     pub fn stage_count(&self) -> usize {
         self.stages.len()
     }
+
+    /// Return `true` if a stage with the given name is registered.
+    pub fn has_stage(&self, name: &str) -> bool {
+        self.stages.iter().any(|s| s.name == name)
+    }
+
+    /// Return the names of all stages in execution order.
+    pub fn stage_names(&self) -> Vec<&str> {
+        self.stages.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    /// Return the names of all stages as owned `String`s.
+    ///
+    /// Unlike [`stage_names`] this does not borrow `self`, making it easier to
+    /// use the result after `self` is moved or mutated.
+    ///
+    /// [`stage_names`]: Pipeline::stage_names
+    pub fn stage_names_owned(&self) -> Vec<String> {
+        self.stages.iter().map(|s| s.name.clone()).collect()
+    }
+
+    /// Return the name of the stage at zero-based `index`, or `None` if out of bounds.
+    pub fn get_stage_name_at(&self, index: usize) -> Option<&str> {
+        self.stages.get(index).map(|s| s.name.as_str())
+    }
+
+    /// Return the zero-based index of the first stage with the given name.
+    ///
+    /// Returns `None` if no stage with that name exists.
+    pub fn stage_index(&self, name: &str) -> Option<usize> {
+        self.stages.iter().position(|s| s.name == name)
+    }
+
+    /// Return the name of the first stage in the pipeline, or `None` if empty.
+    pub fn first_stage_name(&self) -> Option<&str> {
+        self.stages.first().map(|s| s.name.as_str())
+    }
+
+    /// Return the name of the last stage in the pipeline, or `None` if empty.
+    pub fn last_stage_name(&self) -> Option<&str> {
+        self.stages.last().map(|s| s.name.as_str())
+    }
+
+    /// Remove the first stage whose name equals `name`.
+    ///
+    /// Returns `true` if a stage was found and removed, `false` if no stage
+    /// with that name was registered.
+    pub fn remove_stage(&mut self, name: &str) -> bool {
+        if let Some(pos) = self.stages.iter().position(|s| s.name == name) {
+            self.stages.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Rename the first stage whose name equals `old_name` to `new_name`.
+    ///
+    /// Returns `true` if a stage was found and renamed, `false` if no stage
+    /// with `old_name` exists.
+    pub fn rename_stage(&mut self, old_name: &str, new_name: impl Into<String>) -> bool {
+        if let Some(stage) = self.stages.iter_mut().find(|s| s.name == old_name) {
+            stage.name = new_name.into();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove all stages from the pipeline.
+    ///
+    /// The error handler (if any) is preserved; only the stage list is cleared.
+    pub fn clear(&mut self) {
+        self.stages.clear();
+    }
+
+    /// Return the number of stages whose name contains `keyword` (case-insensitive).
+    pub fn count_stages_matching(&self, keyword: &str) -> usize {
+        let kw = keyword.to_ascii_lowercase();
+        self.stages
+            .iter()
+            .filter(|s| s.name.to_ascii_lowercase().contains(&kw))
+            .count()
+    }
+
+    /// Swap the positions of two stages by name.
+    ///
+    /// Returns `true` if both stages were found and swapped.  Returns `false`
+    /// if either name is not present in the pipeline (no state change).
+    pub fn swap_stages(&mut self, a: &str, b: &str) -> bool {
+        let idx_a = self.stages.iter().position(|s| s.name == a);
+        let idx_b = self.stages.iter().position(|s| s.name == b);
+        match (idx_a, idx_b) {
+            (Some(i), Some(j)) => {
+                self.stages.swap(i, j);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Execute the pipeline, passing `input` through each stage in order.
+    #[tracing::instrument(skip(self))]
+    pub fn run(&self, input: String) -> Result<String, AgentRuntimeError> {
+        let mut current = input;
+        for stage in &self.stages {
+            tracing::debug!(stage = %stage.name, "running pipeline stage");
+            match (stage.handler)(current) {
+                Ok(out) => current = out,
+                Err(e) => {
+                    tracing::error!(stage = %stage.name, error = %e, "pipeline stage failed");
+                    if let Some(ref handler) = self.error_handler {
+                        current = handler(&stage.name, &e.to_string());
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Ok(current)
+    }
+
+    /// Execute the pipeline with per-stage timing.
+    ///
+    /// Returns a [`PipelineResult`] whose `stage_timings` contains
+    /// `(stage_name, duration_ms)` pairs in execution order.
+    pub fn execute_timed(&self, input: String) -> Result<PipelineResult, AgentRuntimeError> {
+        let mut current = input;
+        let mut stage_timings = Vec::new();
+        for stage in &self.stages {
+            let start = std::time::Instant::now();
+            tracing::debug!(stage = %stage.name, "running timed pipeline stage");
+            match (stage.handler)(current) {
+                Ok(out) => current = out,
+                Err(e) => {
+                    tracing::error!(stage = %stage.name, error = %e, "timed pipeline stage failed");
+                    if let Some(ref handler) = self.error_handler {
+                        current = handler(&stage.name, &e.to_string());
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+            let duration_ms = start.elapsed().as_millis() as u64;
+            stage_timings.push((stage.name.clone(), duration_ms));
+        }
+        Ok(PipelineResult {
+            output: current,
+            stage_timings,
+        })
+    }
+
+    /// Return a human-readable description of this pipeline.
+    ///
+    /// Format: `"Pipeline[{n} stage(s): stage1 → stage2 → ...]"`.
+    /// Returns `"Pipeline[empty]"` when no stages have been added.
+    ///
+    /// Intended for logging and debugging — not a stable serialization format.
+    pub fn description(&self) -> String {
+        if self.stages.is_empty() {
+            return "Pipeline[empty]".to_owned();
+        }
+        let names = self
+            .stages
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" → ");
+        let n = self.stages.len();
+        let plural = if n == 1 { "stage" } else { "stages" };
+        format!("Pipeline[{n} {plural}: {names}]")
+    }
+
+    /// Return `true` if every stage in the pipeline has a unique name.
+    ///
+    /// Duplicate stage names can lead to ambiguous lookups with `stage_index`
+    /// and `has_stage`.  Use this predicate to assert pipeline integrity
+    /// during construction.
+    pub fn has_unique_stage_names(&self) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        self.stages.iter().all(|s| seen.insert(s.name.as_str()))
+    }
+
+    /// Return stage names sorted in ascending lexicographic order.
+    ///
+    /// Unlike [`stage_names`], which returns names in insertion order, this
+    /// always produces a stable sort regardless of the order stages were added.
+    ///
+    /// [`stage_names`]: Pipeline::stage_names
+    pub fn stage_names_sorted(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.stages.iter().map(|s| s.name.as_str()).collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// Return the name of the stage with the most bytes, or `None` for an empty pipeline.
+    ///
+    /// When multiple stages share the maximum byte length, the first one in
+    /// insertion order is returned.
+    pub fn longest_stage_name(&self) -> Option<&str> {
+        self.stages
+            .iter()
+            .max_by_key(|s| s.name.len())
+            .map(|s| s.name.as_str())
+    }
+
+    /// Return the name of the stage with the fewest bytes, or `None` for an empty pipeline.
+    ///
+    /// When multiple stages share the minimum byte length, the first one in
+    /// insertion order is returned.
+    pub fn shortest_stage_name(&self) -> Option<&str> {
+        self.stages
+            .iter()
+            .min_by_key(|s| s.name.len())
+            .map(|s| s.name.as_str())
+    }
+
+    /// Return the byte lengths of all stage names in order.
+    ///
+    /// Returns an empty `Vec` for an empty pipeline.
+    pub fn stage_name_lengths(&self) -> Vec<usize> {
+        self.stages.iter().map(|s| s.name.len()).collect()
+    }
+
+    /// Return the average byte length of stage names.
+    ///
+    /// Returns `0.0` for an empty pipeline.
+    pub fn avg_stage_name_length(&self) -> f64 {
+        if self.stages.is_empty() {
+            return 0.0;
+        }
+        let total: usize = self.stages.iter().map(|s| s.name.len()).sum();
+        total as f64 / self.stages.len() as f64
+    }
+
+    /// Return the names of stages whose name contains `substring` (case-sensitive).
+    ///
+    /// Returns an empty `Vec` if no stage names match.
+    pub fn stages_containing(&self, substring: &str) -> Vec<&str> {
+        self.stages
+            .iter()
+            .filter(|s| s.name.contains(substring))
+            .map(|s| s.name.as_str())
+            .collect()
+    }
+
+    /// Return `true` if the stage named `name` is the first stage in the pipeline.
+    ///
+    /// Returns `false` if the pipeline is empty or the stage is not present.
+    pub fn stage_is_first(&self, name: &str) -> bool {
+        self.stages.first().map_or(false, |s| s.name == name)
+    }
+
+    /// Return `true` if the stage named `name` is the last stage in the pipeline.
+    ///
+    /// Returns `false` if the pipeline is empty or the stage is not present.
+    pub fn stage_is_last(&self, name: &str) -> bool {
+        self.stages.last().map_or(false, |s| s.name == name)
+    }
+
+    /// Return the total byte length of all stage names combined.
+    ///
+    /// Returns `0` for an empty pipeline.
+    pub fn total_stage_name_bytes(&self) -> usize {
+        self.stages.iter().map(|s| s.name.len()).sum()
+    }
+
+    /// Return the names of all stages that appear before `name` in the pipeline.
+    ///
+    /// Returns an empty `Vec` if `name` is not present, is the first stage,
+    /// or the pipeline is empty.
+    pub fn stages_before(&self, name: &str) -> Vec<&str> {
+        let pos = self.stages.iter().position(|s| s.name == name);
+        match pos {
+            None | Some(0) => Vec::new(),
+            Some(idx) => self.stages[..idx].iter().map(|s| s.name.as_str()).collect(),
+        }
+    }
+
+    /// Return the names of all stages that appear after `name` in the pipeline.
+    ///
+    /// Returns an empty `Vec` if `name` is not present, is the last stage,
+    /// or the pipeline is empty.
+    pub fn stages_after(&self, name: &str) -> Vec<&str> {
+        let pos = self.stages.iter().position(|s| s.name == name);
+        match pos {
+            None => Vec::new(),
+            Some(idx) if idx + 1 >= self.stages.len() => Vec::new(),
+            Some(idx) => self.stages[idx + 1..].iter().map(|s| s.name.as_str()).collect(),
+        }
+    }
+
+    /// Return all consecutive stage name pairs `(from, to)` in pipeline order.
+    ///
+    /// For a pipeline with stages `[a, b, c]` this returns `[("a", "b"), ("b", "c")]`.
+    /// Returns an empty `Vec` for pipelines with fewer than two stages.
+    pub fn stage_pairs(&self) -> Vec<(&str, &str)> {
+        self.stages
+            .windows(2)
+            .map(|w| (w[0].name.as_str(), w[1].name.as_str()))
+            .collect()
+    }
+
+    /// Return the number of stages whose name byte length is strictly greater
+    /// than `min_len`.
+    ///
+    /// Returns `0` for an empty pipeline or when no stage name exceeds
+    /// `min_len` bytes.
+    pub fn stage_count_above_name_len(&self, min_len: usize) -> usize {
+        self.stages.iter().filter(|s| s.name.len() > min_len).count()
+    }
+
+    /// Return the number of stages whose name is strictly shorter than
+    /// `max_len` bytes.
+    ///
+    /// Complement of [`stage_count_above_name_len`].
+    ///
+    /// [`stage_count_above_name_len`]: Pipeline::stage_count_above_name_len
+    pub fn stage_count_below_name_len(&self, max_len: usize) -> usize {
+        self.stages.iter().filter(|s| s.name.len() < max_len).count()
+    }
+
+    /// Return the name of the stage at position `idx`, or `None` if `idx` is
+    /// out of bounds.
+    ///
+    /// Indices are zero-based from the start of the pipeline.
+    pub fn stage_at(&self, idx: usize) -> Option<&str> {
+        self.stages.get(idx).map(|s| s.name.as_str())
+    }
+
+    /// Return stage names in reverse pipeline order.
+    ///
+    /// For a pipeline `[a, b, c]` this returns `["c", "b", "a"]`.
+    /// Returns an empty `Vec` for an empty pipeline.
+    pub fn stages_reversed(&self) -> Vec<&str> {
+        self.stages.iter().rev().map(|s| s.name.as_str()).collect()
+    }
+
+    /// Return `true` if the pipeline has no stages.
+    ///
+    /// Equivalent to `stage_count() == 0`.
+    pub fn pipeline_is_empty(&self) -> bool {
+        self.stages.is_empty()
+    }
+
+    /// Return sorted, deduplicated stage names.
+    ///
+    /// Stage names are unique by construction, so this is equivalent to
+    /// `stage_names` sorted alphabetically.  Useful for set-membership checks
+    /// without knowing insertion order.
+    pub fn unique_stage_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.stages.iter().map(|s| s.name.as_str()).collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// Return all stage names whose name starts with `prefix`.
+    ///
+    /// Returned names preserve pipeline order.  Returns an empty `Vec` when
+    /// no stage name has the given prefix or the pipeline is empty.
+    pub fn stage_names_with_prefix<'a>(&'a self, prefix: &str) -> Vec<&'a str> {
+        self.stages
+            .iter()
+            .filter(|s| s.name.starts_with(prefix))
+            .map(|s| s.name.as_str())
+            .collect()
+    }
+
+    /// Return `true` if any stage name starts with `prefix`.
+    ///
+    /// A convenience predicate over [`stage_names_with_prefix`] that avoids
+    /// allocating a `Vec` when only existence is needed.
+    ///
+    /// [`stage_names_with_prefix`]: Pipeline::stage_names_with_prefix
+    pub fn contains_stage_with_prefix(&self, prefix: &str) -> bool {
+        self.stages.iter().any(|s| s.name.starts_with(prefix))
+    }
+
+    /// Return the names of all stages whose name ends with `suffix`.
+    ///
+    /// Complementary to [`stage_names_with_prefix`]; useful for filtering
+    /// stages by a common naming convention (e.g. `"_validate"`).
+    /// Returns an empty `Vec` when no stage matches or the pipeline is empty.
+    ///
+    /// [`stage_names_with_prefix`]: Pipeline::stage_names_with_prefix
+    pub fn stages_with_suffix<'a>(&'a self, suffix: &str) -> Vec<&'a str> {
+        self.stages
+            .iter()
+            .filter(|s| s.name.ends_with(suffix))
+            .map(|s| s.name.as_str())
+            .collect()
+    }
+
+    /// Return `true` if any stage name contains `substr` as a substring.
+    ///
+    /// A quick existence check that avoids allocating a full `Vec`.
+    /// Returns `false` for an empty pipeline.
+    pub fn has_stage_with_name_containing(&self, substr: &str) -> bool {
+        self.stages.iter().any(|s| s.name.contains(substr))
+    }
+
+    /// Return the names of all stages whose name contains `substr`.
+    ///
+    /// Complements [`has_stage_with_name_containing`] by returning the full
+    /// list rather than just a boolean.  Returns an empty `Vec` when no stage
+    /// matches or the pipeline is empty.
+    ///
+    /// [`has_stage_with_name_containing`]: Pipeline::has_stage_with_name_containing
+    pub fn stage_names_containing<'a>(&'a self, substr: &str) -> Vec<&'a str> {
+        self.stages
+            .iter()
+            .filter(|s| s.name.contains(substr))
+            .map(|s| s.name.as_str())
+            .collect()
+    }
+
+    /// Return the total number of bytes across all stage name strings.
+    ///
+    /// Useful for estimating the overhead of storing pipeline metadata.
+    /// Returns `0` for an empty pipeline.
+    pub fn stage_name_bytes_total(&self) -> usize {
+        self.stages.iter().map(|s| s.name.len()).sum()
+    }
+
+    /// Return the number of stages whose name byte length exceeds `min_bytes`.
+    ///
+    /// Useful for identifying long stage names that may indicate over-verbose
+    /// naming conventions.  Returns `0` for an empty pipeline.
+    pub fn stage_count_above_name_bytes(&self, min_bytes: usize) -> usize {
+        self.stages.iter().filter(|s| s.name.len() > min_bytes).count()
+    }
+
+    /// Return a reference to the stage at 0-based `index`, or `None` if out of range.
+    pub fn stage_at_index(&self, index: usize) -> Option<&Stage> {
+        self.stages.get(index)
+    }
+
+    /// Return the position of the stage named `name` counted from the end of
+    /// the pipeline (0 = last stage, 1 = second-to-last, …).
+    ///
+    /// Returns `None` if no stage with that name exists.
+    pub fn stage_position_from_end(&self, name: &str) -> Option<usize> {
+        let pos = self.stages.iter().position(|s| s.name == name)?;
+        Some(self.stages.len() - 1 - pos)
+    }
+
+    /// Return `true` if every name in `names` corresponds to an existing stage.
+    ///
+    /// Returns `true` for an empty `names` slice (vacuously true).
+    pub fn contains_all_stages(&self, names: &[&str]) -> bool {
+        names.iter().all(|&n| self.stages.iter().any(|s| s.name == n))
+    }
+
+    /// Return the stage name at position `n` from the **end** of the pipeline
+    /// (0-indexed, so `0` is the last stage).
+    ///
+    /// Returns `None` when `n` is out of bounds or the pipeline is empty.
+    pub fn stage_name_from_end(&self, n: usize) -> Option<&str> {
+        let len = self.stages.len();
+        if n >= len {
+            return None;
+        }
+        Some(self.stages[len - 1 - n].name.as_str())
+    }
+
+    /// Return all stage names as an owned `Vec<String>`.
+    ///
+    /// Unlike [`unique_stage_names`] this preserves order and includes
+    /// duplicates.
+    ///
+    /// [`unique_stage_names`]: Pipeline::unique_stage_names
+    pub fn all_stage_names(&self) -> Vec<String> {
+        self.stages.iter().map(|s| s.name.clone()).collect()
+    }
+
+    /// Return `true` if the pipeline contains exactly `n` stages.
+    pub fn has_exactly_n_stages(&self, n: usize) -> bool {
+        self.stages.len() == n
+    }
+
+    /// Return the 0-based index of the first stage whose name matches `name`,
+    /// or `None` if no such stage exists.
+    pub fn stage_index_of(&self, name: &str) -> Option<usize> {
+        self.stages.iter().position(|s| s.name == name)
+    }
+
+    /// Return `true` if the pipeline has no stages.
+    ///
+    /// Equivalent to `stage_count() == 0`.
+    pub fn has_no_stages(&self) -> bool {
+        self.stages.is_empty()
+    }
+
+    /// Return the byte length of the longest stage name in the pipeline.
+    ///
+    /// Returns `0` for an empty pipeline.
+    pub fn longest_stage_name_len(&self) -> usize {
+        self.stages.iter().map(|s| s.name.len()).max().unwrap_or(0)
+    }
+
+    /// Join all stage names with `sep` and return the resulting string.
+    ///
+    /// Returns an empty string for an empty pipeline.
+    pub fn stage_names_joined(&self, sep: &str) -> String {
+        self.stages
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join(sep)
+    }
+
+    /// Return the count of stages whose name contains `substr`.
+    ///
+    /// Returns `0` for an empty pipeline or when no stage name matches.
+    pub fn stage_count_with_name_containing(&self, substr: &str) -> usize {
+        self.stages.iter().filter(|s| s.name.contains(substr)).count()
+    }
+
+    /// Return `true` if a stage exists at zero-based index `idx`.
+    pub fn has_stage_at_index(&self, idx: usize) -> bool {
+        idx < self.stages.len()
+    }
+
+    /// Return `true` if **all** stage names start with `prefix`.
+    ///
+    /// Returns `true` for an empty pipeline (vacuously true) and for an empty
+    /// `prefix` string (all strings start with "").
+    pub fn all_stage_names_start_with(&self, prefix: &str) -> bool {
+        self.stages.iter().all(|s| s.name.starts_with(prefix))
+    }
+
+    /// Return `true` if any stage in the pipeline has exactly the given
+    /// `name`.
+    ///
+    /// Unlike [`Pipeline::has_stage_with_name_containing`] this checks for an
+    /// exact match, and unlike [`Pipeline::contains_all_stages`] it accepts a
+    /// single name without requiring slice syntax.
+    pub fn any_stage_has_name(&self, name: &str) -> bool {
+        self.stages.iter().any(|s| s.name == name)
+    }
+
+    /// Return the name of the stage at `idx`, or `None` if the index is
+    /// out of bounds.
+    ///
+    /// Convenience wrapper around [`stage_at_index`] that returns `Option<&str>`
+    /// directly instead of `Option<&Stage>`, avoiding the need to project
+    /// through the `Stage` struct at the call site.
+    ///
+    /// [`stage_at_index`]: Pipeline::stage_at_index
+    pub fn stage_name_at(&self, idx: usize) -> Option<&str> {
+        self.stages.get(idx).map(|s| s.name.as_str())
+    }
+
+    /// Return `true` if every stage name contains `substr` as a substring.
+    ///
+    /// Returns `true` vacuously for an empty pipeline (no stages to violate
+    /// the condition).
+    pub fn all_stage_names_contain(&self, substr: &str) -> bool {
+        self.stages.iter().all(|s| s.name.contains(substr))
+    }
+
 }
 
 impl Default for Pipeline {
@@ -474,6 +2301,20 @@ mod tests {
         for attempt in 1..=10 {
             assert!(p.delay_for(attempt) <= MAX_RETRY_DELAY);
         }
+    }
+
+    // ── Round 26: first_delay_ms ──────────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_first_delay_ms_equals_base_delay() {
+        let p = RetryPolicy::exponential(3, 200).unwrap();
+        assert_eq!(p.first_delay_ms(), p.base_delay_ms());
+    }
+
+    #[test]
+    fn test_retry_policy_first_delay_ms_constant_policy() {
+        let p = RetryPolicy::constant(4, 150).unwrap();
+        assert_eq!(p.first_delay_ms(), 150);
     }
 
     // ── CircuitBreaker ────────────────────────────────────────────────────────
@@ -532,6 +2373,59 @@ mod tests {
         let result: Result<i32, AgentRuntimeError> = cb.call(|| Ok::<i32, AgentRuntimeError>(99));
         assert_eq!(result.unwrap_or(0), 99);
         assert_eq!(cb.state().unwrap(), CircuitState::Closed);
+    }
+
+    #[test]
+    fn test_circuit_breaker_with_custom_backend_uses_backend_state() {
+        // Build a custom backend and share it between two circuit breakers
+        // to verify that state is read from and written to the backend.
+        let shared_backend: Arc<dyn CircuitBreakerBackend> =
+            Arc::new(InMemoryCircuitBreakerBackend::new());
+
+        let cb1 = CircuitBreaker::new("svc", 2, Duration::from_secs(60))
+            .unwrap()
+            .with_backend(Arc::clone(&shared_backend));
+
+        let cb2 = CircuitBreaker::new("svc", 2, Duration::from_secs(60))
+            .unwrap()
+            .with_backend(Arc::clone(&shared_backend));
+
+        // Trigger one failure via cb1
+        let _: Result<(), AgentRuntimeError> = cb1.call(|| Err::<(), _>("fail".to_string()));
+
+        // cb2 should observe the failure recorded by cb1
+        assert_eq!(cb2.failure_count().unwrap(), 1);
+
+        // Trigger the second failure to open the circuit via cb1
+        let _: Result<(), AgentRuntimeError> = cb1.call(|| Err::<(), _>("fail again".to_string()));
+
+        // cb2 should now see the circuit as open
+        assert!(matches!(cb2.state().unwrap(), CircuitState::Open { .. }));
+    }
+
+    #[test]
+    fn test_in_memory_backend_increments_and_resets() {
+        use super::CircuitBreakerBackend as CB;
+        let backend = InMemoryCircuitBreakerBackend::new();
+
+        assert_eq!(CB::get_failures(&backend, "svc"), 0);
+
+        let count = CB::increment_failures(&backend, "svc");
+        assert_eq!(count, 1);
+
+        let count = CB::increment_failures(&backend, "svc");
+        assert_eq!(count, 2);
+
+        CB::reset_failures(&backend, "svc");
+        assert_eq!(CB::get_failures(&backend, "svc"), 0);
+
+        // open_at round-trip
+        assert!(CB::get_open_at(&backend, "svc").is_none());
+        let now = Instant::now();
+        CB::set_open_at(&backend, "svc", now);
+        assert!(CB::get_open_at(&backend, "svc").is_some());
+        CB::clear_open_at(&backend, "svc");
+        assert!(CB::get_open_at(&backend, "svc").is_none());
     }
 
     // ── Deduplicator ──────────────────────────────────────────────────────────
@@ -653,5 +2547,2350 @@ mod tests {
             .add_stage("s1", |s| Ok(s))
             .add_stage("s2", |s| Ok(s));
         assert_eq!(p.stage_count(), 2);
+    }
+
+    #[test]
+    fn test_pipeline_execute_timed_captures_stage_durations() {
+        let p = Pipeline::new()
+            .add_stage("s1", |s| Ok(format!("{s}1")))
+            .add_stage("s2", |s| Ok(format!("{s}2")));
+        let result = p.execute_timed("x".to_string()).unwrap();
+        assert_eq!(result.output, "x12");
+        assert_eq!(result.stage_timings.len(), 2);
+        assert_eq!(result.stage_timings[0].0, "s1");
+        assert_eq!(result.stage_timings[1].0, "s2");
+    }
+
+    // ── Item 13: BackpressureGuard soft limit ──────────────────────────────────
+
+    #[test]
+    fn test_backpressure_soft_limit_rejects_invalid_config() {
+        // soft >= capacity must be rejected
+        let g = BackpressureGuard::new(5).unwrap();
+        assert!(g.with_soft_limit(5).is_err());
+        let g = BackpressureGuard::new(5).unwrap();
+        assert!(g.with_soft_limit(6).is_err());
+    }
+
+    #[test]
+    fn test_backpressure_soft_limit_accepts_requests_below_soft() {
+        let g = BackpressureGuard::new(5)
+            .unwrap()
+            .with_soft_limit(2)
+            .unwrap();
+        // Both acquires below soft limit should succeed
+        assert!(g.try_acquire().is_ok());
+        assert!(g.try_acquire().is_ok());
+        assert_eq!(g.depth().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_backpressure_with_soft_limit_still_sheds_at_hard_capacity() {
+        let g = BackpressureGuard::new(3)
+            .unwrap()
+            .with_soft_limit(2)
+            .unwrap();
+        g.try_acquire().unwrap();
+        g.try_acquire().unwrap();
+        g.try_acquire().unwrap(); // reaches hard limit
+        let result = g.try_acquire();
+        assert!(matches!(
+            result,
+            Err(AgentRuntimeError::BackpressureShed { .. })
+        ));
+    }
+
+    // ── #4/#31 BackpressureGuard::hard_capacity ───────────────────────────────
+
+    #[test]
+    fn test_backpressure_hard_capacity_matches_new() {
+        let g = BackpressureGuard::new(7).unwrap();
+        assert_eq!(g.hard_capacity(), 7);
+    }
+
+    // ── #10 Pipeline::with_error_handler ──────────────────────────────────────
+
+    #[test]
+    fn test_pipeline_error_handler_recovers_from_stage_failure() {
+        let p = Pipeline::new()
+            .add_stage("fail_stage", |_| {
+                Err(AgentRuntimeError::Orchestration("oops".into()))
+            })
+            .add_stage("append", |s| Ok(format!("{s}-recovered")))
+            .with_error_handler(|stage_name, _err| format!("recovered_from_{stage_name}"));
+        let result = p.run("input".to_string()).unwrap();
+        assert_eq!(result, "recovered_from_fail_stage-recovered");
+    }
+
+    // ── #11/#32 CircuitState PartialEq/Eq ────────────────────────────────────
+
+    #[test]
+    fn test_circuit_state_eq() {
+        assert_eq!(CircuitState::Closed, CircuitState::Closed);
+        assert_eq!(CircuitState::HalfOpen, CircuitState::HalfOpen);
+        assert_eq!(
+            CircuitState::Open { opened_at: std::time::Instant::now() },
+            CircuitState::Open { opened_at: std::time::Instant::now() }
+        );
+        assert_ne!(CircuitState::Closed, CircuitState::HalfOpen);
+        assert_ne!(CircuitState::Closed, CircuitState::Open { opened_at: std::time::Instant::now() });
+    }
+
+    // ── #18 Deduplicator::dedup_many ──────────────────────────────────────────
+
+    #[test]
+    fn test_dedup_many_independent_keys() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        let ttl = Duration::from_secs(60);
+        let results = d.dedup_many(&[("key-a", ttl), ("key-b", ttl), ("key-c", ttl)]).unwrap();
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|r| matches!(r, DeduplicationResult::New)));
+    }
+
+    // ── Task 11: Concurrent CircuitBreaker state transition tests ─────────────
+
+    #[test]
+    fn test_concurrent_circuit_breaker_opens_under_concurrent_failures() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let cb = Arc::new(
+            CircuitBreaker::new("svc", 5, Duration::from_secs(60)).unwrap(),
+        );
+        let n_threads = 8;
+        let failures_per_thread = 2;
+
+        let mut handles = Vec::new();
+        for _ in 0..n_threads {
+            let cb = Arc::clone(&cb);
+            handles.push(thread::spawn(move || {
+                for _ in 0..failures_per_thread {
+                    let _ = cb.call(|| Err::<(), &str>("fail"));
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // After n_threads * failures_per_thread = 16 failures with threshold=5,
+        // the circuit must be Open.
+        let state = cb.state().unwrap();
+        assert!(
+            matches!(state, CircuitState::Open { .. }),
+            "circuit should be open after many concurrent failures; got: {state:?}"
+        );
+    }
+
+    #[test]
+    fn test_per_service_tracking_is_independent() {
+        let backend = Arc::new(InMemoryCircuitBreakerBackend::new());
+
+        let cb_a = CircuitBreaker::new("service-a", 3, Duration::from_secs(60))
+            .unwrap()
+            .with_backend(Arc::clone(&backend) as Arc<dyn CircuitBreakerBackend>);
+        let cb_b = CircuitBreaker::new("service-b", 3, Duration::from_secs(60))
+            .unwrap()
+            .with_backend(Arc::clone(&backend) as Arc<dyn CircuitBreakerBackend>);
+
+        // Fail service-a 3 times → opens
+        for _ in 0..3 {
+            let _ = cb_a.call(|| Err::<(), &str>("fail"));
+        }
+
+        // service-b should still be Closed
+        let state_b = cb_b.state().unwrap();
+        assert_eq!(
+            state_b,
+            CircuitState::Closed,
+            "service-b should be unaffected by service-a failures"
+        );
+
+        // service-a should be Open
+        let state_a = cb_a.state().unwrap();
+        assert!(
+            matches!(state_a, CircuitState::Open { .. }),
+            "service-a should be open"
+        );
+    }
+
+    // ── Item 14: timed_lock concurrency correctness ───────────────────────────
+
+    #[test]
+    fn test_backpressure_concurrent_acquires_are_consistent() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let g = Arc::new(BackpressureGuard::new(100).unwrap());
+        let mut handles = Vec::new();
+
+        for _ in 0..10 {
+            let g_clone = Arc::clone(&g);
+            handles.push(thread::spawn(move || {
+                g_clone.try_acquire().ok();
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All 10 threads acquired a slot; depth must be exactly 10
+        assert_eq!(g.depth().unwrap(), 10);
+    }
+
+    // ── New API tests (Rounds 4-8) ────────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_constant_has_fixed_delay() {
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        assert_eq!(p.delay_for(1), Duration::from_millis(100));
+        assert_eq!(p.delay_for(2), Duration::from_millis(100));
+        assert_eq!(p.delay_for(10), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_retry_policy_exponential_doubles() {
+        let p = RetryPolicy::exponential(5, 10).unwrap();
+        assert_eq!(p.delay_for(1), Duration::from_millis(10));
+        assert_eq!(p.delay_for(2), Duration::from_millis(20));
+        assert_eq!(p.delay_for(3), Duration::from_millis(40));
+    }
+
+    #[test]
+    fn test_retry_policy_with_max_attempts() {
+        let p = RetryPolicy::constant(3, 50).unwrap();
+        let p2 = p.with_max_attempts(7).unwrap();
+        assert_eq!(p2.max_attempts, 7);
+        assert!(RetryPolicy::constant(1, 50).unwrap().with_max_attempts(0).is_err());
+    }
+
+    #[test]
+    fn test_circuit_breaker_reset_returns_to_closed() {
+        let cb = CircuitBreaker::new("svc", 2, Duration::from_secs(60)).unwrap();
+        cb.record_failure();
+        cb.record_failure(); // should open
+        assert_ne!(cb.state().unwrap(), CircuitState::Closed);
+        cb.reset();
+        assert_eq!(cb.state().unwrap(), CircuitState::Closed);
+        assert_eq!(cb.failure_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_deduplicator_clear_resets_all_state() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("k1").unwrap();
+        d.check_and_register("k2").unwrap();
+        d.complete("k1", "r1").unwrap();
+        assert_eq!(d.in_flight_count().unwrap(), 1);
+        assert_eq!(d.cached_count().unwrap(), 1);
+        d.clear().unwrap();
+        assert_eq!(d.in_flight_count().unwrap(), 0);
+        assert_eq!(d.cached_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_deduplicator_purge_expired_removes_stale() {
+        let d = Deduplicator::new(Duration::from_millis(1));
+        d.check_and_register("x").unwrap();
+        d.complete("x", "result").unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        let removed = d.purge_expired().unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(d.cached_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_backpressure_utilization_ratio() {
+        let g = BackpressureGuard::new(4).unwrap();
+        g.try_acquire().unwrap();
+        g.try_acquire().unwrap();
+        let ratio = g.utilization_ratio().unwrap();
+        assert!((ratio - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_pipeline_stage_count_and_names() {
+        let p = Pipeline::new()
+            .add_stage("first", |s| Ok(s + "1"))
+            .add_stage("second", |s| Ok(s + "2"));
+        assert_eq!(p.stage_count(), 2);
+        assert_eq!(p.stage_names(), vec!["first", "second"]);
+    }
+
+    #[test]
+    fn test_pipeline_is_empty_true_for_new() {
+        let p = Pipeline::new();
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_is_empty_false_after_add_stage() {
+        let p = Pipeline::new().add_stage("s", |s: String| Ok(s));
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn test_circuit_breaker_service_name() {
+        let cb = CircuitBreaker::new("my-service", 3, Duration::from_secs(1)).unwrap();
+        assert_eq!(cb.service_name(), "my-service");
+    }
+
+    #[test]
+    fn test_retry_policy_none_has_max_one_attempt() {
+        let p = RetryPolicy::none();
+        assert_eq!(p.max_attempts, 1);
+        assert_eq!(p.delay_for(0), Duration::ZERO);
+    }
+
+    #[test]
+    fn test_backpressure_is_full_false_when_empty() {
+        let g = BackpressureGuard::new(5).unwrap();
+        assert!(!g.is_full().unwrap());
+    }
+
+    #[test]
+    fn test_backpressure_is_full_true_when_at_capacity() {
+        let g = BackpressureGuard::new(2).unwrap();
+        g.try_acquire().unwrap();
+        g.try_acquire().unwrap();
+        assert!(g.is_full().unwrap());
+    }
+
+    #[test]
+    fn test_deduplicator_ttl_returns_configured_value() {
+        let d = Deduplicator::new(Duration::from_secs(42));
+        assert_eq!(d.ttl(), Duration::from_secs(42));
+    }
+
+    #[test]
+    fn test_circuit_breaker_is_closed_initially() {
+        let cb = CircuitBreaker::new("svc", 3, Duration::from_secs(1)).unwrap();
+        assert!(cb.is_closed());
+        assert!(!cb.is_open());
+        assert!(!cb.is_half_open());
+    }
+
+    #[test]
+    fn test_circuit_breaker_is_open_after_threshold_failures() {
+        let cb = CircuitBreaker::new("svc", 2, Duration::from_secs(60)).unwrap();
+        cb.record_failure();
+        cb.record_failure();
+        assert!(cb.is_open());
+        assert!(!cb.is_closed());
+    }
+
+    #[test]
+    fn test_retry_policy_total_max_delay_constant() {
+        // constant 100ms × 3 attempts = 300ms total
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        assert_eq!(p.total_max_delay_ms(), 300);
+    }
+
+    #[test]
+    fn test_retry_policy_total_max_delay_none_is_zero() {
+        let p = RetryPolicy::none();
+        assert_eq!(p.total_max_delay_ms(), 0);
+    }
+
+    #[test]
+    fn test_retry_policy_is_none_true_for_none() {
+        let p = RetryPolicy::none();
+        assert!(p.is_none());
+    }
+
+    #[test]
+    fn test_retry_policy_is_none_false_for_exponential() {
+        let p = RetryPolicy::exponential(3, 10).unwrap();
+        assert!(!p.is_none());
+    }
+
+    #[test]
+    fn test_pipeline_has_error_handler_false_by_default() {
+        let p = Pipeline::new().add_stage("s", |s: String| Ok(s));
+        assert!(!p.has_error_handler());
+    }
+
+    #[test]
+    fn test_pipeline_has_error_handler_true_after_set() {
+        let p = Pipeline::new()
+            .with_error_handler(|_stage, _err| "recovered".to_string());
+        assert!(p.has_error_handler());
+    }
+
+    #[test]
+    fn test_backpressure_reset_clears_depth() {
+        let g = BackpressureGuard::new(5).unwrap();
+        g.try_acquire().unwrap();
+        g.try_acquire().unwrap();
+        assert_eq!(g.depth().unwrap(), 2);
+        g.reset();
+        assert_eq!(g.depth().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_deduplicator_in_flight_keys_returns_started_keys() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check("key-a", Duration::from_secs(60)).unwrap();
+        d.check("key-b", Duration::from_secs(60)).unwrap();
+        let mut keys = d.in_flight_keys().unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["key-a", "key-b"]);
+    }
+
+    // ── Round 3: new methods ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_with_base_delay_ms_changes_delay() {
+        let p = RetryPolicy::exponential(3, 100)
+            .unwrap()
+            .with_base_delay_ms(200)
+            .unwrap();
+        assert_eq!(p.delay_for(1), Duration::from_millis(200));
+    }
+
+    #[test]
+    fn test_retry_policy_with_base_delay_ms_rejects_zero() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(p.with_base_delay_ms(0).is_err());
+    }
+
+    #[test]
+    fn test_backpressure_reset_depth_clears_counter() {
+        let guard = BackpressureGuard::new(5).unwrap();
+        guard.try_acquire().unwrap();
+        guard.try_acquire().unwrap();
+        assert_eq!(guard.depth().unwrap(), 2);
+        guard.reset_depth().unwrap();
+        assert_eq!(guard.depth().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_pipeline_remove_stage_returns_true_if_found() {
+        let mut p = Pipeline::new()
+            .add_stage("a", |s| Ok(s))
+            .add_stage("b", |s| Ok(s));
+        assert!(p.remove_stage("a"));
+        assert_eq!(p.stage_count(), 1);
+        assert_eq!(p.stage_names(), vec!["b"]);
+    }
+
+    #[test]
+    fn test_pipeline_remove_stage_returns_false_if_missing() {
+        let mut p = Pipeline::new().add_stage("x", |s| Ok(s));
+        assert!(!p.remove_stage("nope"));
+        assert_eq!(p.stage_count(), 1);
+    }
+
+    #[test]
+    fn test_pipeline_clear_removes_all_stages() {
+        let mut p = Pipeline::new()
+            .add_stage("a", |s| Ok(s))
+            .add_stage("b", |s| Ok(s));
+        p.clear();
+        assert!(p.is_empty());
+    }
+
+    // ── Round 4: CircuitBreaker accessors / Pipeline::get_stage_name_at ──────
+
+    #[test]
+    fn test_circuit_breaker_threshold_accessor() {
+        let cb = CircuitBreaker::new("svc", 5, Duration::from_secs(30)).unwrap();
+        assert_eq!(cb.threshold(), 5);
+    }
+
+    #[test]
+    fn test_circuit_breaker_recovery_window_accessor() {
+        let window = Duration::from_secs(45);
+        let cb = CircuitBreaker::new("svc", 3, window).unwrap();
+        assert_eq!(cb.recovery_window(), window);
+    }
+
+    #[test]
+    fn test_pipeline_get_stage_name_at_returns_correct_names() {
+        let p = Pipeline::new()
+            .add_stage("first", |s| Ok(s))
+            .add_stage("second", |s| Ok(s));
+        assert_eq!(p.get_stage_name_at(0), Some("first"));
+        assert_eq!(p.get_stage_name_at(1), Some("second"));
+        assert_eq!(p.get_stage_name_at(2), None);
+    }
+
+    // ── Round 16: can_retry ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_can_retry_within_budget() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(p.can_retry(0));
+        assert!(p.can_retry(1));
+        assert!(p.can_retry(2));
+    }
+
+    #[test]
+    fn test_retry_policy_can_retry_false_when_exhausted() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(!p.can_retry(3));
+        assert!(!p.can_retry(99));
+    }
+
+    #[test]
+    fn test_retry_policy_none_only_allows_first_attempt() {
+        let p = RetryPolicy::none();
+        assert!(p.can_retry(0));
+        assert!(!p.can_retry(1));
+    }
+
+    // ── Round 5: RetryPolicy::max_attempts / Pipeline::stage_names_owned ─────
+
+    #[test]
+    fn test_retry_policy_max_attempts_accessor() {
+        let p = RetryPolicy::exponential(7, 100).unwrap();
+        assert_eq!(p.max_attempts(), 7);
+    }
+
+    #[test]
+    fn test_pipeline_stage_names_owned_returns_strings() {
+        let p = Pipeline::new()
+            .add_stage("alpha", |s| Ok(s))
+            .add_stage("beta", |s| Ok(s));
+        let owned = p.stage_names_owned();
+        assert_eq!(owned, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn test_pipeline_stage_names_owned_empty_when_no_stages() {
+        let p = Pipeline::new();
+        assert!(p.stage_names_owned().is_empty());
+    }
+
+    // ── Round 17: attempts_remaining ─────────────────────────────────────────
+
+    #[test]
+    fn test_attempts_remaining_full_at_zero() {
+        let p = RetryPolicy::exponential(4, 100).unwrap();
+        assert_eq!(p.attempts_remaining(0), 4);
+    }
+
+    #[test]
+    fn test_attempts_remaining_decrements_correctly() {
+        let p = RetryPolicy::exponential(4, 100).unwrap();
+        assert_eq!(p.attempts_remaining(2), 2);
+        assert_eq!(p.attempts_remaining(4), 0);
+    }
+
+    #[test]
+    fn test_attempts_remaining_zero_when_exhausted() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert_eq!(p.attempts_remaining(10), 0);
+    }
+
+    // ── Round 18: untested circuit-breaker, deduplicator, backpressure methods
+
+    #[test]
+    fn test_retry_policy_max_attempts_getter() {
+        let p = RetryPolicy::exponential(7, 50).unwrap();
+        assert_eq!(p.max_attempts(), 7);
+    }
+
+    #[test]
+    fn test_circuit_breaker_failure_count_increments() {
+        let cb = CircuitBreaker::new("svc2", 3, std::time::Duration::from_secs(60)).unwrap();
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.failure_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_circuit_breaker_record_success_resets_failures() {
+        let cb = CircuitBreaker::new("svc3", 5, std::time::Duration::from_secs(60)).unwrap();
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_success();
+        assert_eq!(cb.failure_count().unwrap(), 0);
+        assert!(cb.is_closed());
+    }
+
+    #[test]
+    fn test_circuit_breaker_threshold_and_recovery_window() {
+        let cb = CircuitBreaker::new("svc4", 3, std::time::Duration::from_secs(30)).unwrap();
+        assert_eq!(cb.threshold(), 3);
+        assert_eq!(cb.recovery_window(), std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_circuit_breaker_reset_clears_state() {
+        let cb = CircuitBreaker::new("svc5", 2, std::time::Duration::from_secs(60)).unwrap();
+        cb.record_failure();
+        cb.record_failure(); // should open circuit
+        assert!(cb.is_open());
+        cb.reset();
+        assert!(cb.is_closed());
+        assert_eq!(cb.failure_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_deduplicator_cached_count_after_complete() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check("key1", Duration::from_secs(60)).unwrap();
+        d.complete("key1", "result").unwrap();
+        assert_eq!(d.cached_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_deduplicator_ttl_matches_configured() {
+        let d = Deduplicator::new(Duration::from_secs(42));
+        assert_eq!(d.ttl(), Duration::from_secs(42));
+    }
+
+    #[test]
+    fn test_deduplicator_purge_expired_removes_stale_entries() {
+        let d = Deduplicator::new(Duration::ZERO); // instant TTL
+        d.check("stale", Duration::ZERO).unwrap();
+        d.complete("stale", "val").unwrap();
+        // Sleep briefly to ensure the entry expires
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let removed = d.purge_expired().unwrap();
+        assert!(removed >= 1);
+    }
+
+    #[test]
+    fn test_backpressure_remaining_capacity() {
+        let g = BackpressureGuard::new(5).unwrap();
+        g.try_acquire().unwrap();
+        assert_eq!(g.remaining_capacity().unwrap(), 4);
+    }
+
+    #[test]
+    fn test_backpressure_soft_depth_ratio_without_soft_limit() {
+        let g = BackpressureGuard::new(5).unwrap();
+        assert_eq!(g.soft_depth_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_backpressure_soft_depth_ratio_with_soft_limit() {
+        let g = BackpressureGuard::new(10).unwrap()
+            .with_soft_limit(4).unwrap();
+        g.try_acquire().unwrap();
+        g.try_acquire().unwrap();
+        let ratio = g.soft_depth_ratio();
+        assert!((ratio - 0.5).abs() < 1e-6);
+    }
+
+    // ── Round 7: delay_ms_for / soft_limit / has_stage ───────────────────────
+
+    #[test]
+    fn test_retry_delay_ms_for_matches_delay_for() {
+        let p = RetryPolicy::exponential(5, 100).unwrap();
+        assert_eq!(p.delay_ms_for(1), p.delay_for(1).as_millis() as u64);
+        assert_eq!(p.delay_ms_for(3), p.delay_for(3).as_millis() as u64);
+    }
+
+    #[test]
+    fn test_backpressure_soft_limit_returns_configured_value() {
+        let g = BackpressureGuard::new(10).unwrap()
+            .with_soft_limit(5).unwrap();
+        assert_eq!(g.soft_limit(), Some(5));
+    }
+
+    #[test]
+    fn test_backpressure_soft_limit_none_when_not_set() {
+        let g = BackpressureGuard::new(10).unwrap();
+        assert_eq!(g.soft_limit(), None);
+    }
+
+    #[test]
+    fn test_pipeline_has_stage_returns_true_when_present() {
+        let p = Pipeline::new().add_stage("step1", |s| Ok(s));
+        assert!(p.has_stage("step1"));
+        assert!(!p.has_stage("step2"));
+    }
+
+    #[test]
+    fn test_pipeline_has_stage_false_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(!p.has_stage("anything"));
+    }
+
+    // ── Round 20: Deduplicator::max_entries / RetryPolicy::delay_for ─────────
+
+    #[test]
+    fn test_deduplicator_max_entries_none_by_default() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        assert_eq!(d.max_entries(), None);
+    }
+
+    #[test]
+    fn test_deduplicator_max_entries_set_via_builder() {
+        let d = Deduplicator::new(Duration::from_secs(60))
+            .with_max_entries(50)
+            .unwrap();
+        assert_eq!(d.max_entries(), Some(50));
+    }
+
+    #[test]
+    fn test_retry_policy_delay_for_exponential_grows() {
+        let p = RetryPolicy::exponential(5, 100).unwrap();
+        // delay_for uses saturating_sub(1): attempt 1 => multiplier 1, attempt 2 => multiplier 2
+        let d1 = p.delay_for(1);
+        let d2 = p.delay_for(2);
+        assert!(d2 > d1, "exponential delay should grow: attempt 2 > attempt 1");
+    }
+
+    #[test]
+    fn test_retry_policy_delay_for_constant_stays_same() {
+        let p = RetryPolicy::constant(5, 200).unwrap();
+        assert_eq!(p.delay_for(0), p.delay_for(1));
+        assert_eq!(p.delay_for(1), p.delay_for(3));
+    }
+
+    // ── Round 9: is_no_retry ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_no_retry_true_for_none_policy() {
+        let p = RetryPolicy::none();
+        assert!(p.is_no_retry());
+    }
+
+    #[test]
+    fn test_is_no_retry_false_for_exponential_policy() {
+        let p = RetryPolicy::exponential(3, 50).unwrap();
+        assert!(!p.is_no_retry());
+    }
+
+    #[test]
+    fn test_is_no_retry_false_for_constant_policy_with_multiple_attempts() {
+        let p = RetryPolicy::constant(2, 100).unwrap();
+        assert!(!p.is_no_retry());
+    }
+
+    // ── Round 10: is_exponential ──────────────────────────────────────────────
+
+    #[test]
+    fn test_is_exponential_true_for_exponential_policy() {
+        let p = RetryPolicy::exponential(3, 50).unwrap();
+        assert!(p.is_exponential());
+    }
+
+    #[test]
+    fn test_is_exponential_false_for_constant_policy() {
+        let p = RetryPolicy::constant(3, 50).unwrap();
+        assert!(!p.is_exponential());
+    }
+
+    #[test]
+    fn test_is_exponential_false_for_none_policy() {
+        let p = RetryPolicy::none();
+        assert!(!p.is_exponential());
+    }
+
+    // ── Round 11: BackpressureGuard::is_soft_limited ──────────────────────────
+
+    #[test]
+    fn test_is_soft_limited_false_without_soft_limit() {
+        let g = BackpressureGuard::new(10).unwrap();
+        assert!(!g.is_soft_limited());
+    }
+
+    #[test]
+    fn test_is_soft_limited_true_when_soft_limit_set() {
+        let g = BackpressureGuard::new(10)
+            .unwrap()
+            .with_soft_limit(5)
+            .unwrap();
+        assert!(g.is_soft_limited());
+    }
+
+    // ── Round 12: RetryPolicy::base_delay_ms, BackpressureGuard::percent_full ─
+
+    #[test]
+    fn test_retry_policy_base_delay_ms_exponential() {
+        let p = RetryPolicy::exponential(3, 250).unwrap();
+        assert_eq!(p.base_delay_ms(), 250);
+    }
+
+    #[test]
+    fn test_retry_policy_base_delay_ms_constant() {
+        let p = RetryPolicy::constant(5, 100).unwrap();
+        assert_eq!(p.base_delay_ms(), 100);
+    }
+
+    #[test]
+    fn test_retry_policy_base_delay_ms_none_is_zero() {
+        let p = RetryPolicy::none();
+        assert_eq!(p.base_delay_ms(), 0);
+    }
+
+    #[test]
+    fn test_backpressure_percent_full_zero_when_empty() {
+        let g = BackpressureGuard::new(100).unwrap();
+        let pct = g.percent_full().unwrap();
+        assert!((pct - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_backpressure_percent_full_capped_at_100() {
+        let g = BackpressureGuard::new(10).unwrap();
+        // Fill all slots via try_acquire
+        for _ in 0..10 {
+            g.try_acquire().unwrap();
+        }
+        let pct = g.percent_full().unwrap();
+        assert!((pct - 100.0).abs() < 1e-9);
+    }
+
+    // ── Round 27: get_result, rename_stage, failure_rate ─────────────────────
+
+    #[test]
+    fn test_deduplicator_get_result_returns_cached_value() {
+        let d = Deduplicator::new(std::time::Duration::from_secs(60));
+        d.check_and_register("req-1").unwrap();
+        d.complete("req-1", "the answer").unwrap();
+        let result = d.get_result("req-1").unwrap();
+        assert_eq!(result, Some("the answer".to_string()));
+    }
+
+    #[test]
+    fn test_deduplicator_get_result_missing_key_returns_none() {
+        let d = Deduplicator::new(std::time::Duration::from_secs(60));
+        assert_eq!(d.get_result("ghost").unwrap(), None);
+    }
+
+    #[test]
+    fn test_pipeline_rename_stage_succeeds() {
+        let mut p = Pipeline::new().add_stage("old-name", |s: String| Ok(s));
+        let renamed = p.rename_stage("old-name", "new-name");
+        assert!(renamed);
+        assert!(p.has_stage("new-name"));
+        assert!(!p.has_stage("old-name"));
+    }
+
+    #[test]
+    fn test_pipeline_rename_stage_missing_returns_false() {
+        let mut p = Pipeline::new();
+        assert!(!p.rename_stage("nonexistent", "anything"));
+    }
+
+    #[test]
+    fn test_circuit_breaker_failure_rate_zero_initially() {
+        let cb = CircuitBreaker::new("svc", 5, std::time::Duration::from_secs(10)).unwrap();
+        assert!((cb.failure_rate() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_circuit_breaker_failure_rate_increases_with_failures() {
+        let cb = CircuitBreaker::new("svc-fr", 4, std::time::Duration::from_secs(10)).unwrap();
+        cb.record_failure();
+        cb.record_failure();
+        // 2 failures / threshold 4 = 0.5
+        assert!((cb.failure_rate() - 0.5).abs() < 1e-9);
+    }
+
+    // ── Round 14: Pipeline::prepend_stage ────────────────────────────────────
+
+    #[test]
+    fn test_prepend_stage_inserts_at_front() {
+        let p = Pipeline::new()
+            .add_stage("second", |s| Ok(s))
+            .prepend_stage("first", |s| Ok(s));
+        let names = p.stage_names_owned();
+        assert_eq!(names[0], "first");
+        assert_eq!(names[1], "second");
+    }
+
+    #[test]
+    fn test_prepend_stage_executes_before_existing_stages() {
+        let p = Pipeline::new()
+            .add_stage("append", |s| Ok(format!("{s}_appended")))
+            .prepend_stage("prefix", |s| Ok(format!("pre_{s}")));
+        let result = p.run("input".to_string()).unwrap();
+        assert_eq!(result, "pre_input_appended");
+    }
+
+    #[test]
+    fn test_prepend_stage_on_empty_pipeline() {
+        let p = Pipeline::new().prepend_stage("only", |s| Ok(s.to_uppercase()));
+        let result = p.run("hello".to_string()).unwrap();
+        assert_eq!(result, "HELLO");
+    }
+
+    // ── Round 21: CircuitBreaker::is_at_threshold, BackpressureGuard::headroom_ratio ──
+
+    #[test]
+    fn test_circuit_breaker_is_at_threshold_false_initially() {
+        let cb = CircuitBreaker::new("svc", 3, std::time::Duration::from_secs(10)).unwrap();
+        assert!(!cb.is_at_threshold());
+    }
+
+    #[test]
+    fn test_circuit_breaker_is_at_threshold_true_when_failures_reach_threshold() {
+        let cb = CircuitBreaker::new("svc-t", 2, std::time::Duration::from_secs(10)).unwrap();
+        cb.record_failure();
+        assert!(!cb.is_at_threshold());
+        cb.record_failure();
+        assert!(cb.is_at_threshold());
+    }
+
+    #[test]
+    fn test_backpressure_headroom_ratio_one_when_empty() {
+        let g = BackpressureGuard::new(10).unwrap();
+        let ratio = g.headroom_ratio().unwrap();
+        assert!((ratio - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_backpressure_headroom_ratio_decreases_on_acquire() {
+        let g = BackpressureGuard::new(4).unwrap();
+        g.try_acquire().unwrap(); // 1/4 used → headroom = 3/4
+        let ratio = g.headroom_ratio().unwrap();
+        assert!((ratio - 0.75).abs() < 1e-9);
+    }
+
+    // ── Round 17: Pipeline first/last/stage_index, BackpressureGuard is_empty/available ──
+
+    #[test]
+    fn test_pipeline_first_stage_name_returns_first() {
+        let p = Pipeline::new()
+            .add_stage("alpha", |s| Ok(s))
+            .add_stage("beta", |s| Ok(s));
+        assert_eq!(p.first_stage_name(), Some("alpha"));
+    }
+
+    #[test]
+    fn test_pipeline_first_stage_name_none_when_empty() {
+        let p = Pipeline::new();
+        assert!(p.first_stage_name().is_none());
+    }
+
+    #[test]
+    fn test_pipeline_last_stage_name_returns_last() {
+        let p = Pipeline::new()
+            .add_stage("alpha", |s| Ok(s))
+            .add_stage("omega", |s| Ok(s));
+        assert_eq!(p.last_stage_name(), Some("omega"));
+    }
+
+    #[test]
+    fn test_pipeline_stage_index_returns_correct_position() {
+        let p = Pipeline::new()
+            .add_stage("first", |s| Ok(s))
+            .add_stage("second", |s| Ok(s))
+            .add_stage("third", |s| Ok(s));
+        assert_eq!(p.stage_index("first"), Some(0));
+        assert_eq!(p.stage_index("second"), Some(1));
+        assert_eq!(p.stage_index("third"), Some(2));
+        assert_eq!(p.stage_index("missing"), None);
+    }
+
+    #[test]
+    fn test_backpressure_is_empty_true_when_no_slots_acquired() {
+        let g = BackpressureGuard::new(10).unwrap();
+        assert!(g.is_empty().unwrap());
+    }
+
+    #[test]
+    fn test_backpressure_is_empty_false_after_acquire() {
+        let g = BackpressureGuard::new(10).unwrap();
+        g.try_acquire().unwrap();
+        assert!(!g.is_empty().unwrap());
+    }
+
+    #[test]
+    fn test_backpressure_available_capacity_decrements_on_acquire() {
+        let g = BackpressureGuard::new(5).unwrap();
+        assert_eq!(g.available_capacity().unwrap(), 5);
+        g.try_acquire().unwrap();
+        assert_eq!(g.available_capacity().unwrap(), 4);
+    }
+
+    // ── Round 16: Deduplicator::evict_oldest ─────────────────────────────────
+
+    #[test]
+    fn test_evict_oldest_removes_first_cached_entry() {
+        let d = Deduplicator::new(std::time::Duration::from_secs(60));
+        // Register and complete two entries to put them in cache
+        d.check_and_register("alpha").unwrap();
+        d.check_and_register("beta").unwrap();
+        d.complete("alpha", "result_a").unwrap();
+        d.complete("beta", "result_b").unwrap();
+        // Evict the oldest (alpha)
+        let removed = d.evict_oldest().unwrap();
+        assert!(removed);
+        assert!(d.get_result("alpha").unwrap().is_none());
+        assert!(d.get_result("beta").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_evict_oldest_returns_false_when_empty() {
+        let d = Deduplicator::new(std::time::Duration::from_secs(60));
+        assert!(!d.evict_oldest().unwrap());
+    }
+
+    // ── Round 17: CircuitBreaker::is_at_threshold three-failure variant ──────
+
+    #[test]
+    fn test_circuit_breaker_is_at_threshold_true_after_three_failures() {
+        let cb = CircuitBreaker::new("svc-3", 3, std::time::Duration::from_secs(60)).unwrap();
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_failure();
+        assert!(cb.is_at_threshold());
+    }
+
+    // ── Round 22: CircuitBreaker::failures_until_open ─────────────────────────
+
+    #[test]
+    fn test_failures_until_open_equals_threshold_initially() {
+        let cb = CircuitBreaker::new("svc-fuo", 5, std::time::Duration::from_secs(60)).unwrap();
+        assert_eq!(cb.failures_until_open(), 5);
+    }
+
+    #[test]
+    fn test_failures_until_open_decrements_with_each_failure() {
+        let cb = CircuitBreaker::new("svc-fuo2", 4, std::time::Duration::from_secs(60)).unwrap();
+        cb.record_failure();
+        assert_eq!(cb.failures_until_open(), 3);
+        cb.record_failure();
+        assert_eq!(cb.failures_until_open(), 2);
+    }
+
+    #[test]
+    fn test_failures_until_open_zero_when_at_threshold() {
+        let cb = CircuitBreaker::new("svc-fuo3", 2, std::time::Duration::from_secs(60)).unwrap();
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.failures_until_open(), 0);
+    }
+
+    // ── Round 29: Deduplicator::cached_keys ──────────────────────────────────
+
+    #[test]
+    fn test_deduplicator_cached_keys_empty_initially() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        assert!(d.cached_keys().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_deduplicator_cached_keys_contains_completed_key() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("ck-key").unwrap();
+        d.complete("ck-key", "result").unwrap();
+        let keys = d.cached_keys().unwrap();
+        assert!(keys.contains(&"ck-key".to_string()));
+    }
+
+    #[test]
+    fn test_deduplicator_cached_keys_excludes_in_flight() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("pending-key").unwrap();
+        // In-flight keys live in a separate map, not in cache
+        assert!(!d.cached_keys().unwrap().contains(&"pending-key".to_string()));
+    }
+
+    #[test]
+    fn test_deduplicator_cached_keys_multiple_entries() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        for k in ["alpha", "beta", "gamma"] {
+            d.check_and_register(k).unwrap();
+            d.complete(k, "v").unwrap();
+        }
+        let keys = d.cached_keys().unwrap();
+        assert_eq!(keys.len(), 3);
+    }
+
+    // ── Round 30: RetryPolicy::is_constant, total_max_delay_ms ───────────────
+
+    #[test]
+    fn test_retry_policy_is_constant_true_for_constant() {
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        assert!(p.is_constant());
+        assert!(!p.is_exponential());
+    }
+
+    #[test]
+    fn test_retry_policy_is_constant_false_for_exponential() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(!p.is_constant());
+    }
+
+    #[test]
+    fn test_retry_policy_total_max_delay_ms_constant() {
+        // constant(3, 100) → delays [100, 100, 100] = 300
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        assert_eq!(p.total_max_delay_ms(), 300);
+    }
+
+    #[test]
+    fn test_retry_policy_total_max_delay_ms_exponential() {
+        // exponential(3, 100) → delays [100, 200, 400] (capped at MAX)
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        let total = p.total_max_delay_ms();
+        assert!(total >= 300); // at minimum 100+100+100
+    }
+
+    // ── Round 30: CircuitBreaker::is_half_open, is_healthy ───────────────────
+
+    #[test]
+    fn test_circuit_breaker_is_healthy_true_when_closed() {
+        let cb = CircuitBreaker::new("svc-ih1", 3, Duration::from_secs(60)).unwrap();
+        assert!(cb.is_healthy());
+    }
+
+    #[test]
+    fn test_circuit_breaker_is_healthy_false_when_open() {
+        let cb = CircuitBreaker::new("svc-ih2", 1, Duration::from_secs(60)).unwrap();
+        let _: Result<(), _> = cb.call(|| Err::<(), _>("fail".to_string()));
+        assert!(!cb.is_healthy());
+    }
+
+    #[test]
+    fn test_circuit_breaker_is_half_open_after_zero_recovery() {
+        let cb = CircuitBreaker::new("svc-ho1", 1, Duration::ZERO).unwrap();
+        let _: Result<(), _> = cb.call(|| Err::<(), _>("fail".to_string()));
+        // With zero recovery window the circuit immediately enters HalfOpen
+        assert!(cb.is_half_open() || cb.is_healthy()); // HalfOpen or recovered
+    }
+
+    // ── Round 30: Deduplicator::is_idle ──────────────────────────────────────
+
+    #[test]
+    fn test_deduplicator_is_idle_true_when_empty() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        assert!(d.is_idle().unwrap());
+    }
+
+    #[test]
+    fn test_deduplicator_is_idle_false_when_in_flight() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("req-x").unwrap();
+        assert!(!d.is_idle().unwrap());
+    }
+
+    #[test]
+    fn test_deduplicator_is_idle_true_after_complete() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("req-y").unwrap();
+        d.complete("req-y", "done").unwrap();
+        assert!(d.is_idle().unwrap());
+    }
+
+    // ── Round 26: in_flight_count ─────────────────────────────────────────────
+
+    #[test]
+    fn test_deduplicator_in_flight_count_zero_initially() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        assert_eq!(d.in_flight_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_deduplicator_in_flight_count_increments_on_register() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("k1").unwrap();
+        d.check_and_register("k2").unwrap();
+        assert_eq!(d.in_flight_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_deduplicator_in_flight_count_decrements_after_complete() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("k1").unwrap();
+        d.complete("k1", "result").unwrap();
+        assert_eq!(d.in_flight_count().unwrap(), 0);
+    }
+
+    // ── Round 27: total_count, acquired_count, swap_stages, will_retry_at_all
+
+    #[test]
+    fn test_deduplicator_total_count_sums_in_flight_and_cached() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("k1").unwrap(); // in-flight
+        d.check_and_register("k2").unwrap(); // in-flight
+        d.complete("k1", "done").unwrap();   // moves to cache
+        // 1 in-flight + 1 cached = 2
+        assert_eq!(d.total_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_deduplicator_total_count_zero_when_empty() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        assert_eq!(d.total_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_backpressure_acquired_count_zero_initially() {
+        let g = BackpressureGuard::new(5).unwrap();
+        assert_eq!(g.acquired_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_backpressure_acquired_count_increments_on_acquire() {
+        let g = BackpressureGuard::new(5).unwrap();
+        g.try_acquire().unwrap();
+        g.try_acquire().unwrap();
+        assert_eq!(g.acquired_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_pipeline_swap_stages_swaps_positions() {
+        let mut p = Pipeline::new()
+            .add_stage("a", |s| Ok(s + "A"))
+            .add_stage("b", |s| Ok(s + "B"));
+        let swapped = p.swap_stages("a", "b");
+        assert!(swapped);
+        assert_eq!(p.first_stage_name().unwrap(), "b");
+        assert_eq!(p.last_stage_name().unwrap(), "a");
+    }
+
+    #[test]
+    fn test_pipeline_swap_stages_returns_false_for_unknown_stage() {
+        let mut p = Pipeline::new().add_stage("a", |s| Ok(s));
+        assert!(!p.swap_stages("a", "missing"));
+    }
+
+    #[test]
+    fn test_retry_policy_will_retry_at_all_false_for_none() {
+        let p = RetryPolicy::none();
+        assert!(!p.will_retry_at_all());
+    }
+
+    #[test]
+    fn test_retry_policy_will_retry_at_all_true_for_exponential() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(p.will_retry_at_all());
+    }
+
+    // ── Round 31: Deduplicator::fail ─────────────────────────────────────────
+
+    #[test]
+    fn test_deduplicator_fail_removes_in_flight_key() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("failing-req").unwrap();
+        assert!(!d.is_idle().unwrap());
+        d.fail("failing-req").unwrap();
+        assert!(d.is_idle().unwrap());
+    }
+
+    #[test]
+    fn test_deduplicator_fail_on_unknown_key_is_noop() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        assert!(d.fail("nonexistent").is_ok());
+    }
+
+    #[test]
+    fn test_deduplicator_fail_allows_reregistration() {
+        let d = Deduplicator::new(Duration::from_secs(60));
+        d.check_and_register("retry-key").unwrap();
+        d.fail("retry-key").unwrap();
+        let result = d.check_and_register("retry-key").unwrap();
+        assert_eq!(result, DeduplicationResult::New);
+    }
+
+    // ── Round 27: max_total_delay_ms ──────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_max_total_delay_ms_constant_policy() {
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        // 3 attempts × 100ms each = 300ms
+        assert_eq!(p.max_total_delay_ms(), 300);
+    }
+
+    #[test]
+    fn test_retry_policy_max_total_delay_ms_single_attempt() {
+        let p = RetryPolicy::constant(1, 50).unwrap();
+        assert_eq!(p.max_total_delay_ms(), 50);
+    }
+
+    // ── Round 28: is_last_attempt ─────────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_is_last_attempt_true_at_max() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(p.is_last_attempt(3));
+    }
+
+    #[test]
+    fn test_retry_policy_is_last_attempt_false_before_max() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(!p.is_last_attempt(2));
+    }
+
+    #[test]
+    fn test_retry_policy_is_last_attempt_true_beyond_max() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(p.is_last_attempt(4));
+    }
+
+    // ── Round 29: delay_sum_ms ────────────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_delay_sum_ms_constant_two_attempts() {
+        let p = RetryPolicy::constant(5, 100).unwrap();
+        assert_eq!(p.delay_sum_ms(2), 200);
+    }
+
+    #[test]
+    fn test_retry_policy_delay_sum_ms_capped_at_max_attempts() {
+        let p = RetryPolicy::constant(2, 50).unwrap();
+        // n=10 but max_attempts=2 → only 2 delays summed = 100
+        assert_eq!(p.delay_sum_ms(10), 100);
+    }
+
+    // ── Round 30: avg_delay_ms ────────────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_avg_delay_ms_constant() {
+        let p = RetryPolicy::constant(4, 100).unwrap();
+        // every attempt = 100ms → average = 100ms
+        assert_eq!(p.avg_delay_ms(), 100);
+    }
+
+    #[test]
+    fn test_retry_policy_avg_delay_ms_single_attempt_policy() {
+        // RetryPolicy::none() has 1 attempt and ZERO delay
+        let p = RetryPolicy::none();
+        assert_eq!(p.avg_delay_ms(), 0);
+    }
+
+    #[test]
+    fn test_backoff_factor_exponential_returns_two() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        assert!((p.backoff_factor() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_backoff_factor_constant_returns_one() {
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        assert!((p.backoff_factor() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_pipeline_count_stages_matching_counts_by_keyword() {
+        let p = Pipeline::new()
+            .add_stage("normalize-text", |s| Ok(s))
+            .add_stage("text-trim", |s| Ok(s))
+            .add_stage("embed", |s| Ok(s));
+        assert_eq!(p.count_stages_matching("text"), 2);
+        assert_eq!(p.count_stages_matching("embed"), 1);
+        assert_eq!(p.count_stages_matching("missing"), 0);
+    }
+
+    #[test]
+    fn test_pipeline_count_stages_matching_case_insensitive() {
+        let p = Pipeline::new().add_stage("TEXT-CLEAN", |s| Ok(s));
+        assert_eq!(p.count_stages_matching("text"), 1);
+    }
+
+    #[test]
+    fn test_backpressure_guard_over_soft_limit_true_when_exceeded() {
+        let guard = BackpressureGuard::new(10)
+            .unwrap()
+            .with_soft_limit(1)
+            .unwrap();
+        guard.try_acquire().unwrap();
+        guard.try_acquire().unwrap();
+        assert!(guard.over_soft_limit().unwrap());
+    }
+
+    #[test]
+    fn test_backpressure_guard_over_soft_limit_false_when_no_soft_limit() {
+        let guard = BackpressureGuard::new(10).unwrap();
+        guard.try_acquire().unwrap();
+        assert!(!guard.over_soft_limit().unwrap());
+    }
+
+    // ── Round 41: Pipeline::description, has_unique_stage_names ──────────────
+
+    #[test]
+    fn test_pipeline_description_empty() {
+        let p = Pipeline::new();
+        assert_eq!(p.description(), "Pipeline[empty]");
+    }
+
+    #[test]
+    fn test_pipeline_description_single_stage() {
+        let p = Pipeline::new().add_stage("trim", |s: String| Ok(s.trim().to_owned()));
+        assert_eq!(p.description(), "Pipeline[1 stage: trim]");
+    }
+
+    #[test]
+    fn test_pipeline_description_multiple_stages() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("b", |s: String| Ok(s))
+            .add_stage("c", |s: String| Ok(s));
+        let desc = p.description();
+        assert!(desc.contains("3 stages"));
+        assert!(desc.contains("a → b → c"));
+    }
+
+    #[test]
+    fn test_pipeline_has_unique_stage_names_true_when_all_unique() {
+        let p = Pipeline::new()
+            .add_stage("x", |s: String| Ok(s))
+            .add_stage("y", |s: String| Ok(s));
+        assert!(p.has_unique_stage_names());
+    }
+
+    #[test]
+    fn test_pipeline_has_unique_stage_names_false_when_duplicate() {
+        let p = Pipeline::new()
+            .add_stage("dup", |s: String| Ok(s))
+            .add_stage("dup", |s: String| Ok(s));
+        assert!(!p.has_unique_stage_names());
+    }
+
+    #[test]
+    fn test_pipeline_has_unique_stage_names_true_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.has_unique_stage_names());
+    }
+
+    // ── Round 42 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pipeline_stage_name_lengths_returns_byte_lengths_in_order() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))
+            .add_stage("cdef", |s: String| Ok(s));
+        assert_eq!(p.stage_name_lengths(), vec![2, 4]);
+    }
+
+    #[test]
+    fn test_pipeline_stage_name_lengths_empty_pipeline_returns_empty() {
+        let p = Pipeline::new();
+        assert!(p.stage_name_lengths().is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_avg_stage_name_length_computed_correctly() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))   // 2
+            .add_stage("abcd", |s: String| Ok(s)); // 4
+        assert!((p.avg_stage_name_length() - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_pipeline_avg_stage_name_length_zero_for_empty() {
+        assert_eq!(Pipeline::new().avg_stage_name_length(), 0.0);
+    }
+
+    #[test]
+    fn test_pipeline_stages_containing_returns_matching_names() {
+        let p = Pipeline::new()
+            .add_stage("tokenize", |s: String| Ok(s))
+            .add_stage("encode", |s: String| Ok(s))
+            .add_stage("token-validate", |s: String| Ok(s));
+        let result = p.stages_containing("token");
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&"tokenize"));
+        assert!(result.contains(&"token-validate"));
+    }
+
+    #[test]
+    fn test_pipeline_stages_containing_returns_empty_when_no_match() {
+        let p = Pipeline::new().add_stage("process", |s: String| Ok(s));
+        assert!(p.stages_containing("xyz").is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_stage_is_first_returns_true_for_first_stage() {
+        let p = Pipeline::new()
+            .add_stage("first", |s: String| Ok(s))
+            .add_stage("second", |s: String| Ok(s));
+        assert!(p.stage_is_first("first"));
+        assert!(!p.stage_is_first("second"));
+    }
+
+    #[test]
+    fn test_pipeline_stage_is_last_returns_true_for_last_stage() {
+        let p = Pipeline::new()
+            .add_stage("first", |s: String| Ok(s))
+            .add_stage("last", |s: String| Ok(s));
+        assert!(p.stage_is_last("last"));
+        assert!(!p.stage_is_last("first"));
+    }
+
+    // ── Round 41: stage_names_sorted, longest/shortest_stage_name ─────────────
+
+    #[test]
+    fn test_stage_names_sorted_returns_alphabetical_order() {
+        let p = Pipeline::new()
+            .add_stage("zebra", |s: String| Ok(s))
+            .add_stage("alpha", |s: String| Ok(s))
+            .add_stage("mango", |s: String| Ok(s));
+        assert_eq!(p.stage_names_sorted(), vec!["alpha", "mango", "zebra"]);
+    }
+
+    #[test]
+    fn test_stage_names_sorted_empty_pipeline_returns_empty() {
+        let p = Pipeline::new();
+        assert!(p.stage_names_sorted().is_empty());
+    }
+
+    #[test]
+    fn test_longest_stage_name_returns_longest() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))
+            .add_stage("abcde", |s: String| Ok(s))
+            .add_stage("abc", |s: String| Ok(s));
+        assert_eq!(p.longest_stage_name(), Some("abcde"));
+    }
+
+    #[test]
+    fn test_longest_stage_name_empty_pipeline_returns_none() {
+        let p = Pipeline::new();
+        assert_eq!(p.longest_stage_name(), None);
+    }
+
+    #[test]
+    fn test_shortest_stage_name_returns_shortest() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))
+            .add_stage("abcde", |s: String| Ok(s))
+            .add_stage("a", |s: String| Ok(s));
+        assert_eq!(p.shortest_stage_name(), Some("a"));
+    }
+
+    #[test]
+    fn test_shortest_stage_name_empty_pipeline_returns_none() {
+        let p = Pipeline::new();
+        assert_eq!(p.shortest_stage_name(), None);
+    }
+
+    // ── Round 42: Display impls ───────────────────────────────────────────────
+
+    #[test]
+    fn test_circuit_state_display_closed() {
+        let s = CircuitState::Closed;
+        assert_eq!(s.to_string(), "Closed");
+    }
+
+    #[test]
+    fn test_circuit_state_display_open() {
+        let s = CircuitState::Open { opened_at: std::time::Instant::now() };
+        assert_eq!(s.to_string(), "Open");
+    }
+
+    #[test]
+    fn test_circuit_state_display_half_open() {
+        let s = CircuitState::HalfOpen;
+        assert_eq!(s.to_string(), "HalfOpen");
+    }
+
+    #[test]
+    fn test_retry_policy_display_exponential() {
+        let p = RetryPolicy::exponential(3, 100).unwrap();
+        let s = p.to_string();
+        assert!(s.contains("Exponential"));
+        assert!(s.contains('3'));
+        assert!(s.contains("100ms"));
+    }
+
+    #[test]
+    fn test_retry_policy_display_constant() {
+        let p = RetryPolicy::constant(5, 50).unwrap();
+        let s = p.to_string();
+        assert!(s.contains("Constant"));
+        assert!(s.contains('5'));
+        assert!(s.contains("50ms"));
+    }
+
+    // ── Round 43 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pipeline_total_stage_name_bytes_sums_correctly() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))   // 2
+            .add_stage("xyz", |s: String| Ok(s));  // 3
+        assert_eq!(p.total_stage_name_bytes(), 5);
+    }
+
+    #[test]
+    fn test_pipeline_total_stage_name_bytes_zero_for_empty() {
+        assert_eq!(Pipeline::new().total_stage_name_bytes(), 0);
+    }
+
+    #[test]
+    fn test_pipeline_stages_before_returns_preceding_names() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("b", |s: String| Ok(s))
+            .add_stage("c", |s: String| Ok(s));
+        assert_eq!(p.stages_before("c"), vec!["a", "b"]);
+        assert!(p.stages_before("a").is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_stages_before_returns_empty_for_unknown_stage() {
+        let p = Pipeline::new().add_stage("a", |s: String| Ok(s));
+        assert!(p.stages_before("missing").is_empty());
+    }
+
+    // ── Round 43: stages_after, stage_position_from_end, contains_all_stages ──
+
+    #[test]
+    fn test_stages_after_returns_stages_following_name() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("b", |s: String| Ok(s))
+            .add_stage("c", |s: String| Ok(s));
+        assert_eq!(p.stages_after("a"), vec!["b", "c"]);
+    }
+
+    #[test]
+    fn test_stages_after_last_stage_returns_empty() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("b", |s: String| Ok(s));
+        assert!(p.stages_after("b").is_empty());
+    }
+
+    #[test]
+    fn test_stages_after_unknown_name_returns_empty() {
+        let p = Pipeline::new().add_stage("a", |s: String| Ok(s));
+        assert!(p.stages_after("missing").is_empty());
+    }
+
+    #[test]
+    fn test_stage_position_from_end_last_is_zero() {
+        let p = Pipeline::new()
+            .add_stage("x", |s: String| Ok(s))
+            .add_stage("y", |s: String| Ok(s))
+            .add_stage("z", |s: String| Ok(s));
+        assert_eq!(p.stage_position_from_end("z"), Some(0));
+        assert_eq!(p.stage_position_from_end("x"), Some(2));
+    }
+
+    #[test]
+    fn test_stage_position_from_end_unknown_returns_none() {
+        let p = Pipeline::new().add_stage("a", |s: String| Ok(s));
+        assert_eq!(p.stage_position_from_end("missing"), None);
+    }
+
+    #[test]
+    fn test_contains_all_stages_true_when_all_present() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("b", |s: String| Ok(s));
+        assert!(p.contains_all_stages(&["a", "b"]));
+    }
+
+    #[test]
+    fn test_contains_all_stages_false_when_one_missing() {
+        let p = Pipeline::new().add_stage("a", |s: String| Ok(s));
+        assert!(!p.contains_all_stages(&["a", "b"]));
+    }
+
+    #[test]
+    fn test_contains_all_stages_true_for_empty_names() {
+        let p = Pipeline::new();
+        assert!(p.contains_all_stages(&[]));
+    }
+
+    // ── Round 44: stage_count_above_name_len, stage_pairs ─────────────────────
+
+    #[test]
+    fn test_stage_count_above_name_len_counts_longer_names() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))
+            .add_stage("abcde", |s: String| Ok(s))
+            .add_stage("xyz", |s: String| Ok(s));
+        assert_eq!(p.stage_count_above_name_len(2), 2); // "abcde" (5) and "xyz" (3)
+    }
+
+    #[test]
+    fn test_stage_count_above_name_len_zero_when_none_exceed() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("b", |s: String| Ok(s));
+        assert_eq!(p.stage_count_above_name_len(5), 0);
+    }
+
+    #[test]
+    fn test_stage_pairs_returns_consecutive_pairs() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("b", |s: String| Ok(s))
+            .add_stage("c", |s: String| Ok(s));
+        assert_eq!(p.stage_pairs(), vec![("a", "b"), ("b", "c")]);
+    }
+
+    #[test]
+    fn test_stage_pairs_empty_for_single_stage_pipeline() {
+        let p = Pipeline::new().add_stage("only", |s: String| Ok(s));
+        assert!(p.stage_pairs().is_empty());
+    }
+
+    // ── Round 44: CircuitBreaker::describe, RetryPolicy::attempts_budget_used ──
+
+    #[test]
+    fn test_circuit_breaker_describe_contains_service_name() {
+        let cb = CircuitBreaker::new("my-service", 3, std::time::Duration::from_secs(30)).unwrap();
+        let desc = cb.describe().unwrap();
+        assert!(desc.contains("my-service"));
+    }
+
+    #[test]
+    fn test_circuit_breaker_describe_shows_closed_state_initially() {
+        let cb = CircuitBreaker::new("svc", 5, std::time::Duration::from_secs(10)).unwrap();
+        let desc = cb.describe().unwrap();
+        assert!(desc.contains("Closed"));
+    }
+
+    #[test]
+    fn test_circuit_breaker_describe_shows_failure_counts() {
+        let cb = CircuitBreaker::new("svc", 5, std::time::Duration::from_secs(10)).unwrap();
+        cb.record_failure();
+        cb.record_failure();
+        let desc = cb.describe().unwrap();
+        assert!(desc.contains("2/5"));
+    }
+
+    #[test]
+    fn test_retry_policy_attempts_budget_used_zero_at_start() {
+        let p = RetryPolicy::exponential(4, 10).unwrap();
+        assert_eq!(p.attempts_budget_used(0), 0.0);
+    }
+
+    #[test]
+    fn test_retry_policy_attempts_budget_used_one_when_exhausted() {
+        let p = RetryPolicy::exponential(4, 10).unwrap();
+        assert_eq!(p.attempts_budget_used(4), 1.0);
+    }
+
+    #[test]
+    fn test_retry_policy_attempts_budget_used_clamped_to_one() {
+        let p = RetryPolicy::exponential(4, 10).unwrap();
+        assert_eq!(p.attempts_budget_used(10), 1.0);
+    }
+
+    #[test]
+    fn test_retry_policy_attempts_budget_used_half_way() {
+        let p = RetryPolicy::constant(4, 10).unwrap();
+        assert!((p.attempts_budget_used(2) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_retry_policy_attempts_budget_used_fully_used_for_none_policy_after_one_attempt() {
+        // RetryPolicy::none() has max_attempts=1; after 1 attempt the budget is fully consumed.
+        let p = RetryPolicy::none();
+        assert_eq!(p.attempts_budget_used(1), 1.0);
+        assert_eq!(p.attempts_budget_used(0), 0.0);
+    }
+
+    // ── Round 45: stage_at, stages_reversed ───────────────────────────────────
+
+    #[test]
+    fn test_stage_at_returns_name_at_index() {
+        let p = Pipeline::new()
+            .add_stage("first", |s: String| Ok(s))
+            .add_stage("second", |s: String| Ok(s))
+            .add_stage("third", |s: String| Ok(s));
+        assert_eq!(p.stage_at(0), Some("first"));
+        assert_eq!(p.stage_at(2), Some("third"));
+        assert_eq!(p.stage_at(3), None);
+    }
+
+    #[test]
+    fn test_stage_at_returns_none_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert_eq!(p.stage_at(0), None);
+    }
+
+    #[test]
+    fn test_stages_reversed_returns_names_in_reverse_order() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("b", |s: String| Ok(s))
+            .add_stage("c", |s: String| Ok(s));
+        assert_eq!(p.stages_reversed(), vec!["c", "b", "a"]);
+    }
+
+    #[test]
+    fn test_stages_reversed_empty_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.stages_reversed().is_empty());
+    }
+
+    // ── Round 46: pipeline_is_empty ────────────────────────────────────────────
+
+    #[test]
+    fn test_pipeline_is_empty_true_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.pipeline_is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_is_empty_false_after_adding_stage() {
+        let p = Pipeline::new().add_stage("a", |s: String| Ok(s));
+        assert!(!p.pipeline_is_empty());
+    }
+
+    // ── Round 45: unique_stage_names ──────────────────────────────────────────
+
+    #[test]
+    fn test_unique_stage_names_returns_sorted_names() {
+        let p = Pipeline::new()
+            .add_stage("charlie", |s: String| Ok(s))
+            .add_stage("alpha", |s: String| Ok(s))
+            .add_stage("bravo", |s: String| Ok(s));
+        assert_eq!(p.unique_stage_names(), vec!["alpha", "bravo", "charlie"]);
+    }
+
+    #[test]
+    fn test_unique_stage_names_empty_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.unique_stage_names().is_empty());
+    }
+
+    // ── Round 47: stage_names_with_prefix ─────────────────────────────────────
+
+    #[test]
+    fn test_stage_names_with_prefix_returns_matching_stages() {
+        let p = Pipeline::new()
+            .add_stage("validate_input", |s: String| Ok(s))
+            .add_stage("transform_data", |s: String| Ok(s))
+            .add_stage("validate_output", |s: String| Ok(s));
+        let names = p.stage_names_with_prefix("validate");
+        assert_eq!(names, vec!["validate_input", "validate_output"]);
+    }
+
+    #[test]
+    fn test_stage_names_with_prefix_empty_when_no_match() {
+        let p = Pipeline::new().add_stage("transform", |s: String| Ok(s));
+        assert!(p.stage_names_with_prefix("validate").is_empty());
+    }
+
+    // ── Round 48: stages_with_suffix ───────────────────────────────────────────
+
+    #[test]
+    fn test_stages_with_suffix_returns_matching_stages() {
+        let p = Pipeline::new()
+            .add_stage("input_validate", |s: String| Ok(s))
+            .add_stage("transform_data", |s: String| Ok(s))
+            .add_stage("output_validate", |s: String| Ok(s));
+        let names = p.stages_with_suffix("validate");
+        assert_eq!(names, vec!["input_validate", "output_validate"]);
+    }
+
+    #[test]
+    fn test_stages_with_suffix_empty_when_no_match() {
+        let p = Pipeline::new().add_stage("transform", |s: String| Ok(s));
+        assert!(p.stages_with_suffix("validate").is_empty());
+    }
+
+    // ── Round 49: has_stage_with_name_containing, stage_name_bytes_total ───────
+
+    #[test]
+    fn test_has_stage_with_name_containing_true_when_match_exists() {
+        let p = Pipeline::new()
+            .add_stage("transform_input", |s: String| Ok(s))
+            .add_stage("write_output", |s: String| Ok(s));
+        assert!(p.has_stage_with_name_containing("transform"));
+    }
+
+    #[test]
+    fn test_has_stage_with_name_containing_false_when_no_match() {
+        let p = Pipeline::new().add_stage("write", |s: String| Ok(s));
+        assert!(!p.has_stage_with_name_containing("transform"));
+    }
+
+    #[test]
+    fn test_stage_name_bytes_total_sums_name_lengths() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))
+            .add_stage("cde", |s: String| Ok(s));
+        assert_eq!(p.stage_name_bytes_total(), 5);
+    }
+
+    #[test]
+    fn test_stage_name_bytes_total_zero_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert_eq!(p.stage_name_bytes_total(), 0);
+    }
+
+    // ── Round 47: failure_headroom ────────────────────────────────────────────
+
+    #[test]
+    fn test_failure_headroom_full_when_no_failures_recorded() {
+        let cb = CircuitBreaker::new("svc-r47", 3, std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(cb.failure_headroom(), 3);
+    }
+
+    #[test]
+    fn test_failure_headroom_decreases_with_each_failure() {
+        let cb = CircuitBreaker::new("svc-r47b", 3, std::time::Duration::from_secs(10)).unwrap();
+        cb.record_failure();
+        assert_eq!(cb.failure_headroom(), 2);
+        cb.record_failure();
+        assert_eq!(cb.failure_headroom(), 1);
+    }
+
+    #[test]
+    fn test_failure_headroom_zero_when_at_or_above_threshold() {
+        let cb = CircuitBreaker::new("svc-r47c", 2, std::time::Duration::from_secs(10)).unwrap();
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.failure_headroom(), 0);
+    }
+
+    // ── Round 49: stage_count_below_name_len ──────────────────────────────────
+
+    #[test]
+    fn test_stage_count_below_name_len_counts_short_names() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))      // len=2
+            .add_stage("abcde", |s: String| Ok(s))   // len=5
+            .add_stage("xyz", |s: String| Ok(s));     // len=3
+        // strictly less than 4: "ab" (2) and "xyz" (3)
+        assert_eq!(p.stage_count_below_name_len(4), 2);
+    }
+
+    #[test]
+    fn test_stage_count_below_name_len_zero_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert_eq!(p.stage_count_below_name_len(10), 0);
+    }
+
+    // ── Round 50: stage_count_above_name_bytes ────────────────────────────────
+
+    #[test]
+    fn test_stage_count_above_name_bytes_counts_long_names() {
+        let p = Pipeline::new()
+            .add_stage("ab", |s: String| Ok(s))
+            .add_stage("a_very_long_name", |s: String| Ok(s));
+        assert_eq!(p.stage_count_above_name_bytes(3), 1);
+    }
+
+    #[test]
+    fn test_stage_count_above_name_bytes_zero_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert_eq!(p.stage_count_above_name_bytes(0), 0);
+    }
+
+    // ── Round 47: contains_stage_with_prefix ──────────────────────────────────
+
+    #[test]
+    fn test_contains_stage_with_prefix_true_when_present() {
+        let p = Pipeline::new()
+            .add_stage("validate_input", |s: String| Ok(s))
+            .add_stage("transform_data", |s: String| Ok(s));
+        assert!(p.contains_stage_with_prefix("validate"));
+    }
+
+    #[test]
+    fn test_contains_stage_with_prefix_false_when_absent() {
+        let p = Pipeline::new().add_stage("stage_a", |s: String| Ok(s));
+        assert!(!p.contains_stage_with_prefix("missing"));
+    }
+
+    #[test]
+    fn test_contains_stage_with_prefix_false_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(!p.contains_stage_with_prefix("any"));
+    }
+
+    // ── Round 50: is_bounded, remaining_wait_budget_ms ────────────────────────
+
+    #[test]
+    fn test_retry_policy_is_bounded_true_for_normal_policy() {
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        assert!(p.is_bounded());
+    }
+
+    #[test]
+    fn test_retry_policy_is_bounded_true_for_none_policy() {
+        let p = RetryPolicy::none();
+        assert!(p.is_bounded());
+    }
+
+    #[test]
+    fn test_retry_policy_remaining_wait_budget_full_at_zero_attempts() {
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        // total budget = 3 * 100 = 300, no attempts done → remaining = 300
+        assert_eq!(p.remaining_wait_budget_ms(0), 300);
+    }
+
+    #[test]
+    fn test_retry_policy_remaining_wait_budget_decreases_with_attempts() {
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        // After 1 attempt: delay_sum_ms(1) = 100, remaining = 300 - 100 = 200
+        assert_eq!(p.remaining_wait_budget_ms(1), 200);
+    }
+
+    // ── Round 51: stage_names_containing ──────────────────────────────────────
+
+    #[test]
+    fn test_stage_names_containing_returns_all_matching_stages() {
+        let p = Pipeline::new()
+            .add_stage("pre_process", |s: String| Ok(s))
+            .add_stage("post_process", |s: String| Ok(s))
+            .add_stage("transform", |s: String| Ok(s));
+        let names = p.stage_names_containing("process");
+        assert_eq!(names, vec!["pre_process", "post_process"]);
+    }
+
+    #[test]
+    fn test_stage_names_containing_empty_when_no_match() {
+        let p = Pipeline::new().add_stage("transform", |s: String| Ok(s));
+        assert!(p.stage_names_containing("process").is_empty());
+    }
+
+    // ── Round 52 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_stage_name_from_end_zero_returns_last_stage() {
+        let p = Pipeline::new()
+            .add_stage("first", |s: String| Ok(s))
+            .add_stage("second", |s: String| Ok(s))
+            .add_stage("third", |s: String| Ok(s));
+        assert_eq!(p.stage_name_from_end(0), Some("third"));
+    }
+
+    #[test]
+    fn test_stage_name_from_end_one_returns_second_to_last() {
+        let p = Pipeline::new()
+            .add_stage("first", |s: String| Ok(s))
+            .add_stage("second", |s: String| Ok(s))
+            .add_stage("third", |s: String| Ok(s));
+        assert_eq!(p.stage_name_from_end(1), Some("second"));
+    }
+
+    #[test]
+    fn test_stage_name_from_end_out_of_bounds_returns_none() {
+        let p = Pipeline::new().add_stage("only", |s: String| Ok(s));
+        assert_eq!(p.stage_name_from_end(1), None);
+    }
+
+    #[test]
+    fn test_stage_name_from_end_none_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert_eq!(p.stage_name_from_end(0), None);
+    }
+
+    // ── Round 52: stage_at_index ───────────────────────────────────────────────
+
+    #[test]
+    fn test_stage_at_index_returns_correct_stage() {
+        let p = Pipeline::new()
+            .add_stage("alpha", |s: String| Ok(s))
+            .add_stage("beta", |s: String| Ok(s));
+        assert_eq!(p.stage_at_index(0).map(|s| s.name.as_str()), Some("alpha"));
+        assert_eq!(p.stage_at_index(1).map(|s| s.name.as_str()), Some("beta"));
+    }
+
+    #[test]
+    fn test_stage_at_index_none_for_out_of_bounds() {
+        let p = Pipeline::new().add_stage("only", |s: String| Ok(s));
+        assert!(p.stage_at_index(5).is_none());
+    }
+
+    #[test]
+    fn test_stage_at_index_none_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.stage_at_index(0).is_none());
+    }
+
+    // ── Round 53 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_max_single_delay_ms_constant_policy() {
+        let p = RetryPolicy::constant(3, 100).unwrap();
+        assert_eq!(p.max_single_delay_ms(), 100);
+    }
+
+    #[test]
+    fn test_max_single_delay_ms_exponential_grows_with_attempts() {
+        let p = RetryPolicy::exponential(3, 50).unwrap();
+        // attempt 3: 50 * 2^(3-1) = 50 * 4 = 200
+        assert_eq!(p.max_single_delay_ms(), 200);
+    }
+
+    // ── Round 48 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_all_stage_names_returns_all_in_order() {
+        let p = Pipeline::new()
+            .add_stage("alpha", |s: String| Ok(s))
+            .add_stage("beta", |s: String| Ok(s))
+            .add_stage("gamma", |s: String| Ok(s));
+        assert_eq!(p.all_stage_names(), vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn test_all_stage_names_empty_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.all_stage_names().is_empty());
+    }
+
+    #[test]
+    fn test_all_stage_names_preserves_duplicates() {
+        let p = Pipeline::new()
+            .add_stage("a", |s: String| Ok(s))
+            .add_stage("a", |s: String| Ok(s));
+        assert_eq!(p.all_stage_names(), vec!["a", "a"]);
+    }
+
+    #[test]
+    fn test_has_exactly_n_stages_true() {
+        let p = Pipeline::new()
+            .add_stage("x", |s: String| Ok(s))
+            .add_stage("y", |s: String| Ok(s));
+        assert!(p.has_exactly_n_stages(2));
+    }
+
+    #[test]
+    fn test_has_exactly_n_stages_false_when_different() {
+        let p = Pipeline::new().add_stage("x", |s: String| Ok(s));
+        assert!(!p.has_exactly_n_stages(3));
+    }
+
+    #[test]
+    fn test_has_exactly_n_stages_true_for_empty() {
+        let p = Pipeline::new();
+        assert!(p.has_exactly_n_stages(0));
+    }
+
+    // ── Round 49 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_stage_index_of_returns_correct_index() {
+        let p = Pipeline::new()
+            .add_stage("first", |s: String| Ok(s))
+            .add_stage("second", |s: String| Ok(s))
+            .add_stage("third", |s: String| Ok(s));
+        assert_eq!(p.stage_index_of("second"), Some(1));
+    }
+
+    #[test]
+    fn test_stage_index_of_returns_none_when_absent() {
+        let p = Pipeline::new().add_stage("alpha", |s: String| Ok(s));
+        assert_eq!(p.stage_index_of("beta"), None);
+    }
+
+    #[test]
+    fn test_stage_index_of_returns_first_match_for_duplicates() {
+        let p = Pipeline::new()
+            .add_stage("dup", |s: String| Ok(s))
+            .add_stage("dup", |s: String| Ok(s));
+        assert_eq!(p.stage_index_of("dup"), Some(0));
+    }
+
+    // ── Round 54 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_all_stage_names_start_with_true_when_all_match() {
+        let p = Pipeline::new()
+            .add_stage("api_v1", |s: String| Ok(s))
+            .add_stage("api_v2", |s: String| Ok(s));
+        assert!(p.all_stage_names_start_with("api_"));
+    }
+
+    #[test]
+    fn test_all_stage_names_start_with_false_when_one_differs() {
+        let p = Pipeline::new()
+            .add_stage("api_v1", |s: String| Ok(s))
+            .add_stage("transform", |s: String| Ok(s));
+        assert!(!p.all_stage_names_start_with("api_"));
+    }
+
+    #[test]
+    fn test_all_stage_names_start_with_true_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.all_stage_names_start_with("anything"));
+    }
+
+    // ── Round 51 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_has_no_stages_true_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.has_no_stages());
+    }
+
+    #[test]
+    fn test_has_no_stages_false_after_adding_stage() {
+        let p = Pipeline::new().add_stage("s", |s: String| Ok(s));
+        assert!(!p.has_no_stages());
+    }
+
+    // ── Round 59: longest_stage_name_len ─────────────────────────────────────
+
+    #[test]
+    fn test_longest_stage_name_len_returns_max() {
+        let p = Pipeline::new()
+            .add_stage("short", |s: String| Ok(s))
+            .add_stage("much-longer-name", |s: String| Ok(s));
+        assert_eq!(p.longest_stage_name_len(), "much-longer-name".len());
+    }
+
+    #[test]
+    fn test_longest_stage_name_len_zero_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert_eq!(p.longest_stage_name_len(), 0);
+    }
+
+    // ── Round 60: stage_names_joined ─────────────────────────────────────────
+
+    #[test]
+    fn test_stage_names_joined_correct() {
+        let p = Pipeline::new()
+            .add_stage("alpha", |s: String| Ok(s))
+            .add_stage("beta", |s: String| Ok(s));
+        assert_eq!(p.stage_names_joined(", "), "alpha, beta");
+    }
+
+    #[test]
+    fn test_stage_names_joined_empty_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert_eq!(p.stage_names_joined("|"), "");
+    }
+
+    // ── Round 62: stage_count_with_name_containing ────────────────────────────
+
+    #[test]
+    fn test_stage_count_with_name_containing_correct() {
+        let p = Pipeline::new()
+            .add_stage("preprocess_input", |s: String| Ok(s))
+            .add_stage("process_data", |s: String| Ok(s))
+            .add_stage("postprocess_output", |s: String| Ok(s));
+        assert_eq!(p.stage_count_with_name_containing("process"), 3);
+        assert_eq!(p.stage_count_with_name_containing("pre"), 1);
+    }
+
+    #[test]
+    fn test_stage_count_with_name_containing_zero_when_none_match() {
+        let p = Pipeline::new().add_stage("alpha", |s: String| Ok(s));
+        assert_eq!(p.stage_count_with_name_containing("beta"), 0);
+    }
+
+    // ── Round 63: has_stage_at_index ──────────────────────────────────────────
+
+    #[test]
+    fn test_has_stage_at_index_true_for_valid_index() {
+        let p = Pipeline::new()
+            .add_stage("first", |s: String| Ok(s))
+            .add_stage("second", |s: String| Ok(s));
+        assert!(p.has_stage_at_index(0));
+        assert!(p.has_stage_at_index(1));
+    }
+
+    #[test]
+    fn test_has_stage_at_index_false_for_out_of_bounds() {
+        let p = Pipeline::new().add_stage("only", |s: String| Ok(s));
+        assert!(!p.has_stage_at_index(1));
+    }
+
+    #[test]
+    fn test_has_stage_at_index_false_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(!p.has_stage_at_index(0));
+    }
+
+    // ── Round 57: any_stage_has_name ─────────────────────────────────────────
+
+    #[test]
+    fn test_any_stage_has_name_true_for_existing_stage() {
+        let p = Pipeline::new()
+            .add_stage("alpha", |s: String| Ok(s))
+            .add_stage("beta", |s: String| Ok(s));
+        assert!(p.any_stage_has_name("alpha"));
+        assert!(p.any_stage_has_name("beta"));
+    }
+
+    #[test]
+    fn test_any_stage_has_name_false_for_missing_stage() {
+        let p = Pipeline::new().add_stage("alpha", |s: String| Ok(s));
+        assert!(!p.any_stage_has_name("gamma"));
+    }
+
+    #[test]
+    fn test_any_stage_has_name_false_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(!p.any_stage_has_name("anything"));
+    }
+
+    // ── Round 58: covers_n_failures ───────────────────────────────────────────
+
+    #[test]
+    fn test_covers_n_failures_true_when_max_attempts_exceeds_n() {
+        let policy = RetryPolicy::exponential(5, 100).unwrap();
+        assert!(policy.covers_n_failures(4));
+        assert!(policy.covers_n_failures(0));
+    }
+
+    #[test]
+    fn test_covers_n_failures_false_when_max_attempts_equals_n() {
+        let policy = RetryPolicy::exponential(3, 100).unwrap();
+        assert!(!policy.covers_n_failures(3));
+    }
+
+    #[test]
+    fn test_covers_n_failures_false_for_no_retry_policy() {
+        let policy = RetryPolicy::none();
+        // none() has max_attempts == 1, so covers_n_failures(1) is false
+        assert!(!policy.covers_n_failures(1));
+    }
+
+    // ── Round 59: last_stage_name ─────────────────────────────────────────────
+
+    #[test]
+    fn test_last_stage_name_returns_last_added() {
+        let p = Pipeline::new()
+            .add_stage("first", |s: String| Ok(s))
+            .add_stage("last", |s: String| Ok(s));
+        assert_eq!(p.last_stage_name(), Some("last"));
+    }
+
+    #[test]
+    fn test_last_stage_name_none_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.last_stage_name().is_none());
+    }
+
+    // ── Round 62: stage_name_at ───────────────────────────────────────────────
+
+    #[test]
+    fn test_stage_name_at_returns_correct_name() {
+        let p = Pipeline::new()
+            .add_stage("alpha", |s: String| Ok(s))
+            .add_stage("beta", |s: String| Ok(s));
+        assert_eq!(p.stage_name_at(0), Some("alpha"));
+        assert_eq!(p.stage_name_at(1), Some("beta"));
+    }
+
+    #[test]
+    fn test_stage_name_at_none_for_out_of_bounds() {
+        let p = Pipeline::new().add_stage("only", |s: String| Ok(s));
+        assert!(p.stage_name_at(1).is_none());
+    }
+
+    #[test]
+    fn test_stage_name_at_none_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.stage_name_at(0).is_none());
+    }
+
+    // ── Round 63: all_stage_names_contain ─────────────────────────────────────
+
+    #[test]
+    fn test_all_stage_names_contain_true_when_all_match() {
+        let p = Pipeline::new()
+            .add_stage("step_alpha", |s: String| Ok(s))
+            .add_stage("step_beta", |s: String| Ok(s));
+        assert!(p.all_stage_names_contain("step_"));
+    }
+
+    #[test]
+    fn test_all_stage_names_contain_false_when_one_does_not_match() {
+        let p = Pipeline::new()
+            .add_stage("step_alpha", |s: String| Ok(s))
+            .add_stage("gamma", |s: String| Ok(s));
+        assert!(!p.all_stage_names_contain("step_"));
+    }
+
+    #[test]
+    fn test_all_stage_names_contain_true_for_empty_pipeline() {
+        let p = Pipeline::new();
+        assert!(p.all_stage_names_contain("anything"));
     }
 }

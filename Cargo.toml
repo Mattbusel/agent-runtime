@@ -1,27 +1,44 @@
 [package]
-name = "agent-runtime"
-version = "0.1.0"
+name = "llm-agent-runtime"
+version = "1.75.0"
 edition = "2021"
-description = "Unified Tokio agent runtime — orchestration, memory, knowledge graph, and ReAct loop in one crate"
-keywords = ["tokio", "agent", "llm", "memory", "runtime"]
-categories = ["asynchronous", "concurrency"]
+rust-version = "1.85"
+authors = ["Matt Busel <mattbusel@users.noreply.github.com>"]
+description = "Unified Tokio agent runtime -- orchestration, memory, knowledge graph, and ReAct loop in one crate"
+keywords = ["tokio", "agent", "llm", "memory", "graph"]
+categories = ["asynchronous", "concurrency", "data-structures"]
+license = "MIT"
+repository = "https://gitlab.com/mattbusel/agent-runtime"
+homepage = "https://gitlab.com/mattbusel/agent-runtime"
+documentation = "https://docs.rs/llm-agent-runtime"
+readme = "README.md"
+exclude = [".github/"]
 
 [features]
 default = ["orchestrator", "memory", "graph", "wasm"]
-orchestrator = []   # tokio-prompt-orchestrator integration
-memory = []         # tokio-agent-memory integration
-graph = []          # mem-graph integration
-wasm = []           # wasm-agent ReAct loop
-full = ["orchestrator", "memory", "graph", "wasm"]
+orchestrator = []       # tokio-prompt-orchestrator integration
+memory = []             # tokio-agent-memory integration
+graph = []              # mem-graph integration
+wasm = []               # wasm-agent ReAct loop
+persistence = []        # pluggable persistence backend + disk implementation
+providers = []          # LlmProvider trait
+anthropic = ["reqwest", "providers"]   # built-in Anthropic provider
+openai = ["reqwest", "providers"]      # built-in OpenAI provider
+redis-circuit-breaker = ["redis"]      # distributed circuit breaker backend
+distributed = ["redis"]               # distributed agent coordination via Redis
+otel = ["opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp"]  # OpenTelemetry tracing
+compression = []                # memory compression system (MemoryCompressor, ImportanceStrategy)
+discovery = []                  # agent capability advertisement and peer discovery (AgentRegistry)
+full = ["orchestrator", "memory", "graph", "wasm", "persistence", "providers", "anthropic", "openai", "distributed", "otel", "compression", "discovery"]
 
 [dependencies]
-# tokio: async runtime — core dependency, never remove
+# tokio: async runtime -- core dependency, never remove
 tokio = { version = "1", features = ["full"] }
 
-# thiserror: zero-cost error derive — replaces manual Display impls
-thiserror = "1"
+# thiserror: zero-cost error derive -- replaces manual Display impls
+thiserror = "2"
 
-# serde: serialization framework — needed for MemoryItem, Entity, AgentSession
+# serde: serialization framework -- needed for MemoryItem, Entity, AgentSession
 serde = { version = "1", features = ["derive"] }
 
 # serde_json: JSON value type used in graph properties and tool handlers
@@ -36,14 +53,111 @@ chrono = { version = "0.4", features = ["serde"] }
 # tracing: structured async-aware logging
 tracing = "0.1"
 
+# async-trait: object-safe async trait methods (persistence, providers, circuit breaker backends)
+async-trait = "0.1"
+
+# futures: combinators for async primitives (join_all for parallel batch ops)
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
+
+# toml: TOML parser for tool chain and skill library definitions
+toml = "0.8"
+
+# reqwest: HTTP client for built-in LLM providers (optional)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], optional = true }
+
+# redis: distributed circuit breaker backend and distributed coordinator (optional)
+redis = { version = "0.26", features = ["tokio-comp", "json"], optional = true }
+
+# opentelemetry: tracing instrumentation for tool calls (optional)
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic"], optional = true }
+
+[[example]]
+name = "custom_persistence"
+required-features = ["persistence", "memory"]
+
+[[example]]
+name = "multi_agent"
+required-features = ["memory"]
+
+[[example]]
+name = "resilient_tool"
+required-features = ["orchestrator"]
+
+[[example]]
+name = "working_memory_evolution"
+required-features = ["memory"]
+
+[[example]]
+name = "multi_turn_chat"
+required-features = ["memory"]
+
+
+[[example]]
+name = "streaming_inference"
+
+[[example]]
+name = "graph_query_agent"
+required-features = ["graph"]
+
+[[example]]
+name = "orchestrator_composition"
+required-features = ["orchestrator"]
+
+[[example]]
+name = "anthropic_provider"
+required-features = ["anthropic", "memory"]
+
+[[bench]]
+name = "memory"
+harness = false
+
+[[bench]]
+name = "agent"
+harness = false
+
 [dev-dependencies]
 # tokio-test: async test utilities
 tokio-test = "0.4"
+# tracing-subscriber: test logging setup
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# criterion: benchmarking framework
+criterion = { version = "0.5", features = ["html_reports"] }
+# proptest: property-based testing
+proptest = "1"
+# wiremock: mock HTTP server for provider integration tests
+wiremock = "0.6"
+# tempfile: temporary directories/files for checkpoint and persistence tests
+tempfile = "3"
 
+# ── Release profile (production) ────────────────────────────────────────────────
+[profile.release]
+opt-level = 3        # maximum optimization
+lto = true           # link-time optimization for smaller, faster binaries
+codegen-units = 1    # single codegen unit enables maximum LTO effectiveness
+strip = true         # strip debug symbols from the binary
+panic = "abort"      # remove panic unwinding machinery; reduces binary size ~10 %
+
+# ── Development profile (fast incremental builds) ───────────────────────────────
+[profile.dev]
+opt-level = 0
+debug = true
+
+# ── Lint configuration ──────────────────────────────────────────────────────────
 [lints.rust]
-# Enforce zero-panic production policy per CLAUDE.md
+# Warn on missing documentation for public items -- enforced at crate level via
+# #![deny(missing_docs)] in lib.rs; kept here as a belt-and-suspenders reminder.
+missing_docs = "warn"
+
 [lints.clippy]
+# Zero-panic production policy: deny all panic-inducing methods in production code.
+# Tests use #[allow(clippy::unwrap_used)] where appropriate.
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
 todo = "deny"
+# Additional quality lints
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
