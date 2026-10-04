@@ -1216,37 +1216,38 @@ use llm_agent_runtime::memory_compress::{CompressorConfig, MemoryCompressor};
 use llm_agent_runtime::memory_compression::{MemoryTurn, Role};
 use std::time::SystemTime;
 
-# tokio_test::block_on(async {
-let config = CompressorConfig {
-    max_turns: 50,          // trigger when buffer exceeds 50 turns
-    recency_keep: 10,       // always keep the 10 most-recent turns verbatim
-    jaccard_dedup_threshold: 0.85, // remove near-duplicates with ≥ 85 % word overlap
-    importance_tag: "important".to_string(),
-};
+#[tokio::main]
+async fn main() {
+    let config = CompressorConfig {
+        max_turns: 50,          // trigger when buffer exceeds 50 turns
+        recency_keep: 10,       // always keep the 10 most-recent turns verbatim
+        jaccard_dedup_threshold: 0.85, // remove near-duplicates with ≥ 85 % word overlap
+        importance_tag: "important".to_string(),
+    };
 
-let compressor = MemoryCompressor::new(config);
+    let compressor = MemoryCompressor::new(config);
 
-let turns: Vec<MemoryTurn> = (0..60).map(|i| MemoryTurn {
-    id: format!("t{i}"),
-    role: Role::User,
-    content: format!("message {i}"),
-    timestamp: SystemTime::now(),
-    importance_score: if i == 5 { 0.95 } else { 0.1 },
-    token_count: 8,
-    tags: if i == 5 { vec!["important".into()] } else { vec![] },
-}).collect();
+    let turns: Vec<MemoryTurn> = (0..60).map(|i| MemoryTurn {
+        id: format!("t{i}"),
+        role: Role::User,
+        content: format!("message {i}"),
+        timestamp: SystemTime::now(),
+        importance_score: if i == 5 { 0.95 } else { 0.1 },
+        token_count: 8,
+        tags: if i == 5 { vec!["important".into()] } else { vec![] },
+    }).collect();
 
-let (kept, episodes, triggered) = compressor.run_if_needed(turns).await;
-println!("Triggered: {triggered}");
-println!("Kept {} turns, {} compressed episodes", kept.len(), episodes.len());
+    let (kept, episodes, triggered) = compressor.run_if_needed(turns).await;
+    println!("Triggered: {triggered}");
+    println!("Kept {} turns, {} compressed episodes", kept.len(), episodes.len());
 
-for ep in &episodes {
-    println!(
-        "Episode '{}': {} → {} turns over {:?}",
-        ep.id, ep.original_count, ep.compressed_to, ep.time_range
-    );
+    for ep in &episodes {
+        println!(
+            "Episode '{}': {} → {} turns over {:?}",
+            ep.id, ep.original_count, ep.compressed_to, ep.time_range
+        );
+    }
 }
-# });
 ```
 
 ### `CompressedEpisode` fields
@@ -1957,23 +1958,24 @@ moderator synthesises the strongest points into a final answer.
 ```rust,no_run
 use llm_agent_runtime::debate::{DebateConfig, DebateOrchestrator, DebaterPosition};
 
-# tokio_test::block_on(async {
-let config = DebateConfig::new("Monolith vs microservices")
-    .with_positions(vec![
-        DebaterPosition::new("Alice", "Monolith for simplicity"),
-        DebaterPosition::new("Bob", "Microservices for scale"),
-    ])
-    .with_rounds(2);
+#[tokio::main]
+async fn main() {
+    let config = DebateConfig::new("Monolith vs microservices")
+        .with_positions(vec![
+            DebaterPosition::new("Alice", "Monolith for simplicity"),
+            DebaterPosition::new("Bob", "Microservices for scale"),
+        ])
+        .with_rounds(2);
 
-let session = DebateOrchestrator::new(config)
-    .run(|agent_id, prompt| async move {
-        format!("{agent_id}: {}", &prompt[..50.min(prompt.len())])
-    })
-    .await;
+    let session = DebateOrchestrator::new(config)
+        .run(|agent_id, prompt| async move {
+            format!("{agent_id}: {}", &prompt[..50.min(prompt.len())])
+        })
+        .await;
 
-println!("Winner: {}", session.winner_id().unwrap_or("tie"));
-println!("Synthesis:\n{}", session.synthesis);
-# });
+    println!("Winner: {}", session.winner_id().unwrap_or("tie"));
+    println!("Synthesis:\n{}", session.synthesis);
+}
 ```
 
 ---
