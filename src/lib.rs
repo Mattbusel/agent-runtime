@@ -217,6 +217,13 @@ pub mod persistence;
 #[cfg(feature = "providers")]
 pub mod providers;
 
+/// Native (structured) tool calling: JSON Schema tools in, typed tool calls out.
+pub mod native_tools;
+
+/// Tools from any Model Context Protocol server, via the official rmcp SDK.
+#[cfg(feature = "mcp")]
+pub mod mcp;
+
 /// Optimistic distributed locking with versioning and TTL-based lease management.
 pub mod distributed_lock;
 
@@ -489,3 +496,8 @@ pub mod agent_pool;
 
 /// Agent state checkpointing and resume: save/restore with XOR checksum verification, bounded history, step-level restore.
 pub mod checkpoint_manager;
+
+/// Every Rust example in the README is compiled by `cargo test --doc`.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+mod readme_examples {}

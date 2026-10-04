@@ -1,6 +1,6 @@
 [package]
 name = "llm-agent-runtime"
-version = "1.75.0"
+version = "1.76.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["Matt Busel <mattbusel@users.noreply.github.com>"]
@@ -30,6 +30,7 @@ otel = ["opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp"]  # OpenTelem
 compression = []                # memory compression system (MemoryCompressor, ImportanceStrategy)
 discovery = []                  # agent capability advertisement and peer discovery (AgentRegistry)
 full = ["orchestrator", "memory", "graph", "wasm", "persistence", "providers", "anthropic", "openai", "distributed", "otel", "compression", "discovery"]
+mcp = ["dep:rmcp"]               # MCP server tools as agent tools (official rmcp SDK; needs Rust 1.88)
 
 [dependencies]
 # tokio: async runtime -- core dependency, never remove
@@ -72,6 +73,12 @@ redis = { version = "0.26", features = ["tokio-comp", "json"], optional = true }
 opentelemetry = { version = "0.27", optional = true }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic"], optional = true }
+jsonschema = { version = "0.58.5", default-features = false }
+rmcp = { version = "3.5", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"], optional = true }
+
+[[test]]
+name = "mcp"
+required-features = ["mcp"]
 
 [[example]]
 name = "custom_persistence"
@@ -118,6 +125,8 @@ name = "agent"
 harness = false
 
 [dev-dependencies]
+# opentelemetry_sdk testing: in-memory span exporter for the otel tests
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "testing"] }
 # tokio-test: async test utilities
 tokio-test = "0.4"
 # tracing-subscriber: test logging setup
@@ -130,6 +139,8 @@ proptest = "1"
 wiremock = "0.6"
 # tempfile: temporary directories/files for checkpoint and persistence tests
 tempfile = "3"
+rmcp = { version = "3.5", features = ["server", "macros", "client", "transport-async-rw"] }
+schemars = "1"
 
 # ── Release profile (production) ────────────────────────────────────────────────
 [profile.release]

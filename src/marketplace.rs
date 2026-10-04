@@ -635,7 +635,10 @@ mod tests {
         let composer = SkillComposer::new(reg);
         let pipeline = composer.compose_for_task("search the web for recent news", 3);
         assert!(!pipeline.is_empty());
-        assert!(pipeline.description.contains("→") || pipeline.description.contains("Empty"));
+        assert!(pipeline.description.starts_with("Pipeline: "), "{}", pipeline.description);
+        for stage in &pipeline.stages {
+            assert!(pipeline.description.contains(stage.as_str()));
+        }
     }
 
     #[test]

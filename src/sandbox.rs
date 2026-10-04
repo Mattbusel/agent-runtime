@@ -55,9 +55,10 @@
 //! assert!(sandbox.check("write_file").is_err());   // missing FileWrite
 //! assert!(sandbox.check("unknown_tool").is_err()); // tool not registered
 //!
-//! // Inspect what was denied.
+//! // Every check is audited; inspect what was denied.
 //! let log = sandbox.audit_log();
-//! assert_eq!(log.len(), 2);
+//! assert_eq!(log.len(), 3);
+//! assert_eq!(log.iter().filter(|e| !e.allowed).count(), 2);
 //! ```
 
 use std::{

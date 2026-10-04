@@ -11,6 +11,55 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.76.0] - 2026-10-04
+
+### Added
+
+- **Native tool calling.** `AgentRuntime::run_agent_native` and `ReActLoop::run_native`
+  send registered tools to the model as JSON Schema and take structured tool calls back
+  (Anthropic `tool_use`, OpenAI `tool_calls`), through the same hooks, validators,
+  circuit breakers, metrics, checkpoints and `AgentSession` as the text loop.
+  `AnthropicProvider` and `OpenAiProvider` implement the new `ToolCallingModel` trait;
+  `OpenAiProvider::with_base_url` covers OpenAI-compatible servers. Verified live
+  against a hosted model through Hugging Face's OpenAI-compatible router.
+- **Schema-checked tool arguments.** `ToolSpec::with_input_schema`; arguments are
+  validated with the `jsonschema` crate before the handler runs, and the error names
+  the offending field so the model can correct itself (seen live: a string passed for
+  an integer was rejected, the model retried with the number).
+- **MCP tools** (`mcp` feature, official `rmcp` SDK, Rust 1.88): `McpClient::spawn`
+  (stdio) and `McpClient::connect_http` (streamable HTTP); `tools()` turns every server
+  tool into a `ToolSpec` with the server's schema. Tested against an in-process rmcp
+  server and the reference `@modelcontextprotocol/server-everything`.
+- **OpenTelemetry that works.** Every `ToolRegistry::call` emits an
+  `agent.tool_call.<name>` span (`otel` feature), and `telemetry::init_otlp_tracer`
+  exports to any OTLP collector. A test checks the spans with the SDK's in-memory exporter.
+- GitLab CI runs the whole suite with every feature.
+
+### Fixed
+
+- The `otel` feature (and so `full` and `--all-features`) did not compile against
+  opentelemetry 0.27, and the test suite did not compile at all; both build now
+  (3,600+ tests, 75 doc tests).
+- `streaming::AgentEvent` could not be serialised at all (serde cannot internally tag
+  newtype string variants); SSE output and broadcasting failed on every event. It now
+  produces the documented `{"type":"thought","content":...}` JSON and round-trips.
+- `StreamingReActLoop` treated any tool call whose arguments were not JSON as the final
+  answer; it now reports the parse error to the model and continues.
+- `StripsPlanner` could not find any plan: the open-goal check was reversed and the
+  search never tried actions that only set up a precondition. It is now an
+  iterative-deepening search that returns a shortest plan.
+- `vector_memory`: embeddings made before the `BagOfWordsEmbedder` vocabulary grew scored
+  0 against every later query, so `SemanticMemory` search returned nothing useful.
+  Cosine similarity now zero-pads the shorter vector, and search uses it.
+- Team `Pipeline` consensus now runs members first and the leader last, as documented.
+- `ProfileWindow::cpu_percentile` uses nearest-rank (p50 of 100..1000 is 500, not 600).
+- `--no-default-features` builds again.
+- `telemetry::init_stdout_tracer` is deprecated: it installs no exporter and prints nothing.
+- Every Rust example in the README compiles and is checked by `cargo test --doc`
+  (20 of 54 code blocks failed before).
+
+---
+
 ## [1.74.0] - 2026-03-20
 
 ### Added

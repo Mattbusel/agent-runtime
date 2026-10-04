@@ -3,7 +3,9 @@
 //! ## Responsibility
 //! Provides OpenTelemetry integration for ReAct loop tool call tracing.
 //!
-//! Each tool call in the agent loop creates an OTel span named
+//! Every tool call that goes through [`ToolRegistry::call`](crate::agent::ToolRegistry::call)
+//! (the text ReAct loop, [`run_native`](crate::agent::ReActLoop::run_native)
+//! and direct registry calls) creates an OTel span named
 //! `agent.tool_call.{tool_name}` with attributes covering:
 //! - `agent.tool.name` — the tool identifier
 //! - `agent.tool.input_bytes` — byte length of the serialized input
@@ -11,15 +13,16 @@
 //! - `agent.tool.success` — `true` / `false`
 //! - `agent.tool.error` — error message when `success = false`
 //!
-//! Trace context is propagated via the W3C TraceContext format so downstream
-//! services (e.g. tool HTTP endpoints) can continue the same trace.
+//! Spans go to whatever tracer provider is installed globally; call
+//! [`init_otlp_tracer`] to send them to an OTLP collector (Jaeger, Tempo,
+//! Honeycomb, Grafana, ...).
 //!
 //! ## Feature Gate
 //! This module is only compiled when the `otel` feature is enabled.
 
 use opentelemetry::{
-    global,
-    trace::{Span, SpanKind, StatusCode, Tracer},
+    global::{self, BoxedSpan},
+    trace::{Span, SpanKind, Status, Tracer},
     KeyValue,
 };
 use serde_json::Value;
@@ -29,7 +32,7 @@ use serde_json::Value;
 /// Drop the guard to end the span.  Use [`ToolCallSpan::set_result`] before
 /// dropping to record success/failure attributes.
 pub struct ToolCallSpan {
-    span: Box<dyn Span + Send + Sync>,
+    span: BoxedSpan,
 }
 
 impl std::fmt::Debug for ToolCallSpan {
@@ -59,9 +62,7 @@ impl ToolCallSpan {
                 KeyValue::new("agent.tool.input_bytes", input_bytes),
             ])
             .start(&tracer);
-        Self {
-            span: Box::new(span),
-        }
+        Self { span }
     }
 
     /// Record the tool result on the span and mark it as succeeded or failed.
@@ -82,10 +83,9 @@ impl ToolCallSpan {
         if let Some(msg) = error_msg {
             self.span
                 .set_attribute(KeyValue::new("agent.tool.error", msg.to_owned()));
-            self.span
-                .set_status(StatusCode::Error, msg.to_owned());
+            self.span.set_status(Status::error(msg.to_owned()));
         } else {
-            self.span.set_status(StatusCode::Ok, String::new());
+            self.span.set_status(Status::Ok);
         }
     }
 
@@ -139,18 +139,74 @@ impl OtelTracer {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Initialize a simple stdout OTel exporter for development and testing.
+/// Send spans to an OTLP collector over gRPC, e.g.
+/// `init_otlp_tracer("http://localhost:4317")` for a local Jaeger or
+/// OpenTelemetry Collector. Spans are exported in batches on the Tokio
+/// runtime; call `opentelemetry::global::shutdown_tracer_provider()` before
+/// exit to flush the last batch.
 ///
-/// In production, replace this with an OTLP exporter configured to point at
-/// your collector (Jaeger, Tempo, etc.).
+/// Must be called inside a Tokio runtime.
 ///
 /// # Errors
-/// Returns a string description of the initialization error.
-pub fn init_stdout_tracer() -> Result<(), String> {
-    use opentelemetry_sdk::trace::TracerProvider;
+/// Returns the exporter's error if the endpoint is invalid.
+pub fn init_otlp_tracer(endpoint: &str) -> Result<(), String> {
+    use opentelemetry_otlp::WithExportConfig;
 
-    let provider = TracerProvider::builder()
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let provider = opentelemetry_sdk::trace::TracerProvider::builder()
+        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
         .build();
     global::set_tracer_provider(provider);
     Ok(())
+}
+
+/// Install an SDK tracer provider with no exporter: spans are recorded and
+/// then dropped. Despite the name, nothing is printed.
+///
+/// # Errors
+/// Never fails; the `Result` is kept for compatibility.
+#[deprecated(
+    since = "1.76.0",
+    note = "installs no exporter and prints nothing; use init_otlp_tracer, or install your own provider"
+)]
+pub fn init_stdout_tracer() -> Result<(), String> {
+    use opentelemetry_sdk::trace::TracerProvider;
+
+    global::set_tracer_provider(TracerProvider::builder().build());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::agent::{ToolRegistry, ToolSpec};
+    use opentelemetry::trace::Status;
+    use opentelemetry_sdk::testing::trace::InMemorySpanExporter;
+    use opentelemetry_sdk::trace::TracerProvider;
+
+    #[tokio::test]
+    async fn every_registry_call_emits_a_tool_span() {
+        let exporter = InMemorySpanExporter::default();
+        let provider = TracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        opentelemetry::global::set_tracer_provider(provider);
+
+        let registry = ToolRegistry::new()
+            .with_tool(ToolSpec::new("echo", "Echo", |args| args))
+            .with_tool(ToolSpec::new("needs_q", "Needs q", |args| args).with_required_fields(["q"]));
+        registry.call("echo", serde_json::json!({ "x": 1 })).await.unwrap();
+        assert!(registry.call("needs_q", serde_json::json!({})).await.is_err());
+
+        let spans = exporter.get_finished_spans().unwrap();
+        let ok = spans.iter().find(|s| s.name == "agent.tool_call.echo").expect("echo span");
+        assert_eq!(ok.status, Status::Ok);
+        let failed = spans.iter().find(|s| s.name == "agent.tool_call.needs_q").expect("needs_q span");
+        assert!(matches!(failed.status, Status::Error { .. }));
+        assert!(failed.attributes.iter().any(|kv| kv.key.as_str() == "agent.tool.success"
+            && kv.value == opentelemetry::Value::Bool(false)));
+    }
 }

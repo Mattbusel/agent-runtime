@@ -422,6 +422,44 @@ impl LlmProvider for AnthropicProvider {
     }
 }
 
+#[cfg(feature = "anthropic")]
+#[async_trait]
+impl crate::native_tools::ToolCallingModel for AnthropicProvider {
+    /// Native tool calling over the Messages API (`tools` / `tool_use` /
+    /// `tool_result`). Uses the [`with_stream_max_tokens`](Self::with_stream_max_tokens)
+    /// limit when set, else 1024 output tokens.
+    #[tracing::instrument(skip(self, system, turns, tools), fields(provider = "anthropic"))]
+    async fn respond(
+        &self,
+        model: &str,
+        system: &str,
+        turns: &[crate::native_tools::ChatTurn],
+        tools: &[crate::native_tools::ToolDefinition],
+    ) -> Result<crate::native_tools::ModelTurn, AgentRuntimeError> {
+        let max_tokens = self.stream_max_tokens.unwrap_or(Self::MAX_TOKENS);
+        let body = crate::native_tools::anthropic_request(model, max_tokens, system, turns, tools);
+        let response = self
+            .client
+            .post(&self.api_url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", Self::API_VERSION)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AgentRuntimeError::Provider(format!("Anthropic request failed: {e}")))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AgentRuntimeError::Provider(format!("Anthropic API error {status}: {text}")));
+        }
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AgentRuntimeError::Provider(format!("Anthropic parse failed: {e}")))?;
+        crate::native_tools::parse_anthropic_response(&json)
+    }
+}
+
 // ── OpenAiProvider ────────────────────────────────────────────────────────────
 
 #[cfg(feature = "openai")]
@@ -666,6 +704,42 @@ impl LlmProvider for OpenAiProvider {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+
+#[cfg(feature = "openai")]
+#[async_trait]
+impl crate::native_tools::ToolCallingModel for OpenAiProvider {
+    /// Native tool calling over Chat Completions (`tools` / `tool_calls`).
+    /// Works with OpenAI-compatible servers that support function calling.
+    #[tracing::instrument(skip(self, system, turns, tools), fields(provider = "openai"))]
+    async fn respond(
+        &self,
+        model: &str,
+        system: &str,
+        turns: &[crate::native_tools::ChatTurn],
+        tools: &[crate::native_tools::ToolDefinition],
+    ) -> Result<crate::native_tools::ModelTurn, AgentRuntimeError> {
+        let body = crate::native_tools::openai_request(model, system, turns, tools);
+        let response = self
+            .client
+            .post(format!("{}/chat/completions", self.base_url))
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AgentRuntimeError::Provider(format!("OpenAI request failed: {e}")))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AgentRuntimeError::Provider(format!("OpenAI API error {status}: {text}")));
+        }
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AgentRuntimeError::Provider(format!("OpenAI parse failed: {e}")))?;
+        crate::native_tools::parse_openai_response(&json)
+    }
+}
 
 #[cfg(test)]
 mod tests {

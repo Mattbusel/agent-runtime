@@ -348,12 +348,11 @@ impl Default for PlanExecuteConfig {
 /// async fn main() {
 ///     let agent = PlanExecuteAgent::new(AgentId::new("planner"), PlanExecuteConfig::default());
 ///
-///     let mut step_n = 0usize;
+///     let calls = std::sync::atomic::AtomicUsize::new(0);
 ///     let (plan, verification) = agent.run(
 ///         "Summarise the quarterly results and send a report",
 ///         |ctx: String| {
-///             step_n += 1;
-///             let n = step_n;
+///             let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
 ///             async move {
 ///                 if n == 1 {
 ///                     // Planning response: one step per line, number-prefixed.

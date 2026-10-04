@@ -44,13 +44,14 @@ use tokio::sync::broadcast;
 /// {"type":"result","content":"The answer is 42."}
 /// {"type":"error","content":"Tool not found: foobar"}
 /// ```
+// Serde cannot internally tag newtype variants that hold a string, so the
+// enum (kept as is for callers) goes through `AgentEventWire` on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(into = "AgentEventWire", from = "AgentEventWire")]
 pub enum AgentEvent {
     /// A reasoning thought produced before taking an action.
     Thought(
         /// The thought text.
-        #[serde(rename = "content")]
         String,
     ),
     /// An action dispatched to a tool.
@@ -63,21 +64,53 @@ pub enum AgentEvent {
     /// An observation returned by a tool after an action.
     Observation(
         /// The observation text.
-        #[serde(rename = "content")]
         String,
     ),
     /// The final result produced by the agent.
     Result(
         /// The result text.
-        #[serde(rename = "content")]
         String,
     ),
     /// An error that occurred during agent execution.
     Error(
         /// A human-readable error description.
-        #[serde(rename = "content")]
         String,
     ),
+}
+
+/// The JSON shape of [`AgentEvent`].
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum AgentEventWire {
+    Thought { content: String },
+    Action { tool: String, input: String },
+    Observation { content: String },
+    Result { content: String },
+    Error { content: String },
+}
+
+impl From<AgentEvent> for AgentEventWire {
+    fn from(e: AgentEvent) -> Self {
+        match e {
+            AgentEvent::Thought(content) => Self::Thought { content },
+            AgentEvent::Action { tool, input } => Self::Action { tool, input },
+            AgentEvent::Observation(content) => Self::Observation { content },
+            AgentEvent::Result(content) => Self::Result { content },
+            AgentEvent::Error(content) => Self::Error { content },
+        }
+    }
+}
+
+impl From<AgentEventWire> for AgentEvent {
+    fn from(w: AgentEventWire) -> Self {
+        match w {
+            AgentEventWire::Thought { content } => Self::Thought(content),
+            AgentEventWire::Action { tool, input } => Self::Action { tool, input },
+            AgentEventWire::Observation { content } => Self::Observation(content),
+            AgentEventWire::Result { content } => Self::Result(content),
+            AgentEventWire::Error { content } => Self::Error(content),
+        }
+    }
 }
 
 impl AgentEvent {
@@ -270,6 +303,25 @@ mod tests {
     use super::*;
 
     // ── AgentEvent serialisation ──────────────────────────────────────────────
+
+    #[test]
+    fn every_event_round_trips_through_json() {
+        let events = [
+            AgentEvent::Thought("t".into()),
+            AgentEvent::Action { tool: "search".into(), input: "{}".into() },
+            AgentEvent::Observation("o".into()),
+            AgentEvent::Result("r".into()),
+            AgentEvent::Error("e".into()),
+        ];
+        for e in events {
+            let json = serde_json::to_string(&e).unwrap();
+            assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), e, "{json}");
+        }
+        assert_eq!(
+            serde_json::to_string(&AgentEvent::Action { tool: "s".into(), input: "x".into() }).unwrap(),
+            r#"{"type":"action","tool":"s","input":"x"}"#
+        );
+    }
 
     #[test]
     fn test_thought_event_serializes_with_type_tag() {
@@ -908,9 +960,30 @@ impl<P: StreamingInference> StreamingReActLoop<P> {
                 self.callbacks.fire_thought(&thought);
             }
 
-            // Parse the raw action string into a structured Action enum.
-            let parsed_action = Action::parse(&action)
-                .unwrap_or_else(|_| Action::FinalAnswer(action.clone()));
+            // Parse the raw action string into a structured Action enum. An
+            // action that does not parse is reported back to the model as an
+            // observation; it is not a final answer.
+            let parsed_action = match Action::parse(&action) {
+                Ok(parsed) => Some(parsed),
+                Err(e) => {
+                    let observation = format!("Error: could not parse action {action:?}: {e}");
+                    steps.push(StreamingStep {
+                        thought: thought.clone(),
+                        action: action.clone(),
+                        observation: observation.clone(),
+                        token_count: step_tokens,
+                        logprob_sum: step_logprob_sum,
+                    });
+                    context = format!(
+                        "{context}
+Thought: {thought}
+Action: {action}
+Observation: {observation}"
+                    );
+                    None
+                }
+            };
+            let Some(parsed_action) = parsed_action else { continue };
 
             self.callbacks.fire_action(&parsed_action);
 

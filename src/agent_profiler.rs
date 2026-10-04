@@ -93,9 +93,10 @@ impl ProfileWindow {
         }
         let mut values: Vec<u64> = self.samples.iter().map(|s| s.cpu_time_us).collect();
         values.sort_unstable();
-        let idx = ((pct / 100.0) * (values.len() as f64 - 1.0))
-            .round()
-            .clamp(0.0, (values.len() - 1) as f64) as usize;
+        // Nearest-rank: the smallest value with at least `pct`% of samples at
+        // or below it (p50 of 1..=10 is 5, p100 is the maximum).
+        let rank = ((pct / 100.0) * values.len() as f64).ceil() as usize;
+        let idx = rank.saturating_sub(1).min(values.len() - 1);
         values[idx] as f64
     }
 }
@@ -329,7 +330,7 @@ mod tests {
         for i in 1u64..=10 {
             window.add_sample(make_sample("a", i * 100, 0, 0, i));
         }
-        // p50 of [100,200,...,1000]: idx = round(0.5 * 9) = 4 → 500
+        // p50 of [100,200,...,1000]: nearest rank ceil(0.5 * 10) = 5th → 500
         let p50 = window.cpu_percentile(50.0);
         assert!((p50 - 500.0).abs() < 1e-6, "p50={p50}");
         // p100 → last element = 1000

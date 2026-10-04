@@ -838,6 +838,9 @@ pub struct ToolSpec {
     /// Optional per-tool circuit breaker.
     #[cfg(feature = "orchestrator")]
     pub circuit_breaker: Option<Arc<crate::orchestrator::CircuitBreaker>>,
+    /// JSON Schema of the arguments, sent to models that support native tool
+    /// calling. When `None`, a schema is derived from `required_fields`.
+    pub input_schema: Option<Value>,
 }
 
 impl std::fmt::Debug for ToolSpec {
@@ -869,6 +872,7 @@ impl ToolSpec {
             }),
             required_fields: Vec::new(),
             validators: Vec::new(),
+            input_schema: None,
             #[cfg(feature = "orchestrator")]
             circuit_breaker: None,
         }
@@ -886,6 +890,7 @@ impl ToolSpec {
             handler: Box::new(handler),
             required_fields: Vec::new(),
             validators: Vec::new(),
+            input_schema: None,
             #[cfg(feature = "orchestrator")]
             circuit_breaker: None,
         }
@@ -911,6 +916,7 @@ impl ToolSpec {
             }),
             required_fields: Vec::new(),
             validators: Vec::new(),
+            input_schema: None,
             #[cfg(feature = "orchestrator")]
             circuit_breaker: None,
         }
@@ -937,6 +943,7 @@ impl ToolSpec {
             }),
             required_fields: Vec::new(),
             validators: Vec::new(),
+            input_schema: None,
             #[cfg(feature = "orchestrator")]
             circuit_breaker: None,
         }
@@ -953,6 +960,41 @@ impl ToolSpec {
     ) -> Self {
         self.required_fields = fields.into_iter().map(Into::into).collect();
         self
+    }
+
+    /// Set the JSON Schema of this tool's arguments, used by native tool
+    /// calling ([`ReActLoop::run_native`]). Models fill arguments far more
+    /// reliably with a schema that names and types every field.
+    ///
+    /// Arguments are validated against the schema before the handler runs
+    /// (in every loop and in [`ToolRegistry::call`]); a mismatch is returned
+    /// to the model as an error naming the offending fields.
+    pub fn with_input_schema(mut self, schema: Value) -> Self {
+        self.input_schema = Some(schema);
+        self
+    }
+
+    /// The tool as a model sees it: name, description and argument schema.
+    /// Without an explicit schema, every required field is listed with no
+    /// type constraint.
+    pub fn definition(&self) -> crate::native_tools::ToolDefinition {
+        let input_schema = self.input_schema.clone().unwrap_or_else(|| {
+            let properties: serde_json::Map<String, Value> = self
+                .required_fields
+                .iter()
+                .map(|f| (f.clone(), serde_json::json!({})))
+                .collect();
+            serde_json::json!({
+                "type": "object",
+                "properties": properties,
+                "required": self.required_fields,
+            })
+        });
+        crate::native_tools::ToolDefinition {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            input_schema,
+        }
     }
 
     /// Attach custom argument validators.
@@ -1250,8 +1292,23 @@ impl ToolRegistry {
     ///   custom validator rejected the arguments
     /// - `AgentRuntimeError::CircuitOpen` — the tool's circuit breaker is open
     ///   (only possible when the `orchestrator` feature is enabled)
+    ///
+    /// With the `otel` feature, every call is recorded as an OpenTelemetry
+    /// span (see [`crate::telemetry`]).
     #[tracing::instrument(skip_all, fields(tool_name = %name))]
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, AgentRuntimeError> {
+        #[cfg(feature = "otel")]
+        let mut span = crate::telemetry::ToolCallSpan::start(name, &args);
+        let result = self.call_untraced(name, args).await;
+        #[cfg(feature = "otel")]
+        match &result {
+            Ok(output) => span.set_result(output, true, None),
+            Err(e) => span.set_result(&Value::Null, false, Some(&e.to_string())),
+        }
+        result
+    }
+
+    async fn call_untraced(&self, name: &str, args: Value) -> Result<Value, AgentRuntimeError> {
         let spec = self.tools.get(name).ok_or_else(|| {
             let mut suggestion = String::new();
             let names = self.tool_names();
@@ -1284,6 +1341,27 @@ impl ToolRegistry {
                 return Err(AgentRuntimeError::AgentLoop(format!(
                     "tool '{}' requires JSON object args, got {}",
                     name, args
+                )));
+            }
+        }
+
+        // JSON Schema validation (when the tool declares a schema). The error
+        // names every offending field so a model can correct its call.
+        if let Some(ref schema) = spec.input_schema {
+            let validator = jsonschema::validator_for(schema).map_err(|e| {
+                AgentRuntimeError::AgentLoop(format!("tool '{name}' has an invalid input schema: {e}"))
+            })?;
+            let problems: Vec<String> = validator
+                .iter_errors(&args)
+                .map(|e| {
+                    let at = e.instance_path().to_string();
+                    if at.is_empty() { e.to_string() } else { format!("{at}: {e}") }
+                })
+                .collect();
+            if !problems.is_empty() {
+                return Err(AgentRuntimeError::AgentLoop(format!(
+                    "tool '{name}' arguments do not match its schema: {}",
+                    problems.join("; ")
                 )));
             }
         }
@@ -2049,6 +2127,166 @@ impl ReActLoop {
             _ => "permanent",
         };
         serde_json::json!({ "ok": false, "error": e.to_string(), "kind": kind }).to_string()
+    }
+
+    /// Run the loop with native tool calling: the model gets every
+    /// registered tool as JSON Schema ([`ToolSpec::definition`]) and answers
+    /// with structured tool calls, so there is no text format to parse or
+    /// get wrong.
+    ///
+    /// Tool calls go through the same path as [`run`](Self::run): action
+    /// hook, observer, required fields, validators, circuit breaker, cache
+    /// and metrics. Each tool call is recorded as one [`ReActStep`] (the
+    /// model's text as `thought`, `"<tool> <json args>"` as `action`); the
+    /// model's final text is recorded as `FINAL_ANSWER <text>`, so
+    /// `AgentSession::final_answer()` works the same way.
+    ///
+    /// Several tool calls in one model turn run in order and are answered
+    /// together. Tool failures are sent back to the model as error results
+    /// rather than ending the loop.
+    ///
+    /// # Errors
+    /// Provider errors, the loop timeout, and running out of
+    /// `max_iterations` model turns.
+    pub async fn run_native(
+        &self,
+        prompt: &str,
+        model: &dyn crate::native_tools::ToolCallingModel,
+    ) -> Result<Vec<ReActStep>, AgentRuntimeError> {
+        use crate::native_tools::{ChatTurn, ToolOutcome};
+
+        let tools: Vec<_> = self
+            .registry
+            .tool_specs()
+            .into_iter()
+            .map(ToolSpec::definition)
+            .collect();
+        let mut turns = vec![ChatTurn::User(prompt.to_owned())];
+        let mut steps: Vec<ReActStep> = Vec::new();
+        let deadline = self
+            .config
+            .loop_timeout
+            .map(|d| std::time::Instant::now() + d);
+        if let Some(ref obs) = self.observer {
+            obs.on_loop_start(prompt);
+        }
+
+        for iteration in 0..self.config.max_iterations {
+            if deadline.is_some_and(|dl| std::time::Instant::now() >= dl) {
+                let ms = self.config.loop_timeout.map(|d| d.as_millis()).unwrap_or(0);
+                let err = AgentRuntimeError::AgentLoop(format!("loop timeout after {ms} ms"));
+                if let Some(ref obs) = self.observer {
+                    obs.on_error(&err);
+                    obs.on_loop_end(steps.len());
+                }
+                return Err(err);
+            }
+
+            let turn_start = std::time::Instant::now();
+            let reply = match model
+                .respond(&self.config.model, &self.config.system_prompt, &turns, &tools)
+                .await
+            {
+                Ok(reply) => reply,
+                Err(e) => {
+                    if let Some(ref obs) = self.observer {
+                        obs.on_error(&e);
+                        obs.on_loop_end(steps.len());
+                    }
+                    return Err(e);
+                }
+            };
+
+            if reply.tool_calls.is_empty() {
+                let step = ReActStep {
+                    thought: String::new(),
+                    action: format!("FINAL_ANSWER {}", reply.text.trim()),
+                    observation: reply.text.clone(),
+                    step_duration_ms: turn_start.elapsed().as_millis() as u64,
+                };
+                if let Some(ref m) = self.metrics {
+                    m.record_step_latency(step.step_duration_ms);
+                }
+                if let Some(ref obs) = self.observer {
+                    obs.on_step(iteration, &step);
+                    obs.on_loop_end(steps.len() + 1);
+                }
+                steps.push(step);
+                return Ok(steps);
+            }
+
+            let mut outcomes = Vec::with_capacity(reply.tool_calls.len());
+            for call in &reply.tool_calls {
+                let call_start = std::time::Instant::now();
+                let allowed = match self.action_hook {
+                    Some(ref hook) => hook(call.name.clone(), call.input.clone()).await,
+                    None => true,
+                };
+                if let Some(ref m) = self.metrics {
+                    m.record_tool_call(&call.name);
+                }
+                let (content, is_error) = if !allowed {
+                    if let Some(ref obs) = self.observer {
+                        obs.on_action_blocked(&call.name, &call.input);
+                    }
+                    if let Some(ref m) = self.metrics {
+                        m.record_tool_failure(&call.name);
+                    }
+                    (Self::blocked_observation(), true)
+                } else {
+                    if let Some(ref obs) = self.observer {
+                        obs.on_tool_call(&call.name, &call.input);
+                    }
+                    match self.registry.call(&call.name, call.input.clone()).await {
+                        // Fallible handlers report failure as {"ok": false, ...}.
+                        Ok(result) => {
+                            let failed = result.get("ok") == Some(&Value::Bool(false));
+                            if failed {
+                                if let Some(ref m) = self.metrics {
+                                    m.record_tool_failure(&call.name);
+                                }
+                            }
+                            (result.to_string(), failed)
+                        }
+                        Err(e) => {
+                            if let Some(ref m) = self.metrics {
+                                m.record_tool_failure(&call.name);
+                            }
+                            (Self::error_observation(&call.name, &e), true)
+                        }
+                    }
+                };
+                let step = ReActStep {
+                    thought: reply.text.clone(),
+                    action: format!("{} {}", call.name, call.input),
+                    observation: content.clone(),
+                    step_duration_ms: call_start.elapsed().as_millis() as u64,
+                };
+                if let Some(ref m) = self.metrics {
+                    m.record_step_latency(step.step_duration_ms);
+                }
+                if let Some(ref obs) = self.observer {
+                    obs.on_step(iteration, &step);
+                }
+                steps.push(step);
+                outcomes.push(ToolOutcome { id: call.id.clone(), content, is_error });
+            }
+            turns.push(ChatTurn::Assistant {
+                text: reply.text,
+                tool_calls: reply.tool_calls,
+            });
+            turns.push(ChatTurn::ToolResults(outcomes));
+        }
+
+        let err = AgentRuntimeError::AgentLoop(format!(
+            "max iterations ({}) reached without final answer",
+            self.config.max_iterations
+        ));
+        if let Some(ref obs) = self.observer {
+            obs.on_error(&err);
+            obs.on_loop_end(steps.len());
+        }
+        Err(err)
     }
 
     /// Execute the ReAct loop for the given prompt.

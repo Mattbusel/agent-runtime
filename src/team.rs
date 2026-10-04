@@ -26,8 +26,8 @@
 //! ## Consensus Strategies
 //!
 //! - **Majority** — each agent produces an answer; the most frequent answer wins.
-//! - **Pipeline** — agents run in sequence; each receives the previous agent's
-//!   output as its prompt.
+//! - **Pipeline** — members run in sequence, then the leader; each receives the
+//!   previous agent's output in its prompt, and the leader's answer is final.
 //! - **Parallel** — all agents run concurrently; the leader synthesises the
 //!   results into a final answer.
 //!
@@ -189,8 +189,9 @@ impl std::fmt::Display for CommunicationTopology {
 /// - **Majority** — every agent produces an answer independently; the most
 ///   frequent answer is selected.  Ties are broken by whichever answer appeared
 ///   first among the tied candidates.
-/// - **Pipeline** — agents run sequentially.  Agent `i` receives the result of
-///   agent `i-1` as its prompt.  The last agent's answer is the final answer.
+/// - **Pipeline** — members run sequentially, then the leader.  Each agent
+///   receives the previous agent's answer in its prompt; the leader's answer
+///   is the final answer.
 /// - **Parallel** — all agents run concurrently.  The leader receives all
 ///   member results and produces a synthesis prompt; the leader's final answer
 ///   is used as the team result.
@@ -531,7 +532,12 @@ impl TeamOrchestrator {
         F: Fn(AgentId, String) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = String> + Send + 'static,
     {
-        let all = team.all_agents();
+        // Members work in order; the leader goes last and has the final say.
+        let all: Vec<&AgentId> = team
+            .members
+            .iter()
+            .chain(std::iter::once(&team.leader))
+            .collect();
         let task = team.task.clone();
         let mut context = task.clone();
 

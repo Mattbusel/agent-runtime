@@ -511,13 +511,8 @@ mod tests {
 
     #[test]
     fn poll_empty_queue_returns_empty_vec() {
-        let bus = PubSubBus::new();
-        let msgs = bus.poll("nobody", 0); // calling poll on immutable ref via wrapper works
-        // Actually poll requires &mut self — let's use a mutable one:
-        let mut bus2 = PubSubBus::new();
-        let msgs2 = bus2.poll("nobody", 0);
-        assert!(msgs.is_empty());
-        assert!(msgs2.is_empty());
+        let mut bus = PubSubBus::new();
+        assert!(bus.poll("nobody", 0).is_empty());
     }
 
     #[test]

@@ -14,7 +14,7 @@ Agent code tends to grow the same pieces every time: a loop that parses the mode
 
 ```toml
 [dependencies]
-llm-agent-runtime = "1.74"   # latest on crates.io; this repository is at 1.75.0
+llm-agent-runtime = "1.76"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
@@ -24,13 +24,13 @@ For the unreleased code on `master`: `llm-agent-runtime = { git = "https://gitla
 To opt in to specific subsystems only:
 
 ```toml
-llm-agent-runtime = { version = "1.74", default-features = false, features = ["memory", "orchestrator"] }
+llm-agent-runtime = { version = "1.76", default-features = false, features = ["memory", "orchestrator"] }
 ```
 
 To enable built-in LLM providers:
 
 ```toml
-llm-agent-runtime = { version = "1.74", features = ["anthropic", "openai"] }
+llm-agent-runtime = { version = "1.76", features = ["anthropic", "openai"] }
 ```
 
 ### 2. Set environment variables (if using a provider)
@@ -117,7 +117,66 @@ async fn main() -> Result<(), AgentRuntimeError> {
         .run_agent_with_provider(AgentId::new("agent-1"), "What is 6 * 7?", provider)
         .await?;
 
-    println!("Answer: {}", session.final_answer().unwrap_or("no answer"));
+    println!("Answer: {}", session.final_answer().unwrap_or_default());
+    Ok(())
+}
+```
+
+### 5. Native tool calling
+
+`run_agent_native` sends your tools to the model as JSON Schema and gets structured tool calls back (Anthropic `tool_use`, OpenAI `tool_calls`), so there is no "Action: ..." text format for the model to get wrong. Arguments are checked against the schema before your tool runs; a bad call goes back to the model as an error naming the field, and the model fixes it on the next turn.
+
+```rust,no_run
+use llm_agent_runtime::prelude::*;
+use llm_agent_runtime::providers::OpenAiProvider;
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> Result<(), AgentRuntimeError> {
+    let runtime = AgentRuntime::builder()
+        .with_agent_config(AgentConfig::new(6, "gpt-4o-mini"))
+        .register_tool(
+            ToolSpec::new("add", "Add two integers", |args| {
+                json!(args["a"].as_i64().unwrap_or(0) + args["b"].as_i64().unwrap_or(0))
+            })
+            .with_input_schema(json!({
+                "type": "object",
+                "properties": { "a": { "type": "integer" }, "b": { "type": "integer" } },
+                "required": ["a", "b"]
+            })),
+        )
+        .build();
+
+    let provider = OpenAiProvider::new(std::env::var("OPENAI_API_KEY").unwrap());
+    let session = runtime
+        .run_agent_native(AgentId::new("calc"), "What is 48611 + 1389?", &provider)
+        .await?;
+    println!("{}", session.final_answer().unwrap_or_default());
+    Ok(())
+}
+```
+
+`OpenAiProvider::with_base_url` points the same code at any OpenAI-compatible server (vLLM, Ollama, LM Studio, Hugging Face's router). For anything else, implement the one-method `ToolCallingModel` trait. Memory recall, backpressure, checkpoints, metrics and the session record work exactly as with `run_agent`.
+
+### 6. Tools from MCP servers
+
+With the `mcp` feature, every tool of a [Model Context Protocol](https://modelcontextprotocol.io) server becomes an agent tool, with the server's own description and schema (official `rmcp` SDK; needs Rust 1.88):
+
+```rust,no_run
+use llm_agent_runtime::mcp::McpClient;
+use llm_agent_runtime::prelude::*;
+
+#[tokio::main]
+async fn main() -> Result<(), AgentRuntimeError> {
+    // Local server over stdio, or McpClient::connect_http("https://.../mcp") for a remote one.
+    let fs = McpClient::spawn("npx", &["-y", "@modelcontextprotocol/server-filesystem", "."]).await?;
+
+    let runtime = AgentRuntime::builder()
+        .with_agent_config(AgentConfig::new(8, "claude-haiku-4-5"))
+        .register_tools(fs.tools().await?)
+        .build();
+    // ...then runtime.run_agent_native(...) as above.
+    let _ = runtime;
     Ok(())
 }
 ```
@@ -135,12 +194,13 @@ async fn main() -> Result<(), AgentRuntimeError> {
 | `graph` | yes | `GraphStore`, BFS, DFS, Dijkstra shortest-path, transitive closure, degree/betweenness centrality, community detection, cycle detection, subgraph extraction |
 | `wasm` | yes | `ReActLoop` with sync + streaming inference, `ToolRegistry`, `ToolSpec`, `parse_react_step`, `AgentConfig`, observer callbacks, step-level metrics |
 | `persistence` | no | `PersistenceBackend` async trait + `FilePersistenceBackend`; per-session and per-step checkpointing to disk |
-| `providers` | no | `LlmProvider` async trait |
+| `providers` | no | `LlmProvider` async trait (the `ToolCallingModel` trait for native tool calling is always available) |
 | `anthropic` | no | Built-in Anthropic Messages API provider with SSE streaming (implies `providers` + `reqwest`) |
 | `openai` | no | Built-in OpenAI Chat Completions provider with SSE streaming and custom base-URL support (implies `providers` + `reqwest`) |
 | `redis-circuit-breaker` | no | Distributed `CircuitBreakerBackend` state via Redis |
 | `distributed` | no | Distributed agent coordination via Redis: work queue and leader election |
-| `otel` | no | OpenTelemetry tracing spans for tool calls (implies `opentelemetry` + `opentelemetry_sdk` + `opentelemetry-otlp`) |
+| `otel` | no | An OpenTelemetry span for every tool call (`agent.tool_call.<name>`, input/output size, success, error), and `init_otlp_tracer(endpoint)` to export them to Jaeger, Tempo, Grafana or any OTLP collector |
+| `mcp` | no | `McpClient`: tools from any MCP server (stdio or streamable HTTP) as agent tools, via the official `rmcp` SDK. Needs Rust 1.88 |
 | `compression` | no | `MemoryCompressor`, `ImportanceStrategy`, `MemorySummary`, token-budget-aware compression of episodic memory |
 | `discovery` | no | `AgentRegistry`, `CapabilityQuery`, `CapabilityMatch`, TTL-based peer capability advertisement and tag-overlap matching |
 | `full` | no | All of the above simultaneously |
@@ -149,7 +209,7 @@ async fn main() -> Result<(), AgentRuntimeError> {
 
 ## Architecture
 
-```
+```text
   User Code
      │
      ▼
@@ -249,7 +309,7 @@ use llm_agent_runtime::prelude::*;
 let mut runtime = AgentRuntime::quick(5, "my-model");
 if let Some(scope) = runtime.with_persona("coder") {
     println!("active: {}", scope.persona().name);
-} // previous persona restored here
+}; // previous persona restored here
 ```
 
 ---
@@ -311,6 +371,9 @@ async fn main() {
 You can also create a bus from the runtime:
 
 ```rust
+use llm_agent_runtime::prelude::*;
+
+let runtime = AgentRuntime::quick(5, "my-model");
 let bus = runtime.bus(256);
 ```
 
@@ -444,7 +507,7 @@ async fn main() {
 
     println!("\nCompleted: {}", session.is_completed());
     println!("Steps: {}", session.step_count());
-    println!("Tokens: {}", session.total_token_count());
+    println!("Tokens: {}", session.total_tokens);
     println!("Answer: {:?}", session.final_answer());
 }
 ```
@@ -453,7 +516,7 @@ async fn main() {
 
 ## Architecture
 
-```
+```text
   User Code
      |
      v
@@ -538,7 +601,7 @@ async fn main() {
 
 The `plan_execute` module provides a **structured three-phase agent loop** as a production-grade alternative to open-ended ReAct for well-defined multi-step workflows:
 
-```
+```text
   Goal
    |
    v
@@ -816,9 +879,11 @@ Capability matching is a two-pass algorithm:
 
 ## API Reference
 
+The snippets below show call shapes; the [`examples/`](examples/) directory and the docs on [docs.rs](https://docs.rs/llm-agent-runtime) have complete programs.
+
 ### `AgentRuntime` builder
 
-```rust
+```rust,ignore
 let runtime = AgentRuntime::builder()       // AgentRuntimeBuilder<NeedsConfig>
     .with_memory(EpisodicStore::new())
     .with_working_memory(WorkingMemory::new(64)?)
@@ -865,21 +930,21 @@ let runtime = AgentRuntime::builder()       // AgentRuntimeBuilder<NeedsConfig>
 
 ### `BackpressureGuard`
 
-```rust
+```rust,ignore
 let guard = BackpressureGuard::new(100)?   // hard limit
     .with_soft_limit(75)?;                 // warn when depth reaches 75
 ```
 
 ### `CircuitBreaker`
 
-```rust
+```rust,ignore
 let cb = CircuitBreaker::new("my-service", 5, Duration::from_secs(30))?;
 let result = cb.call(|| my_fallible_operation())?;
 ```
 
 ### `ToolSpec`
 
-```rust
+```rust,ignore
 // Synchronous handler
 let spec = ToolSpec::new("greet", "Greets someone", |_args| {
     serde_json::json!({ "message": "hello" })
@@ -1050,7 +1115,9 @@ planner.register_method(Method {
 // Plan against a world state.
 let mut world = std::collections::HashMap::new();
 world.insert("company_type".into(), "public".into());
-let plan = planner.plan_with_world(Task::compound("ResearchCompany"), &world)?;
+let plan = planner
+    .plan_with_world(Task::compound("ResearchCompany"), &world)
+    .expect("a plan within max_depth");
 
 println!("Plan has {} steps:", plan.len());
 for step in plan.steps() {
@@ -1278,7 +1345,7 @@ and skipped without aborting the load.
 
 The score for each skill against a task description is:
 
-```
+```text
 score = 0.5 × (capability_overlap / capability_count)
       + 0.5 × (description_word_overlap / description_word_count)
 ```
@@ -1398,7 +1465,7 @@ println!("{} agents tracked", all.len());
 
 ## Status
 
-The crate is large (about 100 public modules) and moves quickly; the core path is `AgentRuntime`, the ReAct loop, memory, graph, orchestrator and providers described above, while many later modules are standalone utilities. The CI workflow is currently failing (`cargo test`, `cargo doc` and the MSRV 1.85 check), so pin a version and run your own tests before depending on less-used modules. crates.io has 1.74.0; this repository is at 1.75.0.
+The crate is large (about 100 public modules); the core path is `AgentRuntime`, the ReAct and native tool-calling loops, memory, graph, orchestrator, providers and MCP described above, while many later modules are standalone utilities. The test suite runs on GitLab CI with every feature enabled. Pin a version and run your own tests before depending on the less-used modules.
 
 ---
 
@@ -1428,7 +1495,7 @@ For bug reports, please include the `cargo --version`, `rustc --version`, your `
 The built-in `ToolRegistry` lets you register named async tools and call them by name.
 Three tools ship out of the box: `echo`, `calculator`, and `timestamp`.
 
-```
+```text
   ┌──────────────────────────────────────────────────────────┐
   │                     ToolRegistry                         │
   │                                                          │
@@ -1515,7 +1582,7 @@ let registry = runtime.tool_registry();
 `CheckpointManager` wraps a pluggable `CheckpointStore` with auto-checkpointing
 and per-agent rotation of old checkpoints.
 
-```
+```text
   ┌─────────────────────────────────────────────────────────────┐
   │                   CheckpointManager                         │
   │                                                             │
@@ -1589,7 +1656,7 @@ let mgr = runtime.checkpoint();
 
 `agent-runtime` includes a full vector similarity memory subsystem in `src/vector_memory.rs`.
 
-```
+```text
 Text Input
     │
     ▼
@@ -1647,7 +1714,7 @@ let mem_handle = runtime.semantic_memory();
 
 Pre-normalised embeddings make similarity search O(d) per entry:
 
-```
+```text
 sim(a, b) = dot(a/|a|, b/|b|)  =  Σ aᵢbᵢ   (since |a|=|b|=1)
 ```
 
@@ -1657,7 +1724,7 @@ sim(a, b) = dot(a/|a|, b/|b|)  =  Σ aᵢbᵢ   (since |a|=|b|=1)
 
 `agent-runtime` includes an Erlang-style supervisor in `src/supervisor.rs`.
 
-```
+```text
 Supervisor::start(children, strategy)
          │
          │  spawns background monitor loop
@@ -1848,7 +1915,7 @@ moderator synthesises the strongest points into a final answer.
 
 ### Protocol
 
-```
+```text
   Round 1:  Each debater receives the topic + position → opening argument
             (all run concurrently via JoinSet)
 
@@ -1863,7 +1930,7 @@ moderator synthesises the strongest points into a final answer.
 
 ### ASCII Diagram
 
-```
+```text
   ┌──────────────────────────────────────────────────────────┐
   │                  DebateOrchestrator                      │
   │                                                          │
@@ -1919,7 +1986,7 @@ subgraph extraction, substring search, and Graphviz DOT export.
 
 ### ASCII Diagram
 
-```
+```text
   ┌──────────────────────────────────────────────────────────┐
   │                   KnowledgeGraph                         │
   │                                                          │

@@ -443,7 +443,10 @@ mod tests {
 
     #[test]
     fn test_span_guard() {
-        let logger = Arc::new(AgentLogger::new("agent-5"));
+        // Span records are Debug level; the default minimum is Info.
+        let mut logger = AgentLogger::new("agent-5");
+        logger.min_level = LogLevel::Debug;
+        let logger = Arc::new(logger);
         {
             let _guard = logger.span("my-span");
         }
@@ -453,7 +456,7 @@ mod tests {
             ..Default::default()
         };
         let logs = logger.recent_logs(10, &filter);
-        // At least start message logged.
-        assert!(!logs.is_empty());
+        assert_eq!(logs.len(), 2, "{logs:?}");
+        assert!(logs[1].message.contains("completed"));
     }
 }

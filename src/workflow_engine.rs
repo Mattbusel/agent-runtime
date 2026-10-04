@@ -462,7 +462,7 @@ mod tests {
         let mut engine = WorkflowEngine::new();
         let eid = engine.submit(def);
         let result = engine.simulate_run(&eid);
-        assert_eq!(result, Err(WorkflowError::CycleDetected));
+        assert!(matches!(result, Err(WorkflowError::CycleDetected)));
     }
 
     #[test]

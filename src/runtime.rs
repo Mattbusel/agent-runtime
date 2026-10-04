@@ -2485,7 +2485,9 @@ impl AgentRuntimeBuilder<NeedsConfig> {
     /// making `build()` available.
     pub fn with_agent_config(self, config: AgentConfig) -> AgentRuntimeBuilder<HasConfig> {
         AgentRuntimeBuilder {
+            #[cfg(feature = "memory")]
             memory: self.memory,
+            #[cfg(feature = "memory")]
             working: self.working,
             #[cfg(feature = "graph")]
             graph: self.graph,
@@ -2637,6 +2639,13 @@ impl std::fmt::Debug for AgentRuntime {
         s.field("semantic_memory_store", &"SemanticMemory<String>");
         s.finish()
     }
+}
+
+/// How a session talks to the model: text ReAct (`infer` closure) or native
+/// tool calling.
+enum Driver<'a, F> {
+    Text(F),
+    Native(&'a dyn crate::native_tools::ToolCallingModel),
 }
 
 impl AgentRuntime {
@@ -2812,6 +2821,41 @@ impl AgentRuntime {
         F: FnMut(String) -> Fut,
         Fut: std::future::Future<Output = String>,
     {
+        self.run_session(agent_id, prompt, Driver::Text(infer)).await
+    }
+
+    /// Run the agent with native tool calling: `model` receives every
+    /// registered tool as JSON Schema and returns structured tool calls (see
+    /// [`ReActLoop::run_native`]). Memory recall, working memory,
+    /// backpressure, checkpoints and metrics work as in
+    /// [`run_agent`](Self::run_agent); the model name comes from
+    /// [`AgentConfig`] and its system prompt is sent as the system message.
+    ///
+    /// `model` is any [`ToolCallingModel`](crate::native_tools::ToolCallingModel):
+    /// the built-in Anthropic and OpenAI providers, an OpenAI-compatible
+    /// local server, or your own implementation.
+    #[tracing::instrument(skip(self, model), fields(agent_id = %agent_id))]
+    pub async fn run_agent_native(
+        &self,
+        agent_id: AgentId,
+        prompt: &str,
+        model: &dyn crate::native_tools::ToolCallingModel,
+    ) -> Result<AgentSession, AgentRuntimeError> {
+        type NoText = fn(String) -> std::future::Ready<String>;
+        self.run_session(agent_id, prompt, Driver::<NoText>::Native(model))
+            .await
+    }
+
+    async fn run_session<F, Fut>(
+        &self,
+        agent_id: AgentId,
+        prompt: &str,
+        driver: Driver<'_, F>,
+    ) -> Result<AgentSession, AgentRuntimeError>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: std::future::Future<Output = String>,
+    {
         // Acquire backpressure slot before counting the session — shed requests
         // must not inflate total_sessions or active_sessions.
         #[cfg(feature = "orchestrator")]
@@ -2834,7 +2878,7 @@ impl AgentRuntime {
         self.metrics.active_sessions.fetch_add(1, Ordering::Relaxed);
 
         tracing::info!(agent_id = %agent_id, "agent session starting");
-        let outcome = self.run_agent_inner(agent_id.clone(), prompt, infer).await;
+        let outcome = self.run_agent_inner(agent_id.clone(), prompt, driver).await;
 
         // Always release backpressure — success or error.
         #[cfg(feature = "orchestrator")]
@@ -2872,12 +2916,12 @@ impl AgentRuntime {
     }
 
     /// Inner implementation of `run_agent`, called after backpressure is acquired.
-    #[tracing::instrument(skip(self, infer), fields(agent_id = %agent_id, session_id = tracing::field::Empty))]
+    #[tracing::instrument(skip(self, driver), fields(agent_id = %agent_id, session_id = tracing::field::Empty))]
     async fn run_agent_inner<F, Fut>(
         &self,
         agent_id: AgentId,
         prompt: &str,
-        infer: F,
+        driver: Driver<'_, F>,
     ) -> Result<AgentSession, AgentRuntimeError>
     where
         F: FnMut(String) -> Fut,
@@ -2998,6 +3042,7 @@ impl AgentRuntime {
         for tool in &self.tools {
             let tool_arc = Arc::clone(tool);
             let required_fields = tool_arc.required_fields.clone();
+            let input_schema = tool_arc.input_schema.clone();
             #[cfg(feature = "orchestrator")]
             let circuit_breaker = tool_arc.circuit_breaker.clone();
 
@@ -3010,6 +3055,7 @@ impl AgentRuntime {
                 },
             )
             .with_required_fields(required_fields);
+            spec.input_schema = input_schema;
 
             #[cfg(feature = "orchestrator")]
             if let Some(cb) = circuit_breaker {
@@ -3024,7 +3070,10 @@ impl AgentRuntime {
         tracing::Span::current().record("session_id", &session_id.as_str());
 
         let infer_start = Instant::now();
-        let steps = react_loop.run(&enriched_prompt, infer).await?;
+        let steps = match driver {
+            Driver::Text(infer) => react_loop.run(&enriched_prompt, infer).await?,
+            Driver::Native(model) => react_loop.run_native(&enriched_prompt, model).await?,
+        };
         let duration_ms = start.elapsed().as_millis() as u64;
         let infer_latency_ms = infer_start.elapsed().as_millis() as u64;
 
@@ -3404,14 +3453,13 @@ impl AgentRuntime {
     ///     .with_agent_config(AgentConfig::new(5, "stub"))
     ///     .build();
     ///
-    /// let mut n = 0usize;
+    /// let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     /// let (plan, verification) = runtime
     ///     .run_plan_execute(
     ///         AgentId::new("planner"),
     ///         "Double the number 21",
     ///         move |_ctx: String| {
-    ///             n += 1;
-    ///             let step = n;
+    ///             let step = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     ///             async move {
     ///                 if step == 1 {
     ///                     "1. Use the double tool | tool:none | expected:42\n".to_string()

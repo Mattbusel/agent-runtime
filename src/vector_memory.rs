@@ -94,10 +94,15 @@ impl Embedding {
 
     /// Compute cosine similarity with another embedding.
     ///
-    /// Returns a value in `[-1.0, 1.0]`, or `0.0` when either vector is zero
-    /// or they have different dimensions.
+    /// Returns a value in `[-1.0, 1.0]`, or `0.0` when either vector is zero.
+    ///
+    /// A shorter vector is compared as if padded with zeros. That is what
+    /// [`BagOfWordsEmbedder`] needs: its vocabulary only grows, so an
+    /// embedding made earlier is a prefix of the same text's embedding made
+    /// later. (Before 1.76 differing lengths returned `0.0`, so every stored
+    /// memory scored zero against any query made after the vocabulary grew.)
     pub fn cosine_similarity(&self, other: &Embedding) -> f32 {
-        if self.0.len() != other.0.len() || self.0.is_empty() {
+        if self.0.is_empty() || other.0.is_empty() {
             return 0.0;
         }
         let dot: f32 = self.0.iter().zip(other.0.iter()).map(|(a, b)| a * b).sum();
@@ -194,7 +199,9 @@ impl<T> VectorMemory<T> {
             .entries
             .iter()
             .enumerate()
-            .map(|(i, (emb, _))| (emb.dot(&q), i))
+            // Cosine, not `dot`: stored and query vectors may differ in length
+            // (see `Embedding::cosine_similarity`).
+            .map(|(i, (emb, _))| (emb.cosine_similarity(&q), i))
             .collect();
 
         // Sort descending by similarity; stable so insertion order breaks ties.
@@ -642,6 +649,20 @@ mod tests {
         embedder.embed("dragon elderberry fig");
         let v2 = embedder.vocab_size();
         assert!(v2 > v1);
+    }
+
+    #[test]
+    fn semantic_search_still_finds_memories_after_the_vocabulary_grows() {
+        let mut embedder = BagOfWordsEmbedder::new();
+        let mut store: VectorMemory<&str> = VectorMemory::new();
+        store.insert(embedder.embed("rust borrow checker lifetimes"), "rust");
+        store.insert(embedder.embed("sourdough bread starter flour"), "bread");
+        // New words grow the vocabulary after both memories were stored.
+        embedder.embed("quantum chromodynamics gluon confinement");
+        let query = embedder.embed_query("how do lifetimes work in the borrow checker");
+        let hits = store.search(&query, 1);
+        assert_eq!(hits.first().map(|(_, v)| **v), Some("rust"));
+        assert!(hits[0].0 > 0.3, "score {}", hits[0].0);
     }
 
     #[test]

@@ -38,7 +38,7 @@
 //!
 //! let changes = world.changes_needed(&goal);
 //! assert_eq!(changes.len(), 1);
-//! assert_eq!(changes[0].0, "door_locked");
+//! assert_eq!(changes[0].key, "door_locked");
 //! ```
 
 use chrono::{DateTime, Utc};

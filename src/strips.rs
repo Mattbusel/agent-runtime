@@ -57,7 +57,7 @@
 //! ```
 
 use crate::world_model::{FactValue, WorldState};
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // StripsFact
@@ -176,97 +176,88 @@ impl StripsPlanner {
     /// Find a plan (ordered sequence of actions) that transforms `initial` into
     /// a state satisfying `goal`.
     ///
-    /// Uses iterative-deepening depth-first backward chaining.  Returns the
-    /// shortest plan found within `max_depth`, or an error if none exists.
+    /// Iterative-deepening depth-first search over applicable actions, so the
+    /// plan returned has the fewest actions (ties go to actions that achieve
+    /// an open goal fact, then to lower cost). States already reached by a
+    /// shorter path are not expanded again.
     ///
     /// # Errors
     ///
-    /// - [`StripsPlannerError::NoSolution`] — no sequence of registered actions
-    ///   can achieve the goal.
-    /// - [`StripsPlannerError::CircularPlan`] — a repeated goal state was detected.
-    /// - [`StripsPlannerError::DepthExceeded`] — `max_depth` was reached before a
-    ///   solution was found.
+    /// - [`StripsPlannerError::NoSolution`] — no sequence of at most
+    ///   `max_depth` registered actions achieves the goal.
+    ///
+    /// (`CircularPlan` and `DepthExceeded` are no longer returned; repeated
+    /// states are pruned instead.)
     pub fn plan(
         &self,
         initial: &WorldState,
         goal: &WorldState,
     ) -> Result<Vec<StripsAction>, StripsPlannerError> {
-        // Iterative deepening: try depths 1..=max_depth.
+        if initial.satisfies(goal) {
+            return Ok(Vec::new());
+        }
         for depth_limit in 1..=self.max_depth {
-            let mut visited: HashSet<String> = HashSet::new();
-            if let Some(plan) =
-                self.backward_chain(initial, goal, &[], depth_limit, &mut visited)?
-            {
-                return Ok(plan);
+            // Best depth at which each state was reached during this pass.
+            let mut seen: HashMap<String, usize> = HashMap::new();
+            let mut path = Vec::new();
+            if self.search(initial, goal, &mut path, depth_limit, &mut seen) {
+                return Ok(path);
             }
         }
         Err(StripsPlannerError::NoSolution)
     }
 
-    // ------------------------------------------------------------------
-    // Backward chaining (recursive)
-    // ------------------------------------------------------------------
-
-    fn backward_chain(
+    fn search(
         &self,
-        initial: &WorldState,
+        state: &WorldState,
         goal: &WorldState,
-        prefix: &[StripsAction],
-        remaining_depth: usize,
-        visited: &mut HashSet<String>,
-    ) -> Result<Option<Vec<StripsAction>>, StripsPlannerError> {
-        // Base case: simulate the plan on the initial state; if the resulting
-        // state satisfies the goal we have a solution.
-        let simulated = self.simulate(initial, prefix);
-        if simulated.satisfies(goal) {
-            return Ok(Some(prefix.to_vec()));
+        path: &mut Vec<StripsAction>,
+        remaining: usize,
+        seen: &mut HashMap<String, usize>,
+    ) -> bool {
+        if state.satisfies(goal) {
+            return true;
         }
-
-        if remaining_depth == 0 {
-            return Ok(None);
+        if remaining == 0 {
+            return false;
         }
-
-        // Circular-plan guard: hash the current goal fingerprint + plan length.
-        let fingerprint = Self::fingerprint(goal, prefix.len());
-        if visited.contains(&fingerprint) {
-            return Err(StripsPlannerError::CircularPlan);
+        let key = Self::state_key(state);
+        if seen.get(&key).is_some_and(|&depth| depth <= path.len()) {
+            return false;
         }
-        visited.insert(fingerprint);
+        seen.insert(key, path.len());
 
-        // Find actions that add at least one unsatisfied goal fact.
-        let open_goals = goal.changes_needed(&simulated);
-        let mut candidates: Vec<&StripsAction> = self
-            .actions
-            .iter()
-            .filter(|a| {
-                a.add_effects
-                    .iter()
-                    .any(|eff| open_goals.iter().any(|og| og.key == eff.key && og.required == eff.value))
-            })
-            .collect();
-
-        // Sort by cost (ascending) for greedy best-first among candidates.
-        candidates.sort_by_key(|a| a.cost);
+        let open_goals = state.changes_needed(goal);
+        let mut candidates: Vec<&StripsAction> =
+            self.actions.iter().filter(|a| a.applicable(state)).collect();
+        candidates.sort_by_key(|a| {
+            let achieves_goal = a.add_effects.iter().any(|eff| {
+                open_goals.iter().any(|og| og.key == eff.key && og.required == eff.value)
+            });
+            (!achieves_goal, a.cost)
+        });
 
         for action in candidates {
-            // Build the candidate plan by appending this action.
-            let mut next_prefix: Vec<StripsAction> = prefix.to_vec();
-            next_prefix.push(action.clone());
-
-            let mut child_visited = visited.clone();
-            match self.backward_chain(
-                initial,
-                goal,
-                &next_prefix,
-                remaining_depth - 1,
-                &mut child_visited,
-            )? {
-                Some(plan) => return Ok(Some(plan)),
-                None => continue,
+            let next = action.apply(state);
+            if Self::state_key(&next) == Self::state_key(state) {
+                continue; // no-op in this state
             }
+            path.push(action.clone());
+            if self.search(&next, goal, path, remaining - 1, seen) {
+                return true;
+            }
+            path.pop();
         }
+        false
+    }
 
-        Ok(None)
+    fn state_key(state: &WorldState) -> String {
+        let mut facts: Vec<String> = state
+            .keys()
+            .filter_map(|k| state.get(k).map(|v| format!("{k}={v}")))
+            .collect();
+        facts.sort();
+        facts.join("|")
     }
 
     // Simulate a sequence of actions on an initial state, returning the
@@ -280,16 +271,6 @@ impl StripsPlanner {
             }
         }
         state
-    }
-
-    // Build a cheap string fingerprint for cycle detection.
-    fn fingerprint(goal: &WorldState, plan_len: usize) -> String {
-        let mut keys: Vec<String> = goal
-            .keys()
-            .filter_map(|k| goal.get(k).map(|v| format!("{k}={v}")))
-            .collect();
-        keys.sort();
-        format!("{}@{}", keys.join("|"), plan_len)
     }
 }
 
