@@ -1,5 +1,13 @@
 # agent-runtime
 
+<!-- outcome-block -->
+**Build an LLM agent in Rust without rebuilding the loop, memory, retries and multi-agent messaging every time, and test it with no API key.**
+
+**Why this over the alternatives:** Agent code usually grows these pieces by hand. Here they sit behind one typestate builder, so a missing config is a compile error, not a runtime panic.
+
+**Guarantee:** if it doesn't do what this README says, [open an issue](https://github.com/Mattbusel/agent-runtime/issues) and I'll fix it.
+<!-- outcome-block -->
+
 [![Crates.io](https://img.shields.io/crates/v/llm-agent-runtime.svg)](https://crates.io/crates/llm-agent-runtime)
 [![docs.rs](https://docs.rs/llm-agent-runtime/badge.svg)](https://docs.rs/llm-agent-runtime)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
