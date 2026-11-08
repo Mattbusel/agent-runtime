@@ -1,20 +1,26 @@
 # agent-runtime
 
 <!-- outcome-block -->
-**Build an LLM agent in Rust without rebuilding the loop, memory, retries and multi-agent messaging every time, and test it with no API key.**
+**Build an LLM agent in Rust without rewriting the loop, memory, retries and multi-agent messaging each time. Test it with no API key.**
 
-**Why this over the alternatives:** Agent code usually grows these pieces by hand. Here they sit behind one typestate builder, so a missing config is a compile error, not a runtime panic.
+Agent code usually grows these pieces by hand. Here they sit behind one builder. A missing config is a compile error, not a runtime panic.
 
-**Guarantee:** if it doesn't do what this README says, [open an issue](https://github.com/Mattbusel/agent-runtime/issues) and I'll fix it.
+If it doesn't do what this README says, [open an issue](https://github.com/Mattbusel/agent-runtime/issues) and I'll fix it.
 <!-- outcome-block -->
 
 [![Crates.io](https://img.shields.io/crates/v/llm-agent-runtime.svg)](https://crates.io/crates/llm-agent-runtime)
 [![docs.rs](https://docs.rs/llm-agent-runtime/badge.svg)](https://docs.rs/llm-agent-runtime)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A Rust crate (`llm-agent-runtime`) for building LLM agents on Tokio: a ReAct tool-calling loop, a plan-execute-verify loop, episodic, semantic and working memory, a knowledge graph, circuit breakers and backpressure, Anthropic and OpenAI providers with streaming, and a multi-agent message bus, all behind one builder.
+A Rust crate (`llm-agent-runtime`) for LLM agents on Tokio. One builder gives you:
 
-Agent code tends to grow the same pieces every time: a loop that parses the model's action and calls a tool, somewhere to remember things between turns, retries and circuit breakers around flaky tools, and a way for several agents to talk. This crate puts those pieces in one place with typed errors. The builder uses a compile-time typestate, so forgetting to set an `AgentConfig` is a compile error rather than a runtime panic, and the default feature set runs entirely in process: you can pass a closure as the "model" and test an agent without any API key.
+- a ReAct tool-calling loop and a plan-execute-verify loop
+- episodic, semantic and working memory, plus a knowledge graph
+- circuit breakers and backpressure
+- Anthropic and OpenAI providers with streaming
+- a multi-agent message bus
+
+Errors are typed. Forget `AgentConfig` and it won't compile. The default features run fully in process, so you can pass a closure as the "model" and test an agent with no API key.
 
 ## Quick start
 
@@ -29,13 +35,13 @@ serde_json = "1"
 
 For the unreleased code on `master`: `llm-agent-runtime = { git = "https://gitlab.com/mattbusel/agent-runtime" }`.
 
-To opt in to specific subsystems only:
+Only some parts:
 
 ```toml
 llm-agent-runtime = { version = "1.76", default-features = false, features = ["memory", "orchestrator"] }
 ```
 
-To enable built-in LLM providers:
+With the built-in LLM providers:
 
 ```toml
 llm-agent-runtime = { version = "1.76", features = ["anthropic", "openai"] }
@@ -51,7 +57,7 @@ export RUST_LOG="agent_runtime=debug"   # optional structured tracing output
 
 ### 3. Run an agent (no external services required)
 
-The default feature set runs entirely in-process:
+The default features run fully in process:
 
 ```rust
 use llm_agent_runtime::prelude::*;
@@ -132,7 +138,7 @@ async fn main() -> Result<(), AgentRuntimeError> {
 
 ### 5. Native tool calling
 
-`run_agent_native` sends your tools to the model as JSON Schema and gets structured tool calls back (Anthropic `tool_use`, OpenAI `tool_calls`), so there is no "Action: ..." text format for the model to get wrong. Arguments are checked against the schema before your tool runs; a bad call goes back to the model as an error naming the field, and the model fixes it on the next turn.
+`run_agent_native` sends your tools to the model as JSON Schema and gets structured tool calls back (Anthropic `tool_use`, OpenAI `tool_calls`). No "Action: ..." text for the model to get wrong. Arguments are checked against the schema before your tool runs. A bad call goes back to the model as an error naming the field, and the model fixes it next turn.
 
 ```rust,no_run
 use llm_agent_runtime::prelude::*;
@@ -164,11 +170,11 @@ async fn main() -> Result<(), AgentRuntimeError> {
 }
 ```
 
-`OpenAiProvider::with_base_url` points the same code at any OpenAI-compatible server (vLLM, Ollama, LM Studio, Hugging Face's router). For anything else, implement the one-method `ToolCallingModel` trait. Memory recall, backpressure, checkpoints, metrics and the session record work exactly as with `run_agent`.
+`OpenAiProvider::with_base_url` points the same code at any OpenAI-compatible server (vLLM, Ollama, LM Studio, Hugging Face's router). For anything else, implement the one-method `ToolCallingModel` trait. Memory recall, backpressure, checkpoints, metrics and the session record work the same as `run_agent`.
 
 ### 6. Tools from MCP servers
 
-With the `mcp` feature, every tool of a [Model Context Protocol](https://modelcontextprotocol.io) server becomes an agent tool, with the server's own description and schema (official `rmcp` SDK; needs Rust 1.88):
+With the `mcp` feature, every tool on a [Model Context Protocol](https://modelcontextprotocol.io) server becomes an agent tool, with the server's own description and schema (official `rmcp` SDK, needs Rust 1.88):
 
 ```rust,no_run
 use llm_agent_runtime::mcp::McpClient;
@@ -254,11 +260,10 @@ async fn main() -> Result<(), AgentRuntimeError> {
 
 ## Long-Term Memory
 
-The `ltm` module provides a persistent in-process memory store backed by the
-Ebbinghaus forgetting curve.  Entries decay exponentially over time; entries
-whose `decayed_importance` falls below `min_importance` are pruned on each
-`decay()` call.  Similar entries (cosine similarity > 0.85) can be merged with
-`consolidate()`.
+The `ltm` module is an in-process memory store that forgets on the Ebbinghaus
+curve. Entries fade over time. Each `decay()` call drops entries whose
+`decayed_importance` is below `min_importance`. `consolidate()` merges similar
+entries (cosine similarity > 0.85).
 
 ```rust,no_run
 use llm_agent_runtime::ltm::{LtmConfig, LtmStore};
@@ -284,9 +289,8 @@ store.consolidate();  // merge near-duplicate entries
 
 ## Agent Persona System
 
-The `persona` module lets you define named personas with a communication tone,
-system prompt, and behavioural constraints.  Five built-in personas are
-provided: `assistant`, `researcher`, `coder`, `critic`, and `teacher`.
+The `persona` module defines named personas with a tone, system prompt and
+rules. Five are built in: `assistant`, `researcher`, `coder`, `critic` and `teacher`.
 
 ```rust,no_run
 use llm_agent_runtime::persona::{PersonaRegistry, PersonaBuilder, PersonaTone};
@@ -324,9 +328,8 @@ if let Some(scope) = runtime.with_persona("coder") {
 
 ## Multi-Agent Message Bus
 
-The `AgentBus` is an async broadcast channel where agents can publish and subscribe to
-messages.  Every subscriber receives every published message; each `BusSubscription`
-filters silently for messages addressed to its agent ID or role.
+`AgentBus` is an async broadcast channel. Agents publish and subscribe. Every subscriber
+gets every message, and each `BusSubscription` keeps only those addressed to its agent ID or role.
 
 ### Targets
 
@@ -389,8 +392,8 @@ let bus = runtime.bus(256);
 
 ## Agent Teams
 
-`AgentTeam` declares a group of collaborating agents.  `TeamOrchestrator` drives the
-run using the `AgentBus` for message routing and one of three consensus strategies.
+`AgentTeam` is a group of agents working together. `TeamOrchestrator` runs them,
+routes messages over `AgentBus`, and picks one of three ways to agree.
 
 ### Communication Topologies
 
@@ -449,8 +452,8 @@ async fn main() -> Result<(), AgentRuntimeError> {
 
 ## Streaming Inference
 
-`StreamingReActLoop` runs the same Thought-Action-Observation protocol as `ReActLoop`
-but consumes tokens one at a time, firing callbacks as they arrive.
+`StreamingReActLoop` runs the same Thought-Action-Observation loop as `ReActLoop`,
+but reads tokens one at a time and fires callbacks as they arrive.
 
 ### Callbacks
 
@@ -607,7 +610,7 @@ async fn main() {
 
 ## Plan-Execute-Verify Loop
 
-The `plan_execute` module provides a **structured three-phase agent loop** as a production-grade alternative to open-ended ReAct for well-defined multi-step workflows:
+The `plan_execute` module is a **three-phase agent loop**. Use it instead of open-ended ReAct when the multi-step job is well defined:
 
 ```text
   Goal
@@ -697,7 +700,7 @@ async fn main() -> Result<(), AgentRuntimeError> {
 
 ## Memory Consolidation
 
-Long-running agents accumulate hundreds of episodic memories that gradually become redundant.  The `consolidation` module provides a background Tokio task that automatically merges similar memories using **TF-IDF k-means clustering**.
+Long-running agents pile up hundreds of memories that repeat each other. The `consolidation` module runs a background Tokio task that merges similar ones with **TF-IDF k-means clustering**.
 
 ### How it works
 
@@ -752,7 +755,7 @@ async fn main() {
 
 ## Memory Compression
 
-When episodic history grows large, `MemoryCompressor` prunes it to fit a token budget while retaining the most useful turns.
+When history gets large, `MemoryCompressor` trims it to a token budget and keeps the most useful turns.
 
 ```rust
 use llm_agent_runtime::memory_compression::{
@@ -818,7 +821,7 @@ for s in &summaries {
 
 ## Agent Discovery
 
-`AgentRegistry` is a shared, `Arc`-backed, async capability store. Agents register their capabilities and other agents query for the best match.
+`AgentRegistry` is a shared, `Arc`-backed, async store of what each agent can do. Agents list their skills. Other agents ask for the best match.
 
 ```rust
 use llm_agent_runtime::discovery::{
@@ -1035,9 +1038,8 @@ cargo run --example <name> --features <required-features>
 
 ## Advanced: Tool Capability Sandbox
 
-The `sandbox` module enforces a capability-based security model, every tool
-must declare what permissions it requires, and the runtime only allows calls
-when the current grant set satisfies all requirements.
+The `sandbox` module uses permissions. Every tool declares what it needs.
+The runtime only allows a call when the current grants cover all of it.
 
 This prevents prompt-injection attacks from escalating to file writes, network
 calls, or shell execution without explicit operator approval.
@@ -1085,11 +1087,10 @@ for entry in sandbox.audit_log() {
 
 ## Advanced: HTN Goal Planner
 
-The `planner` module adds a **Hierarchical Task Network** planner as a
-structured alternative to the open-ended ReAct loop.  For well-defined
-multi-step workflows you register decomposition methods once, and the planner
-expands any compound goal into a fully ordered sequence of primitive tool calls
-before execution begins.
+The `planner` module adds a **Hierarchical Task Network** planner, an
+alternative to the open-ended ReAct loop. Register how to break goals down once.
+The planner turns any big goal into an ordered list of tool calls before
+anything runs.
 
 ```rust
 use llm_agent_runtime::{Planner, PlannerConfig, Task, Method, Precondition};
@@ -1146,11 +1147,10 @@ Thought-Action-Observation cycle.
 
 ## Agent Swarm Coordination
 
-`SwarmOrchestrator` decomposes a complex task into parallelisable subtasks,
-dispatches each to a registered worker agent, and synthesises the results into
-one coherent answer.  A configurable convergence threshold lets the orchestrator
-short-circuit as soon as enough results arrive, avoiding unnecessary latency
-when a partial answer is sufficient.
+`SwarmOrchestrator` splits a big task into subtasks that run in parallel,
+sends each to a worker agent, and merges the results into one answer.
+A threshold lets it stop as soon as enough results are in, so you don't wait
+when a partial answer is enough.
 
 ```rust,no_run
 use llm_agent_runtime::swarm_v2::{SwarmConfig, SwarmOrchestrator, TaskSplitStrategy};
@@ -1207,8 +1207,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## High-Level Memory Compression
 
-`memory_compress` builds on the low-level `memory_compression` module with
-three composable strategies that can be chained in sequence.
+`memory_compress` sits on top of the low-level `memory_compression` module.
+It has three strategies you can chain.
 
 | Strategy | What it does |
 |---|---|
@@ -1273,9 +1273,9 @@ async fn main() {
 
 ## Skill Marketplace
 
-The `marketplace` module provides a runtime-discoverable registry of named
-skills, a filesystem loader, a task-description-based matcher, and a pipeline
-composer.
+The `marketplace` module has a registry of named skills found at runtime,
+a loader that reads them from disk, a matcher that picks skills from a task
+description, and a way to chain them.
 
 ```rust,no_run
 use llm_agent_runtime::marketplace::{Skill, SkillRegistry, SkillMatcher, SkillComposer};
@@ -1369,9 +1369,8 @@ with no meaningful overlap.
 
 ## Tool Validation
 
-The `tool_validator` module provides JSON-schema-like validation of tool call
-arguments before execution, helping catch malformed inputs at the boundary
-rather than inside handler logic.
+The `tool_validator` module checks tool call arguments against a JSON-schema-like
+spec before the tool runs. Bad input is caught at the edge, not inside your handler.
 
 ### Key Types
 
@@ -1420,9 +1419,8 @@ assert!(errors.is_empty());
 
 ## Agent Metrics
 
-The `agent_metrics` module provides structured, per-agent metrics tracking for
-multi-agent systems.  Unlike the crate-level `RuntimeMetrics` (which aggregates
-across all sessions), `AgentMetrics` tracks each agent independently.
+The `agent_metrics` module tracks metrics per agent. `RuntimeMetrics` adds up
+all sessions. `AgentMetrics` tracks each agent on its own.
 
 ### Key Types
 
@@ -1474,13 +1472,13 @@ println!("{} agents tracked", all.len());
 
 ## Status
 
-The crate is large (about 100 public modules); the core path is `AgentRuntime`, the ReAct and native tool-calling loops, memory, graph, orchestrator, providers and MCP described above, while many later modules are standalone utilities. The test suite runs on GitLab CI with every feature enabled. Pin a version and run your own tests before depending on the less-used modules.
+The crate is big (about 100 public modules). The core is `AgentRuntime`, the ReAct and native tool-calling loops, memory, graph, orchestrator, providers and MCP above. Many later modules are standalone utilities. Tests run on GitLab CI with every feature on. Pin a version and run your own tests before relying on the less-used modules.
 
 ---
 
 ## Contributing
 
-Contributions are welcome. Please follow these guidelines:
+Contributions welcome. Guidelines:
 
 1. **Fork and branch**: create a feature branch from `main` (`git checkout -b feat/my-feature`).
 2. **Stay zero-panic**: the project enforces `clippy::unwrap_used = "deny"` and `clippy::panic = "deny"` in all non-test code. Use `?`, `if let`, or `match` instead of `.unwrap()` / `.expect()` in `src/`.
@@ -1501,8 +1499,8 @@ For bug reports, please include the `cargo --version`, `rustc --version`, your `
 
 ## Tool Registry
 
-The built-in `ToolRegistry` lets you register named async tools and call them by name.
-Three tools ship out of the box: `echo`, `calculator`, and `timestamp`.
+`ToolRegistry` holds named async tools you call by name.
+Three come built in: `echo`, `calculator` and `timestamp`.
 
 ```text
   ┌──────────────────────────────────────────────────────────┐
@@ -1588,8 +1586,8 @@ let registry = runtime.tool_registry();
 
 ## Agent Checkpointing
 
-`CheckpointManager` wraps a pluggable `CheckpointStore` with auto-checkpointing
-and per-agent rotation of old checkpoints.
+`CheckpointManager` wraps a swappable `CheckpointStore`. It saves checkpoints
+on its own and rotates out old ones per agent.
 
 ```text
   ┌─────────────────────────────────────────────────────────────┐
@@ -1663,7 +1661,7 @@ let mgr = runtime.checkpoint();
 
 ## Vector Similarity Memory
 
-`agent-runtime` includes a full vector similarity memory subsystem in `src/vector_memory.rs`.
+Vector similarity memory lives in `src/vector_memory.rs`.
 
 ```text
 Text Input
@@ -1731,7 +1729,7 @@ sim(a, b) = dot(a/|a|, b/|b|)  =  Σ aᵢbᵢ   (since |a|=|b|=1)
 
 ## Agent Supervisor Tree
 
-`agent-runtime` includes an Erlang-style supervisor in `src/supervisor.rs`.
+An Erlang-style supervisor lives in `src/supervisor.rs`.
 
 ```text
 Supervisor::start(children, strategy)
@@ -1813,7 +1811,7 @@ let runtime = AgentRuntime::quick(5, "my-model");
 
 ## Workflow Engine
 
-The `workflow` module provides a declarative graph-based agent workflow executor.
+The `workflow` module runs agent workflows you declare as a graph.
 
 ### Step Types
 
@@ -1877,7 +1875,7 @@ assert!(!ctx.evaluate_condition("status:fail")); // false
 
 ## Metrics Exporter
 
-The `metrics` module now exposes a Prometheus-style `MetricsRegistry` alongside the existing `RuntimeMetrics`.
+The `metrics` module has a Prometheus-style `MetricsRegistry` next to `RuntimeMetrics`.
 
 ### Metric Types
 
@@ -1918,9 +1916,8 @@ let prom = reg.prometheus_text();
 
 ## Multi-Agent Debate
 
-The `debate` module orchestrates **structured adversarial reasoning** where multiple
-agents argue assigned positions, score each other's arguments, and a neutral
-moderator synthesises the strongest points into a final answer.
+The `debate` module runs **structured debates**. Agents argue assigned sides and
+score each other. A neutral moderator merges the strongest points into a final answer.
 
 ### Protocol
 
@@ -1990,9 +1987,9 @@ async fn main() {
 
 ## Knowledge Graph
 
-The `knowledge` module provides a **lightweight in-memory directed graph** for
-storing entities and their relationships. It supports BFS shortest-path,
-subgraph extraction, substring search, and Graphviz DOT export.
+The `knowledge` module is a **small in-memory directed graph** of entities and
+their links. It does BFS shortest path, subgraph extraction, substring search
+and Graphviz DOT export.
 
 ### ASCII Diagram
 
@@ -2057,4 +2054,4 @@ println!("{}", g.to_dot());
 
 ## Hire the author
 
-**Need this kind of engineering on your product?** I take on a small number of client builds: LLM features, iOS apps and performance work, fixed price. [Services and pricing](https://tensorust.com/) · [Email](mailto:mattbusel@gmail.com) · [LinkedIn](https://www.linkedin.com/in/matthewbusel/)
+**Need this on your product?** I take a few client builds: LLM features, iOS apps, performance work. Fixed price. [Services and pricing](https://tensorust.com/) · [Email](mailto:mattbusel@gmail.com) · [LinkedIn](https://www.linkedin.com/in/matthewbusel/)
